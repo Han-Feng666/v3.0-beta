@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="hf_surface">#D9FFFFFF</color>
+    <color name="hf_surface_strong">#E8FFFFFF</color>
+    <color name="hf_border">#33000000</color>
+    <color name="hf_text_primary">#DE000000</color>
+    <color name="hf_text_secondary">#99000000</color>
+    <color name="hf_manual_rule">#CC0D47A1</color>
+    <color name="hf_import_rule">#CC2E7D32</color>
+    <color name="hf_selected">#33FFB300</color>
+    <color name="hf_background_start">#FFE6EEF9</color>
+    <color name="hf_background_end">#FFD8EDE8</color>
+</resources>

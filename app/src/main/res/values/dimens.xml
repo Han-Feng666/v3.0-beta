@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="page_horizontal_padding">16dp</dimen>
+    <dimen name="home_button_height">56dp</dimen>
+    <dimen name="home_button_max_width">320dp</dimen>
+    <dimen name="rank_row_height">24dp</dimen>
+    <dimen name="rank_card_collapsed_height">120dp</dimen>
+</resources>

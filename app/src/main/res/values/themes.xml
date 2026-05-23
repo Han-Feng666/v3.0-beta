@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.HanFengAdBlock" parent="Theme.Material3.Light.NoActionBar">
+        <item name="android:windowTranslucentStatus">false</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="colorPrimary">@color/hf_text_primary</item>
+        <item name="colorSurface">@color/hf_surface</item>
+        <item name="android:colorButtonNormal">@color/hf_surface</item>
+        <item name="colorButtonNormal">@color/hf_surface</item>
+        <item name="buttonStyle">@style/Widget.HanFeng.Button</item>
+        <item name="android:buttonStyle">@style/Widget.HanFeng.Button</item>
+        <item name="materialButtonStyle">@style/Widget.HanFeng.MaterialButton</item>
+    </style>
+
+    <style name="ThemeOverlay.HanFeng.Dialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="materialAlertDialogBodyTextStyle">@style/TextAppearance.HanFeng.DialogBody</item>
+        <item name="materialAlertDialogTitleTextStyle">@style/TextAppearance.HanFeng.DialogTitle</item>
+        <item name="backgroundTint">@color/hf_surface_strong</item>
+        <item name="colorOnSurface">@color/hf_text_primary</item>
+        <item name="buttonBarPositiveButtonStyle">@style/Widget.HanFeng.DialogButton</item>
+        <item name="buttonBarNegativeButtonStyle">@style/Widget.HanFeng.DialogButton</item>
+        <item name="buttonBarNeutralButtonStyle">@style/Widget.HanFeng.DialogButton</item>
+    </style>
+
+    <style name="TextAppearance.HanFeng.DialogTitle" parent="TextAppearance.Material3.TitleLarge">
+        <item name="android:textColor">@color/hf_text_primary</item>
+    </style>
+
+    <style name="TextAppearance.HanFeng.DialogBody" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textColor">@color/hf_text_primary</item>
+    </style>
+
+    <style name="Widget.HanFeng.DialogButton" parent="Widget.Material3.Button.TextButton.Dialog">
+        <item name="android:textColor">@color/hf_text_primary</item>
+        <item name="backgroundTint">@color/hf_surface</item>
+        <item name="strokeColor">@color/hf_border</item>
+        <item name="strokeWidth">1dp</item>
+    </style>
+
+    <style name="Widget.HanFeng.Button" parent="Widget.AppCompat.Button">
+        <item name="android:background">@drawable/bg_panel</item>
+        <item name="android:backgroundTint">@null</item>
+        <item name="backgroundTint">@null</item>
+        <item name="android:textColor">@color/hf_text_primary</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:paddingLeft">16dp</item>
+        <item name="android:paddingRight">16dp</item>
+    </style>
+
+    <style name="Widget.HanFeng.MaterialButton" parent="Widget.Material3.Button">
+        <item name="android:background">@drawable/bg_panel</item>
+        <item name="backgroundTint">@color/hf_surface</item>
+        <item name="strokeColor">@color/hf_border</item>
+        <item name="strokeWidth">1dp</item>
+        <item name="android:textColor">@color/hf_text_primary</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="cornerRadius">16dp</item>
+    </style>
+</resources>

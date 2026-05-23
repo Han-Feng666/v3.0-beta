@@ -1,0 +1,294 @@
+package com.HanFeng.security
+
+import android.content.Context
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import com.HanFeng.data.HttpsMitmRepository
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x509.BasicConstraints
+import org.bouncycastle.asn1.x509.Extension
+import org.bouncycastle.asn1.x509.GeneralName
+import org.bouncycastle.asn1.x509.GeneralNames
+import org.bouncycastle.asn1.x509.KeyUsage
+import org.bouncycastle.cert.X509CertificateHolder
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509ExtensionUtils
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.OutputStream
+import java.math.BigInteger
+import java.security.KeyFactory
+import java.security.KeyPair
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.PublicKey
+import java.security.Security
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
+import java.security.spec.X509EncodedKeySpec
+import java.util.Date
+
+object CertificateAuthorityManager {
+    private const val KEYSTORE_TYPE = "PKCS12"
+    private const val CERT_ALIAS = "hanfeng_mitm_ca"
+    private const val CERT_PASSWORD = "hanfeng_https_mitm"
+    private const val CERT_DIR = "certs"
+    private const val CERT_FILE_NAME = "HanFeng.p12"
+    private const val CERT_PUBLIC_FILE_NAME = "HanFeng.cer"
+    private const val DOWNLOAD_SUBDIR = "HanFeng"
+    private val bcProvider by lazy(LazyThreadSafetyMode.NONE) { BouncyCastleProvider() }
+
+    fun ensureCaInstalledFiles(context: Context): Result<GeneratedCertificate> {
+        return runCatching {
+            val certDir = File(context.filesDir, CERT_DIR).apply { mkdirs() }
+            val certFile = File(certDir, CERT_FILE_NAME)
+            val publicCertFile = File(certDir, CERT_PUBLIC_FILE_NAME)
+            if (!isValidCertificateFile(certFile) || !isValidCertificateFile(publicCertFile)) {
+                val generated = generateCaCertificate()
+                storePkcs12(certFile, generated.keyPair, generated.certificate)
+                storePublicCertificate(publicCertFile, generated.certificate)
+            }
+            HttpsMitmRepository.saveCertificateMeta(context, CERT_ALIAS, CERT_PASSWORD, CERT_PUBLIC_FILE_NAME, CERT_FILE_NAME)
+            val downloadDisplayPath = exportCertificateToDownloads(context, publicCertFile)
+            GeneratedCertificate(
+                filePath = publicCertFile.absolutePath,
+                downloadDisplayPath = downloadDisplayPath
+            )
+        }
+    }
+
+    fun isCaInstalledInSystem(context: Context): Boolean {
+        return runCatching {
+            val certDir = File(context.filesDir, CERT_DIR)
+            val publicCertFile = File(certDir, CERT_PUBLIC_FILE_NAME)
+            if (!isValidCertificateFile(publicCertFile)) return false
+            val expectedCertificate = FileInputStream(publicCertFile).use { input ->
+                CertificateFactory.getInstance("X.509").generateCertificate(input) as X509Certificate
+            }
+            val androidCaStore = KeyStore.getInstance("AndroidCAStore")
+            androidCaStore.load(null, null)
+            val aliases = androidCaStore.aliases()
+            while (aliases.hasMoreElements()) {
+                val alias = aliases.nextElement()
+                val installed = androidCaStore.getCertificate(alias) as? X509Certificate ?: continue
+                if (certificateMatchesExpected(installed, expectedCertificate)) {
+                    return@runCatching true
+                }
+            }
+            false
+        }.getOrDefault(false)
+    }
+
+    fun syncInstalledState(context: Context): Boolean {
+        val installed = isCaInstalledInSystem(context)
+        if (installed) {
+            HttpsMitmRepository.markCertificateInstalled(context)
+        }
+        return installed
+    }
+
+    private fun certificateMatchesExpected(installed: X509Certificate, expected: X509Certificate): Boolean {
+        if (installed.encoded.contentEquals(expected.encoded)) return true
+        if (installed.subjectX500Principal == expected.subjectX500Principal && installed.publicKey.encoded.contentEquals(expected.publicKey.encoded)) {
+            return true
+        }
+        if (installed.issuerX500Principal == expected.issuerX500Principal && installed.serialNumber == expected.serialNumber) {
+            return true
+        }
+        val expectedSubject = expected.subjectX500Principal.name
+        val installedSubject = installed.subjectX500Principal.name
+        if (installedSubject.contains("HanFeng HTTPS MITM CA") && installed.publicKey.encoded.contentEquals(expected.publicKey.encoded)) {
+            return true
+        }
+        if (installedSubject.contains("HanFeng HTTPS MITM CA") && expectedSubject.contains("HanFeng HTTPS MITM CA")) {
+            return true
+        }
+        return false
+    }
+
+    private fun isValidCertificateFile(file: File): Boolean {
+        return file.exists() && file.length() > 0
+    }
+
+    fun ensureLeafCertificate(context: Context, hostName: String): Result<GeneratedLeafCertificate> {
+        return runCatching {
+            val normalizedHost = hostName.trim().lowercase()
+            require(normalizedHost.isNotBlank()) { "host is blank" }
+            val certDir = File(context.filesDir, CERT_DIR).apply { mkdirs() }
+            val leafFile = File(certDir, buildLeafFileName(normalizedHost))
+            if (!isValidCertificateFile(leafFile)) {
+                val caBundle = runCatching { loadCaBundle(context) }
+                    .getOrElse {
+                        ensureCaInstalledFiles(context).getOrThrow()
+                        loadCaBundle(context)
+                    }
+                val leafKeyPair = generateRsaKeyPair()
+                val leafCertificate = generateLeafCertificate(normalizedHost, caBundle, leafKeyPair)
+                storePkcs12WithChain(leafFile, buildLeafAlias(normalizedHost), leafKeyPair.private, arrayOf(leafCertificate, caBundle.certificate))
+            }
+            GeneratedLeafCertificate(host = normalizedHost, filePath = leafFile.absolutePath)
+        }
+    }
+
+    private fun generateCaCertificate(): GeneratedKeyMaterial {
+        val keyPair = generateRsaKeyPair()
+        val now = System.currentTimeMillis()
+        val notBefore = Date(now - 60_000L)
+        val notAfter = Date(now + 3650L * 24L * 60L * 60L * 1000L)
+        val issuer = X500Name("CN=HanFeng HTTPS MITM CA, O=HanFeng, C=CN")
+        val certificateBuilder = JcaX509v3CertificateBuilder(
+            issuer,
+            BigInteger.valueOf(now),
+            notBefore,
+            notAfter,
+            issuer,
+            keyPair.public
+        )
+        val extUtils = JcaX509ExtensionUtils()
+        certificateBuilder.addExtension(Extension.subjectKeyIdentifier, false, extUtils.createSubjectKeyIdentifier(keyPair.public))
+        certificateBuilder.addExtension(Extension.authorityKeyIdentifier, false, extUtils.createAuthorityKeyIdentifier(keyPair.public))
+        certificateBuilder.addExtension(Extension.basicConstraints, true, BasicConstraints(true))
+        val holder: X509CertificateHolder = certificateBuilder.build(
+            JcaContentSignerBuilder("SHA256withRSA").setProvider(bcProvider).build(keyPair.private)
+        )
+        val certificate = JcaX509CertificateConverter().setProvider(bcProvider).getCertificate(holder)
+        certificate.verify(keyPair.public)
+        return GeneratedKeyMaterial(keyPair, certificate)
+    }
+
+    private fun generateLeafCertificate(hostName: String, caBundle: CaBundle, leafKeyPair: KeyPair): X509Certificate {
+        val now = System.currentTimeMillis()
+        val notBefore = Date(now - 60_000L)
+        val notAfter = Date(now + 90L * 24L * 60L * 60L * 1000L)
+        val subject = X500Name("CN=$hostName, O=HanFeng HTTPS MITM, C=CN")
+        val builder = JcaX509v3CertificateBuilder(
+            X500Name(caBundle.certificate.subjectX500Principal.name),
+            BigInteger.valueOf(now xor hostName.hashCode().toLong()),
+            notBefore,
+            notAfter,
+            subject,
+            leafKeyPair.public
+        )
+        val extUtils = JcaX509ExtensionUtils()
+        builder.addExtension(Extension.subjectKeyIdentifier, false, extUtils.createSubjectKeyIdentifier(leafKeyPair.public))
+        builder.addExtension(Extension.authorityKeyIdentifier, false, extUtils.createAuthorityKeyIdentifier(caBundle.certificate))
+        builder.addExtension(Extension.basicConstraints, true, BasicConstraints(false))
+        builder.addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment))
+        builder.addExtension(
+            Extension.subjectAlternativeName,
+            false,
+            GeneralNames(GeneralName(GeneralName.dNSName, hostName))
+        )
+        val holder = builder.build(
+            JcaContentSignerBuilder("SHA256withRSA").setProvider(bcProvider).build(caBundle.privateKey)
+        )
+        return JcaX509CertificateConverter().setProvider(bcProvider).getCertificate(holder)
+    }
+
+    private fun generateRsaKeyPair(): KeyPair {
+        val keyPairGenerator = KeyPairGenerator.getInstance("RSA")
+        keyPairGenerator.initialize(2048)
+        return keyPairGenerator.generateKeyPair()
+    }
+
+    private fun loadCaBundle(context: Context): CaBundle {
+        val certDir = File(context.filesDir, CERT_DIR)
+        val caKeystoreName = HttpsMitmRepository.getCaKeystoreFileName(context) ?: CERT_FILE_NAME
+        val caKeystoreFile = File(certDir, caKeystoreName)
+        require(caKeystoreFile.exists() && caKeystoreFile.length() > 0) {
+            "CA keystore file missing or empty: ${caKeystoreFile.absolutePath}"
+        }
+        val keyStore = KeyStore.getInstance(KEYSTORE_TYPE)
+        FileInputStream(caKeystoreFile).use { input ->
+            keyStore.load(input, CERT_PASSWORD.toCharArray())
+        }
+        val privateKey = keyStore.getKey(CERT_ALIAS, CERT_PASSWORD.toCharArray()) as? PrivateKey
+            ?: throw IllegalStateException("CA keystore missing entry '$CERT_ALIAS'")
+        val certificate = keyStore.getCertificate(CERT_ALIAS) as? X509Certificate
+            ?: throw IllegalStateException("CA keystore certificate missing for entry '$CERT_ALIAS'")
+        return CaBundle(privateKey, certificate)
+    }
+
+    private fun storePkcs12(file: File, keyPair: KeyPair, certificate: X509Certificate) {
+        val keyStore = KeyStore.getInstance(KEYSTORE_TYPE)
+        keyStore.load(null, null)
+        keyStore.setKeyEntry(CERT_ALIAS, keyPair.private, CERT_PASSWORD.toCharArray(), arrayOf(certificate))
+        FileOutputStream(file).use { output ->
+            keyStore.store(output, CERT_PASSWORD.toCharArray())
+        }
+    }
+
+    private fun storePkcs12WithChain(file: File, alias: String, privateKey: PrivateKey, chain: Array<X509Certificate>) {
+        val keyStore = KeyStore.getInstance(KEYSTORE_TYPE)
+        keyStore.load(null, null)
+        keyStore.setKeyEntry(alias, privateKey, CERT_PASSWORD.toCharArray(), chain)
+        FileOutputStream(file).use { output ->
+            keyStore.store(output, CERT_PASSWORD.toCharArray())
+        }
+    }
+
+    private fun storePublicCertificate(file: File, certificate: X509Certificate) {
+        FileOutputStream(file).use { output ->
+            output.write(certificate.encoded)
+        }
+    }
+
+    private fun exportCertificateToDownloads(context: Context, sourceFile: File): String? {
+        return runCatching {
+            val bytes = sourceFile.readBytes()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = android.content.ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, "HanFeng.crt")
+                    put(MediaStore.Downloads.MIME_TYPE, "application/x-x509-ca-cert")
+                    put(MediaStore.Downloads.RELATIVE_PATH, "Download/$DOWNLOAD_SUBDIR")
+                }
+                val resolver = context.contentResolver
+                val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                val itemUri = resolver.insert(collection, values)
+                    ?: return@runCatching "下载/$DOWNLOAD_SUBDIR/HanFeng.crt"
+                resolver.openOutputStream(itemUri, "w")?.use { output ->
+                    output.write(bytes)
+                }
+                "下载/$DOWNLOAD_SUBDIR/HanFeng.crt"
+            } else {
+                val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val targetDir = File(downloadDir, DOWNLOAD_SUBDIR).apply { mkdirs() }
+                val targetFile = File(targetDir, "HanFeng.crt")
+                FileOutputStream(targetFile).use { output: java.io.OutputStream ->
+                    output.write(bytes)
+                }
+                targetFile.absolutePath
+            }
+        }.getOrNull()
+    }
+
+    private fun buildLeafAlias(hostName: String): String = "leaf_${hostName.replace(Regex("[^a-z0-9._-]"), "_")}"
+
+    private fun buildLeafFileName(hostName: String): String = "leaf_${hostName.replace(Regex("[^a-z0-9._-]"), "_")}.p12"
+
+    private data class GeneratedKeyMaterial(
+        val keyPair: KeyPair,
+        val certificate: X509Certificate
+    )
+
+    private data class CaBundle(
+        val privateKey: PrivateKey,
+        val certificate: X509Certificate
+    )
+
+    data class GeneratedCertificate(
+        val filePath: String,
+        val downloadDisplayPath: String?
+    )
+
+    data class GeneratedLeafCertificate(
+        val host: String,
+        val filePath: String
+    )
+}

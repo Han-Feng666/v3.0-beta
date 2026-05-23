@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ImageView
+        android:id="@+id/homeBackground"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="主界面背景图"
+        android:scaleType="centerCrop"
+        android:src="@drawable/bg_fallback_home" />
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/homeContent"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:padding="@dimen/page_horizontal_padding">
+
+        <LinearLayout
+            android:id="@+id/homeButtons"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintVertical_bias="0.58">
+
+            <Button
+                android:id="@+id/btnToggle"
+                android:layout_width="220dp"
+                android:layout_height="@dimen/home_button_height"
+                android:layout_marginBottom="12dp"
+                android:background="@drawable/bg_panel"
+                android:backgroundTint="@null"
+                android:minWidth="180dp"
+                android:paddingHorizontal="32dp"
+                android:text="开启拦截"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="18sp" />
+
+            <LinearLayout
+                android:layout_width="220dp"
+                android:layout_height="@dimen/home_button_height"
+                android:layout_marginBottom="12dp"
+                android:background="@drawable/bg_panel"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="32dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:gravity="center_horizontal"
+                    android:text="MITM 模式"
+                    android:textColor="@color/hf_text_primary"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <Switch
+                    android:id="@+id/switchHttpDecrypt"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="false"
+                    android:showText="false" />
+
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btnGuide"
+                android:layout_width="220dp"
+                android:layout_height="@dimen/home_button_height"
+                android:layout_marginBottom="12dp"
+                android:background="@drawable/bg_panel"
+                android:backgroundTint="@null"
+                android:minWidth="180dp"
+                android:paddingHorizontal="32dp"
+                android:text="使用说明"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="18sp" />
+
+            <Button
+                android:id="@+id/btnWhitelist"
+                android:layout_width="220dp"
+                android:layout_height="@dimen/home_button_height"
+                android:layout_marginBottom="12dp"
+                android:background="@drawable/bg_panel"
+                android:backgroundTint="@null"
+                android:minWidth="180dp"
+                android:paddingHorizontal="32dp"
+                android:text="黑白名单"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="18sp" />
+
+            <LinearLayout
+                android:id="@+id/homeStatusCard"
+                android:layout_width="220dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:background="@drawable/bg_panel"
+                android:orientation="vertical"
+                android:paddingHorizontal="16dp"
+                android:paddingVertical="14dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="当前状态"
+                        android:textColor="@color/hf_text_primary"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/textVersion"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="v3.0-beta"
+                        android:textColor="@color/hf_text_secondary"
+                        android:textSize="14sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/textHomeStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:lineSpacingExtra="3dp"
+                    android:text="工作状态：未开启\n拦截模式：未启用\n证书状态：未安装"
+                    android:textColor="@color/hf_text_primary"
+                    android:textSize="14sp" />
+            </LinearLayout>
+        </LinearLayout>
+    </androidx.constraintlayout.widget.ConstraintLayout>
+</FrameLayout>

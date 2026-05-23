@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:minHeight="24dp"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingLeft="1dp"
+    android:paddingTop="0dp"
+    android:paddingRight="4dp"
+    android:paddingBottom="0dp">
+
+    <FrameLayout
+        android:layout_width="28dp"
+        android:layout_height="match_parent">
+
+        <TextView
+            android:id="@+id/rankLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <ImageView
+            android:id="@+id/rankMedal"
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:layout_gravity="center"
+            android:contentDescription="排名图标"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/rankName"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="3dp"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="10sp" />
+
+    <TextView
+        android:id="@+id/rankValue"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="2dp"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="10sp"
+        android:textStyle="bold" />
+</LinearLayout>

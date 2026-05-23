@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:paddingLeft="16dp"
+    android:paddingTop="8dp"
+    android:paddingRight="16dp"
+    android:paddingBottom="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="可疑域名"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnBack"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:background="@drawable/bg_button"
+            android:backgroundTint="@null"
+            android:minWidth="64dp"
+            android:text="返回"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary" />
+    </LinearLayout>
+
+    <EditText
+        android:id="@+id/searchInput"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/bg_panel"
+        android:hint="搜索域名"
+        android:padding="12dp"
+        android:textColor="@color/hf_text_primary"
+        android:textColorHint="@color/hf_text_secondary" />
+
+    <TextView
+        android:id="@+id/selectionSummary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="已选择 0 项，可选 0 项，当前可见 0 项"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="14sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <CheckBox
+            android:id="@+id/checkOnlyUnadded"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:buttonTint="@color/hf_checkbox_tint"
+            android:text="只看未添加"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="13sp" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="1dp" />
+
+        <CheckBox
+            android:id="@+id/checkOnlyAdded"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:buttonTint="@color/hf_checkbox_tint"
+            android:text="只看已添加"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <CheckBox
+        android:id="@+id/checkOnlyNovelApps"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:buttonTint="@color/hf_checkbox_tint"
+        android:text="只看小说 App 专项样本"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="13sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnSelectVisible"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_button"
+            android:backgroundTint="@null"
+            android:text="全选可见"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="14sp" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="1dp" />
+
+        <Button
+            android:id="@+id/btnClearSelection"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_button"
+            android:backgroundTint="@null"
+            android:text="清空选择"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/btnAddSelected"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_panel"
+        android:backgroundTint="@null"
+        android:text="批量添加拦截规则"
+        android:textAllCaps="false"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="16sp" />
+
+    <TextView
+        android:id="@+id/emptyText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center"
+        android:text="暂无可疑域名"
+        android:textColor="@color/hf_text_secondary"
+        android:textSize="14sp"
+        android:visibility="gone" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/list"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="12dp"
+        android:layout_weight="1"
+        android:background="@drawable/bg_panel"
+        android:clipToPadding="false"
+        android:padding="8dp" />
+
+</LinearLayout>
