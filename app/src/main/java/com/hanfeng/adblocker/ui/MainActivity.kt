@@ -20,6 +20,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import com.HanFeng.R
+import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.HttpDecryptRouteRepository
 import com.HanFeng.data.HttpsDecryptRouteRepository
 import com.HanFeng.data.HttpsMitmRepository
@@ -142,6 +143,7 @@ class MainActivity : AppCompatActivity() {
     private fun startVpnService() {
         val serviceIntent = Intent(this, AdBlockVpnService::class.java)
         runCatching {
+            FeatureSettingsRepository.setAdBlockEnabled(this, true)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ContextCompat.startForegroundService(this, serviceIntent)
             } else {
@@ -150,6 +152,7 @@ class MainActivity : AppCompatActivity() {
         }.onSuccess {
             Toast.makeText(this, "正在开启拦截", Toast.LENGTH_SHORT).show()
         }.onFailure {
+            FeatureSettingsRepository.setAdBlockEnabled(this, false)
             AdBlockVpnService.isRunning = false
             LogRepository.append(this, "Start VPN service failed: ${it.message ?: it.javaClass.simpleName}")
             Toast.makeText(this, "开启拦截失败", Toast.LENGTH_SHORT).show()
