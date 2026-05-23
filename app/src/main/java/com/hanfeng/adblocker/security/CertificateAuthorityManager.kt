@@ -33,6 +33,7 @@ import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.X509EncodedKeySpec
 import java.util.Date
+import java.util.concurrent.ConcurrentHashMap
 
 object CertificateAuthorityManager {
     private const val KEYSTORE_TYPE = "PKCS12"
@@ -120,10 +121,10 @@ object CertificateAuthorityManager {
     }
 
     fun ensureLeafCertificate(context: Context, hostName: String): Result<GeneratedLeafCertificate> {
+        val normalizedHost = hostName.trim().lowercase()
+        require(normalizedHost.isNotBlank()) { "host is blank" }
+        leafCertCache[normalizedHost]?.let { return Result.success(it) }
         return runCatching {
-            val normalizedHost = hostName.trim().lowercase()
-            require(normalizedHost.isNotBlank()) { "host is blank" }
-            leafCertCache[normalizedHost]?.let { return@runCatching it }
             val certDir = File(context.filesDir, CERT_DIR).apply { mkdirs() }
             val leafFile = File(certDir, buildLeafFileName(normalizedHost))
             if (!isValidCertificateFile(leafFile)) {
