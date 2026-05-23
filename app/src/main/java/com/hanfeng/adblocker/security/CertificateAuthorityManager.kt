@@ -44,7 +44,7 @@ object CertificateAuthorityManager {
     private const val CERT_PUBLIC_FILE_NAME = "HanFeng.cer"
     private const val DOWNLOAD_SUBDIR = "HanFeng"
     private val bcProvider by lazy(LazyThreadSafetyMode.NONE) { BouncyCastleProvider() }
-    private val leafCertCache = ConcurrentHashMap<String, GeneratedLeafCertificate>(512, 0.75f, true)
+    private val leafCertCache = ConcurrentHashMap<String, GeneratedLeafCertificate>(512, 0.75f, 16)
 
     fun ensureCaInstalledFiles(context: Context): Result<GeneratedCertificate> {
         return runCatching {
