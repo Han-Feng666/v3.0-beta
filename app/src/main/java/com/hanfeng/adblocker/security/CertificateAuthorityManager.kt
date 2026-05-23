@@ -43,6 +43,7 @@ object CertificateAuthorityManager {
     private const val CERT_PUBLIC_FILE_NAME = "HanFeng.cer"
     private const val DOWNLOAD_SUBDIR = "HanFeng"
     private val bcProvider by lazy(LazyThreadSafetyMode.NONE) { BouncyCastleProvider() }
+    private val leafCertCache = ConcurrentHashMap<String, GeneratedLeafCertificate>(512, 0.75f, true)
 
     fun ensureCaInstalledFiles(context: Context): Result<GeneratedCertificate> {
         return runCatching {
@@ -86,11 +87,13 @@ object CertificateAuthorityManager {
     }
 
     fun syncInstalledState(context: Context): Boolean {
-        val installed = isCaInstalledInSystem(context)
-        if (installed) {
+        val installed = HttpsMitmRepository.isCertificateInstalled(context)
+        if (installed) return true
+        val actuallyInstalled = isCaInstalledInSystem(context)
+        if (actuallyInstalled) {
             HttpsMitmRepository.markCertificateInstalled(context)
         }
-        return installed
+        return actuallyInstalled
     }
 
     private fun certificateMatchesExpected(installed: X509Certificate, expected: X509Certificate): Boolean {
@@ -120,6 +123,7 @@ object CertificateAuthorityManager {
         return runCatching {
             val normalizedHost = hostName.trim().lowercase()
             require(normalizedHost.isNotBlank()) { "host is blank" }
+            leafCertCache[normalizedHost]?.let { return@runCatching it }
             val certDir = File(context.filesDir, CERT_DIR).apply { mkdirs() }
             val leafFile = File(certDir, buildLeafFileName(normalizedHost))
             if (!isValidCertificateFile(leafFile)) {
@@ -132,7 +136,13 @@ object CertificateAuthorityManager {
                 val leafCertificate = generateLeafCertificate(normalizedHost, caBundle, leafKeyPair)
                 storePkcs12WithChain(leafFile, buildLeafAlias(normalizedHost), leafKeyPair.private, arrayOf(leafCertificate, caBundle.certificate))
             }
-            GeneratedLeafCertificate(host = normalizedHost, filePath = leafFile.absolutePath)
+            GeneratedLeafCertificate(host = normalizedHost, filePath = leafFile.absolutePath).also {
+                leafCertCache[normalizedHost] = it
+                while (leafCertCache.size > 256) {
+                    val firstKey = leafCertCache.entries.firstOrNull()?.key ?: break
+                    leafCertCache.remove(firstKey)
+                }
+            }
         }
     }
 

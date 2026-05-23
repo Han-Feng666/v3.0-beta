@@ -1,6 +1,8 @@
 package com.HanFeng.ui
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.widget.Button
 import android.widget.ImageView
@@ -17,6 +19,8 @@ import com.HanFeng.security.CertificateAuthorityManager
 import com.HanFeng.service.AdBlockVpnService
 
 class HomeFragment : Fragment(R.layout.fragment_home) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var statusRefreshRunnable: Runnable? = null
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         val activity = requireActivity() as MainActivity
         view.findViewById<ImageView>(R.id.homeBackground).applyCustomAssetBackground("custom/home_background")
@@ -52,12 +56,41 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         }
         view.findViewById<TextView>(R.id.textHomeStatus)?.let(::updateStatusText)
         attachHttpDecryptSwitchListener()
+        startPeriodicStatusRefresh()
     }
 
     override fun onResume() {
         super.onResume()
         view?.findViewById<Button>(R.id.btnToggle)?.let(::updateToggleText)
         view?.findViewById<TextView>(R.id.textHomeStatus)?.let(::updateStatusText)
+        startPeriodicStatusRefresh()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopPeriodicStatusRefresh()
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        stopPeriodicStatusRefresh()
+    }
+
+    private fun startPeriodicStatusRefresh() {
+        statusRefreshRunnable?.let { mainHandler.removeCallbacks(it) }
+        statusRefreshRunnable = Runnable {
+            view?.findViewById<Button>(R.id.btnToggle)?.let(::updateToggleText)
+            view?.findViewById<TextView>(R.id.textHomeStatus)?.let(::updateStatusText)
+            if (isAdded && view != null) {
+                mainHandler.postDelayed(statusRefreshRunnable!!, 2000L)
+            }
+        }
+        mainHandler.post(statusRefreshRunnable!!)
+    }
+
+    private fun stopPeriodicStatusRefresh() {
+        statusRefreshRunnable?.let { mainHandler.removeCallbacks(it) }
+        statusRefreshRunnable = null
     }
 
     private fun updateToggleText(toggle: Button) {
@@ -68,8 +101,8 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         val ctx = context ?: return
         val vpnRunning = AdBlockVpnService.isRunning
         val httpDecryptEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(ctx)
-        val certificateInstalled = CertificateAuthorityManager.syncInstalledState(ctx) ||
-            HttpsMitmRepository.isCertificateInstalled(ctx)
+        val certificateInstalled = HttpsMitmRepository.isCertificateInstalled(ctx) ||
+            CertificateAuthorityManager.syncInstalledState(ctx)
         val workStatus = if (vpnRunning) "运行中" else "未开启"
         val interceptMode = when {
             !vpnRunning -> "未启用"

@@ -174,6 +174,7 @@ class AdBlockVpnService : VpnService() {
     private fun startVpn() {
         if (vpnInterface != null && packetJob?.isActive == true) {
             isRunning = true
+            LogRepository.append(this, "VPN start called while already running")
             return
         }
         val foregroundStarted = runCatching {
@@ -204,12 +205,20 @@ class AdBlockVpnService : VpnService() {
             runCatching { runPacketLoop() }
                 .onFailure { error ->
                     LogRepository.append(this@AdBlockVpnService, "VPN loop crashed: ${error.message ?: error.javaClass.simpleName}")
-                    FeatureSettingsRepository.setAdBlockEnabled(this@AdBlockVpnService, true)
+                    FeatureSettingsRepository.setAdBlockEnabled(this@AdBlockVpnService, false)
                     stopVpn()
                 }
         }
         HttpsMitmController.onVpnStarted(this)
         LogRepository.append(this, "VPN started")
+        scope.launch {
+            while (isRunning && scope.isActive) {
+                kotlinx.coroutines.delay(30_000L)
+                if (isRunning) {
+                    LogRepository.append(this@AdBlockVpnService, "VPN heartbeat: still running")
+                }
+            }
+        }
     }
 
     private fun reloadVpn() {
