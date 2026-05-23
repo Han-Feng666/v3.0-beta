@@ -19,8 +19,6 @@ import com.HanFeng.security.CertificateAuthorityManager
 import com.HanFeng.service.AdBlockVpnService
 
 class HomeFragment : Fragment(R.layout.fragment_home) {
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private var statusRefreshRunnable: Runnable? = null
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         val activity = requireActivity() as MainActivity
         view.findViewById<ImageView>(R.id.homeBackground).applyCustomAssetBackground("custom/home_background")
@@ -40,13 +38,13 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         }
         toggle.setOnClickListener {
             activity.requestToggleVpn()
-            updateToggleText(toggle)
-            toggle.postDelayed({ updateToggleText(toggle) }, 300)
-            toggle.postDelayed({ updateToggleText(toggle) }, 1000)
+            updateAllStatus()
+            toggle.postDelayed({ updateAllStatus() }, 500)
+            toggle.postDelayed({ updateAllStatus() }, 1500)
         }
         view.findViewById<Button>(R.id.btnGuide).setOnClickListener { activity.showGuideDialog() }
         view.findViewById<Button>(R.id.btnWhitelist).setOnClickListener { activity.openWhitelist() }
-        updateToggleText(toggle)
+        updateAllStatus()
         view.findViewById<View>(R.id.homeButtons).apply {
             post {
                 val params = layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
@@ -56,41 +54,16 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         }
         view.findViewById<TextView>(R.id.textHomeStatus)?.let(::updateStatusText)
         attachHttpDecryptSwitchListener()
-        startPeriodicStatusRefresh()
     }
 
     override fun onResume() {
         super.onResume()
+        updateAllStatus()
+    }
+
+    private fun updateAllStatus() {
         view?.findViewById<Button>(R.id.btnToggle)?.let(::updateToggleText)
         view?.findViewById<TextView>(R.id.textHomeStatus)?.let(::updateStatusText)
-        startPeriodicStatusRefresh()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        stopPeriodicStatusRefresh()
-    }
-
-    override fun onDestroyView() {
-        super.onDestroyView()
-        stopPeriodicStatusRefresh()
-    }
-
-    private fun startPeriodicStatusRefresh() {
-        statusRefreshRunnable?.let { mainHandler.removeCallbacks(it) }
-        statusRefreshRunnable = Runnable {
-            view?.findViewById<Button>(R.id.btnToggle)?.let(::updateToggleText)
-            view?.findViewById<TextView>(R.id.textHomeStatus)?.let(::updateStatusText)
-            if (isAdded && view != null) {
-                mainHandler.postDelayed(statusRefreshRunnable!!, 2000L)
-            }
-        }
-        mainHandler.post(statusRefreshRunnable!!)
-    }
-
-    private fun stopPeriodicStatusRefresh() {
-        statusRefreshRunnable?.let { mainHandler.removeCallbacks(it) }
-        statusRefreshRunnable = null
     }
 
     private fun updateToggleText(toggle: Button) {
