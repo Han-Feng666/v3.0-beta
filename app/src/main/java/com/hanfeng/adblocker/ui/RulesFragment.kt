@@ -33,40 +33,11 @@ import com.HanFeng.model.BlockRule
 import com.HanFeng.model.RuleListItem
 import com.HanFeng.model.RuleSource
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import java.net.HttpURLConnection
-import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class RulesFragment : Fragment(R.layout.fragment_rules) {
-    companion object {
-        private const val currentRuleBranch = "260425-feat-improve-adguard-blocking"
-        private val githubRuleSources = listOf(
-            GitHubRuleSource(
-                name = "默认规则",
-                urls = listOf(
-                    "https://raw.githubusercontent.com/Han-Feng666/-/$currentRuleBranch/app/src/main/res/raw/default_safe_ad_rules.txt",
-                    "https://raw.githubusercontent.com/Han-Feng666/-/main/app/src/main/res/raw/default_safe_ad_rules.txt"
-                )
-            ),
-            GitHubRuleSource(
-                name = "保守规则",
-                urls = listOf(
-                    "https://raw.githubusercontent.com/Han-Feng666/-/$currentRuleBranch/domestic-safe-ad-sdk-rules.txt",
-                    "https://raw.githubusercontent.com/Han-Feng666/-/main/domestic-safe-ad-sdk-rules.txt"
-                )
-            ),
-            GitHubRuleSource(
-                name = "用户补充规则",
-                urls = listOf(
-                    "https://raw.githubusercontent.com/Han-Feng666/-/$currentRuleBranch/%E8%A7%84%E5%88%99.txt",
-                    "https://raw.githubusercontent.com/Han-Feng666/-/main/%E8%A7%84%E5%88%99.txt"
-                )
-            )
-        )
-    }
-
     private var mainActivity: MainActivity? = null
     private var _binding: FragmentRulesBinding? = null
     private val binding get() = _binding!!
@@ -239,28 +210,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     }
 
     private fun showRuleActionPanel() {
-        if (!isAdded) return
-        val dialogContext = safeDialogActivity() ?: return
-        try {
-            MaterialAlertDialogBuilder(dialogContext, R.style.ThemeOverlay_HanFeng_Dialog)
-                .setTitle("选择操作")
-                .setItems(arrayOf("从文件导入规则", "同步 GitHub 规则")) { _, which ->
-                    when (which) {
-                        0 -> launchImportRulePicker()
-                        1 -> downloadRulesFromGitHub()
-                    }
-                }
-                .show()
-        } catch (e: Exception) {
-            LogRepository.append(dialogContext, "Open rule action panel failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
-            Toast.makeText(dialogContext, "打开操作菜单失败：${e.message}", Toast.LENGTH_LONG).show()
-        }
+        launchImportRulePicker()
     }
 
     private fun launchImportRulePicker() {
         if (!isAdded) return
         try {
-            importLauncher.launch(arrayOf("text/*"))
+            importLauncher.launch(arrayOf("text/*", "application/octet-stream", "application/x-yaml", "application/yaml"))
         } catch (e: Exception) {
             val ctx = safeContext() ?: return
             LogRepository.append(ctx, "Launch import picker failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
@@ -590,73 +546,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         }
     }
 
-    private fun downloadRulesFromGitHub() {
-        val ctx = safeContext() ?: return
-        val appContext = ctx.applicationContext
-        val button = _binding?.btnRuleActions ?: return
-        button.isEnabled = false
-        Toast.makeText(ctx, "正在从 GitHub 同步规则...", Toast.LENGTH_SHORT).show()
-        viewLifecycleOwner.lifecycleScope.launch {
-            try {
-                val downloaded = withContext(Dispatchers.IO) {
-                    githubRuleSources.map { source -> source to downloadTextFromCandidateUrls(source.urls) }
-                }
-                val mergedContent = buildString {
-                    downloaded.forEach { (source, content) ->
-                        append("! Source: ${source.name}\n")
-                        append(content.trim())
-                        append("\n\n")
-                    }
-                }.trim()
-                if (mergedContent.isBlank()) error("empty-rule-content")
-                importAndAnalyzeRuleContent(
-                    sourceLabel = downloaded.joinToString { it.first.name },
-                    sourceUri = Uri.parse("https://github.com/Han-Feng666/-/tree/main"),
-                    content = mergedContent
-                )
-            } catch (e: Exception) {
-                LogRepository.append(appContext, "Download GitHub rules failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
-                if (isAdded) {
-                    safeContext()?.let {
-                        Toast.makeText(it, "从 GitHub 同步规则失败：${e.message}", Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
-            _binding?.btnRuleActions?.isEnabled = true
-        }
-    }
-
     private suspend fun readRuleContent(context: android.content.Context, uri: Uri): String? {
         return withContext(Dispatchers.IO) {
             context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-        }
-    }
-
-    private fun downloadTextFromCandidateUrls(urls: List<String>): String {
-        var lastError: Throwable? = null
-        urls.forEach { url ->
-            runCatching { return downloadTextFromUrl(url) }
-                .onFailure { lastError = it }
-        }
-        throw lastError ?: IllegalStateException("no-rule-url")
-    }
-
-    private fun downloadTextFromUrl(url: String): String {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10_000
-            readTimeout = 15_000
-            setRequestProperty("Accept", "text/plain")
-        }
-        return try {
-            val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
-            val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (connection.responseCode !in 200..299) {
-                error("http-${connection.responseCode}:${body.take(120)}")
-            }
-            body
-        } finally {
-            connection.disconnect()
         }
     }
 
@@ -784,11 +676,6 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private data class RuleListState(
         val inventory: RuleRepository.RuleInventory,
         val items: List<RuleListItem>
-    )
-
-    private data class GitHubRuleSource(
-        val name: String,
-        val urls: List<String>
     )
 
     private class FilterRuleAdapter(

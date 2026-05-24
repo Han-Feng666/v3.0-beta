@@ -131,7 +131,7 @@
                 android:layout_weight="1"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
-                android:text="导入/同步规则"
+                android:text="导入规则"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="16sp" />
