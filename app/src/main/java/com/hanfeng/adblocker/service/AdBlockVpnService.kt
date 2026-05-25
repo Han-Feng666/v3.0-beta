@@ -370,9 +370,10 @@ class AdBlockVpnService : VpnService() {
                 return
             }
 
-            val matchedRule = RuleRepository.findMatchingRule(this, question.domain, question.qType)
-            val isBlocked = RuleRepository.isBlocked(this, question.domain, question.qType)
+            // DNS 拦截决策优化：复用计算结果，避免重复调用
             val appName = resolveAppName(question.domain, info)
+            val matchedRule = RuleRepository.findMatchingRule(this, question.domain, question.qType)
+            val isBlocked = matchedRule != null
             val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, question.domain, appName)
             val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, vendor)
             val protectedNovelUrlBlock = RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(this, question.domain, null, appName)
@@ -383,8 +384,6 @@ class AdBlockVpnService : VpnService() {
                 return
             }
 
-            val appName = resolveAppName(question.domain, info)
-            val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, question.domain, appName)
             StatsRepository.recordRequest(this, vendor, appName)
             RuleRepository.reportUnknownVendorIfNeeded(this, vendor, question.domain, appName)
 
@@ -398,11 +397,15 @@ class AdBlockVpnService : VpnService() {
                 ?: readStaleCachedDnsResponse(question, info.payload)
                 ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
 
+            // CNAME 别名检查优化：复用 vendor 缓存
             val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
-            val blockedAliasTarget = aliasTargets.firstOrNull { aliasTarget ->
-                RuleRepository.isBlocked(this, aliasTarget) ||
-                    RuleRepository.shouldAggressivelyBlockForNovelApp(this, aliasTarget, appName, RuleRepository.classifyVendorFromHints(this, aliasTarget, appName))
-            }
+            val blockedAliasTarget = if (aliasTargets.isNotEmpty()) {
+                aliasTargets.firstOrNull { aliasTarget ->
+                    RuleRepository.isBlocked(this, aliasTarget) ||
+                        RuleRepository.shouldAggressivelyBlockForNovelApp(this, aliasTarget, appName, 
+                            RuleRepository.classifyVendorFromHints(this, aliasTarget, appName))
+                }
+            } else null
             if (blockedAliasTarget != null) {
                 val sinkholeResponse = DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return
                 output.write(PacketCodec.buildUdpResponse(info, sinkholeResponse))
@@ -512,17 +515,16 @@ class AdBlockVpnService : VpnService() {
             httpDecryptIpCache[ip]
         } ?: return false
         if (RuleRepository.isSensitiveAuthDomain(target.domain)) return false
-        // 检查是否匹配广告规则
+        // HTTP 连接拦截优化：复用计算结果，避免重复调用
         val appName = resolveAppName(target.domain, info)
         val matchedRule = RuleRepository.findMatchingRule(this, target.domain)
-        val isBlocked = RuleRepository.isBlocked(this, target.domain)
+        val isBlocked = matchedRule != null
+        val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, target.domain, appName)
         val aggressiveNovelBlock = if (!isBlocked) {
-            val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, target.domain, appName)
             RuleRepository.shouldAggressivelyBlockForNovelApp(this, target.domain, appName, vendor)
         } else false
         if (!isBlocked && !aggressiveNovelBlock) return false
         // 需要拦截
-        val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, target.domain, appName)
         StatsRepository.recordBlockedHttp(this, vendor, appName, 50 * 1024)
         LogRepository.append(
             this,
@@ -605,17 +607,16 @@ class AdBlockVpnService : VpnService() {
             }
             return
         }
-        // TCP SYN 阶段检查规则（早期拦截广告连接）
+        // TCP SYN 阶段检查规则（早期拦截广告连接）优化：复用计算结果
         if (info.tcpFlags.hasTcpFlag(TCP_FLAG_SYN) && !info.tcpFlags.hasTcpFlag(TCP_FLAG_ACK)) {
             val appName = resolveAppName(target.domain, info)
             val matchedRule = RuleRepository.findMatchingRule(this, target.domain)
-            val isBlocked = RuleRepository.isBlocked(this, target.domain)
+            val isBlocked = matchedRule != null
+            val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, target.domain, appName)
             val aggressiveNovelBlock = if (!isBlocked) {
-                val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, target.domain, appName)
                 RuleRepository.shouldAggressivelyBlockForNovelApp(this, target.domain, appName, vendor)
             } else false
             if (isBlocked || aggressiveNovelBlock) {
-                val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, target.domain, appName)
                 StatsRepository.recordBlockedHttp(this, vendor, appName, 64 * 1024)
                 LogRepository.append(
                     this,

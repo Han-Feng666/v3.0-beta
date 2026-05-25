@@ -1158,6 +1158,16 @@ object RuleRepository {
             return rules
         }
     }
+    
+    // DNS 拦截决策缓存（减少重复计算）
+    private val dnsBlockDecisionCache = object : LinkedHashMap<String, Pair<Boolean, Long>>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Boolean, Long>>?): Boolean {
+            return size > 512
+        }
+    }
+    private val dnsBlockDecisionLock = Any()
+    private const val DECISION_TTL_MS = 5000L // 5 秒缓存
+    }
 
     fun prewarmCaches(context: Context) {
         if (cachedRules != null) return
@@ -1335,6 +1345,17 @@ object RuleRepository {
                 val keyword = rule.keywordPattern?.lowercase() ?: return@any false
                 lowerDomain.contains(keyword)
             }
+    }
+
+    // 性能优化：快速拦截检查（跳过关键词规则，仅匹配精确规则和正则规则）
+    fun isBlockedFast(context: Context, domain: String, qType: Int? = null): Boolean {
+        if (isWhitelistedDomain(domain)) return false
+        val normalized = sanitizeDomain(domain) ?: return false
+        val ruleMap = getRuleMap(context)
+        return buildDomainCandidates(normalized)
+            .mapNotNull(ruleMap::get)
+            .any { ruleMatches(it, qType, null) } ||
+            getRegexRules(context).any { matchesRegexRule(it, normalized) }
     }
 
     fun isUrlBlocked(context: Context, host: String, path: String, appName: String? = null): Boolean {
