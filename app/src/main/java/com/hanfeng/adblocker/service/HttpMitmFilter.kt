@@ -630,6 +630,38 @@ object HttpMitmFilter {
             suspiciousScore += 2
             reasons += "json-ad-content"
         }
+        // 增强：JSON 广告响应检测 - 检测 JSON 结构中的广告字段
+        if (contentType.contains("json")) {
+            val jsonAdFields = listOf(
+                "\"ad\"", "\"ads\"", "\"adId\"", "\"adid\"", "\"ad_id\"", "\"adId\"",
+                "\"adName\"", "\"adname\"", "\"ad_name\"", "\"ad_title\"", "\"adtitle\"",
+                "\"adUrl\"", "\"adurl\"", "\"ad_url\"", "\"ad_link\"", "\"adlink\"",
+                "\"adImg\"", "\"adimg\"", "\"ad_img\"", "\"ad_image\"", "\"adimage\"",
+                "\"adLogo\"", "\"adlogo\"", "\"ad_logo\"", "\"ad_icon\"", "\"adicon\"",
+                "\"adDesc\"", "\"addesc\"", "\"ad_desc\"", "\"ad_description\"",
+                "\"adData\"", "\"addata\"", "\"ad_data\"", "\"adInfo\"", "\"adinfo\"",
+                "\"ad_info\"", "\"adInfos\"", "\"adinfos\"", "\"ad_infos\"",
+                "\"ads\"", "\"adList\"", "\"adlist\"", "\"ad_list\"", "\"adsList\"",
+                "\"material\"", "\"materialId\"", "\"material_id\"", "\"materialUrl\"",
+                "\"creative\"", "\"creativeId\"", "\"creative_id\"", "\"creativeUrl\"",
+                "\"landingPage\"", "\"landingpage\"", "\"landing_page\"", "\"landingUrl\"",
+                "\"clickUrl\"", "\"clickurl\"", "\"click_track_url\"", "\"showUrl\"",
+                "\"showurl\"", "\"show_url\"", "\"winNotice\"", "\"winnotice\"", "\"impression\"",
+                "\"bidPrice\"", "\"bidprice\"", "\"bid_price\"", "\"ecpm\"", "\"priceRatio\"",
+                "\"placementId\"", "\"placementid\"", "\"placement_id\"", "\"slotId\"",
+                "\"slotid\"", "\"slot_id\"", "\"unitId\"", "\"unitid\"", "\"unit_id\"",
+                "\"templateId\"", "\"templateid\"", "\"template_id\""
+            )
+            if (jsonAdFields.any { lowerBody.contains(it) }) {
+                suspiciousScore += 3
+                reasons += "json-ad-field"
+            }
+            // 检测JSON数组响应（通常包含多个广告）
+            if (lowerBody.trim().startsWith("[") && jsonAdFields.count { lowerBody.contains(it) } >= 2) {
+                suspiciousScore += 2
+                reasons += "json-ad-array"
+            }
+        }
         return Http2DataInspection(
             suspiciousScore = suspiciousScore,
             suspiciousReasons = reasons.distinct(),
@@ -866,20 +898,97 @@ object HttpMitmFilter {
     }
 
     private val SCRIPTLET_INJECTION = """<script>
-// AdGuard-like Scriptlets
+// AdGuard-like Scriptlets - 增强版
 (function(){
     try {
+        // 禁用 window.open
         window.open = function(){ return { closed: true }; };
+        // 禁用 sendBeacon
         if(window.navigator && window.navigator.sendBeacon) {
             window.navigator.sendBeacon = function(){ return true; };
+        }
+        // 禁用广告 SDK 常见全局变量
+        window.csj = window.csj || {};
+        window.csj.ad = function(){};
+        window.gdt = window.gdt || {};
+        window.gdt.AD = function(){};
+        window.pangle = window.pangle || {};
+        window.pangle.init = function(){};
+        window.gromore = window.gromore || {};
+        window.gromore.init = function(){};
+        window.topon = window.topon || {};
+        window.topon.init = function(){};
+        window.tradplus = window.tradplus || {};
+        window.tradplus.init = function(){};
+        window.applovin = window.applovin || {};
+        window.applovin.init = function(){};
+        window.mintegral = window.mintegral || {};
+        window.mintegral.init = function(){};
+        window.unityads = window.unityads || {};
+        window.unityads.init = function(){};
+        window.vungle = window.vungle || {};
+        window.vungle.init = function(){};
+        window.ironsrc = window.ironsrc || {};
+        window.ironsrc.init = function(){};
+        window.admob = window.admob || {};
+        window.admob.init = function(){};
+        // 禁用 setTimeout/setInterval 广告刷新
+        var originalSetTimeout = window.setTimeout;
+        var originalSetInterval = window.setInterval;
+        window.setTimeout = function(fn, delay) {
+            if(fn.toString().match(/ad|banner|splash|reward|promo/i)) return;
+            return originalSetTimeout.call(this, fn, delay);
+        };
+        window.setInterval = function(fn, delay) {
+            if(fn.toString().match(/ad|banner|splash|reward|promo/i)) return;
+            return originalSetInterval.call(this, fn, delay);
+        };
+        // 禁用 XMLHttpRequest/ad 请求
+        if(window.XMLHttpRequest) {
+            var origOpen = XMLHttpRequest.prototype.open;
+            XMLHttpRequest.prototype.open = function(method, url) {
+                if(typeof url === 'string' && url.match(/ad|ads|banner|splash|promo|tracking/i)) {
+                    this._isAdBlock = true;
+                }
+                return origOpen.apply(this, arguments);
+            };
+            var origSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.send = function() {
+                if(this._isAdBlock) return;
+                return origSend.apply(this, arguments);
+            };
+        }
+        // 禁用 Fetch API/ad 请求
+        if(window.fetch) {
+            var origFetch = window.fetch;
+            window.fetch = function(url, options) {
+                if(typeof url === 'string' && url.match(/ad|ads|banner|splash|promo|tracking/i)) {
+                    return Promise.resolve({ ok: false, status: 403, text: ()=>Promise.resolve(''), json: ()=>Promise.resolve({}) });
+                }
+                return origFetch.apply(this, arguments);
+            };
         }
     } catch(e){}
 })();
 </script>
 <style>
-/* Cosmetic Filters for common ad containers */
+/* Cosmetic Filters for common ad containers - 增强版 */
 .ad-banner, .ad-container, .ads-wrapper, .ad-slot, .splash-ad, #adBanner, #adContainer, 
-.adsbygoogle, .g-ad, .c-ad, .adbox, .ad-box, .ad_frame, .ad-area, #ads, .ad-content { display: none !important; }
+.adsbygoogle, .g-ad, .c-ad, .adbox, .ad-box, .ad_frame, .ad-area, #ads, .ad-content,
+.ad-wrapper, .ad-unit, .popup-ad, .float-ad, .bottom-ad, .feed-ad, .video-ad, .native-ad,
+.ad-content, .ad-image, .ad-text, .ad-link, .ad-logo, .ad-icon, .ad-btn, .ad-button,
+.ad-card, .ad-box, .ad-list, .ad-item, .ad-close, .ad-cover, .ad-mask, .ad-layer,
+.ad-dialog, .ad-pop, .ad-tip, .ad-toast, .ad-modal, .ad-overlay, .ad-bg, .ad-back,
+.ad-splash, .ad-open, .ad-launch, .ad-interstitial, .ad-fullscreen, .ad-reward,
+.ad-native, .ad-feed, .ad-stream, .ad-preload, .ad-download, .ad-install, .ad-open-url,
+#adSlot, .ad-slot-container, .ad-slot-wrapper, .ad-slot-block, .ad-slot-area { 
+    display: none !important; 
+    visibility: hidden !important;
+    opacity: 0 !important;
+    height: 0 !important;
+    width: 0 !important;
+    overflow: hidden !important;
+}
 </style>"""
 
     private fun buildSyntheticResponse(statusLine: String, contentType: String, body: String): String {

@@ -398,17 +398,35 @@ class AdBlockVpnService : VpnService() {
                 ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
 
             // CNAME 别名检查优化：复用 vendor 缓存
+            // CNAME 别名链式检测（防止多层 CNAME 绕过）
             val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
-            val blockedAliasTarget = if (aliasTargets.isNotEmpty()) {
-                aliasTargets.firstOrNull { aliasTarget ->
-                    RuleRepository.isBlocked(this, aliasTarget) ||
+            var blockedAliasTarget: String? = null
+            if (aliasTargets.isNotEmpty()) {
+                // 检查所有 CNAME 目标（包括多级 CNAME）
+                for (aliasTarget in aliasTargets) {
+                    if (RuleRepository.isBlocked(this, aliasTarget) ||
                         RuleRepository.shouldAggressivelyBlockForNovelApp(this, aliasTarget, appName, 
-                            RuleRepository.classifyVendorFromHints(this, aliasTarget, appName))
+                            RuleRepository.classifyVendorFromHints(this, aliasTarget, appName))) {
+                        blockedAliasTarget = aliasTarget
+                        break
+                    }
                 }
-            } else null
+                // 递归检查 CNAME 目标的 CNAME（2 层深度）
+                if (blockedAliasTarget == null && aliasTargets.size >= 2) {
+                    val nestedAliases = DnsMessageParser.extractAliasTargets(upstreamResponse, 
+                        DnsMessageParser.DnsQuestion(aliasTargets.firstOrNull() ?: "", question.qType ?: 1))
+                    for (nestedAlias in nestedAliases) {
+                        if (RuleRepository.isBlocked(this, nestedAlias) ||
+                            RuleRepository.shouldAggressivelyBlockForNovelApp(this, nestedAlias, appName,
+                                RuleRepository.classifyVendorFromHints(this, nestedAlias, appName))) {
+                            blockedAliasTarget = nestedAlias
+                            break
+                        }
+                    }
+                }
+            }
             if (blockedAliasTarget != null) {
-                val sinkholeResponse = DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return
-                output.write(PacketCodec.buildUdpResponse(info, sinkholeResponse))
+                output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
                 StatsRepository.recordBlockedDns(this, vendor, appName, 512)
                 return
             }
