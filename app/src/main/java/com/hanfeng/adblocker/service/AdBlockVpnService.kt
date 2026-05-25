@@ -353,12 +353,10 @@ class AdBlockVpnService : VpnService() {
 
             val question = DnsMessageParser.parseQuestion(info.payload) ?: return
 
-            // 白名单域名直接放行，跳过规则匹配（避免冷加载开销）
-            if (RuleRepository.isWhitelistedDomain(question.domain)) {
+            // App 启动核心域名快速放行（避免冷加载开销，只针对少数关键域名）
+            if (criticalStartupDomains.contains(question.domain)) {
                 val appName = resolveAppName(question.domain, info)
-                RuleRepository.classifyVendorSimple(this, question.domain, appName)?.let { vendor ->
-                    StatsRepository.recordRequest(this, vendor, appName)
-                }
+                StatsRepository.recordRequest(this, "System", appName)
                 readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
                     output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
                     return
@@ -371,6 +369,7 @@ class AdBlockVpnService : VpnService() {
                 output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
                 return
             }
+
             val matchedRule = RuleRepository.findMatchingRule(this, question.domain, question.qType)
             val isBlocked = RuleRepository.isBlocked(this, question.domain, question.qType)
             val aggressiveNovelBlock = if (!isBlocked) {

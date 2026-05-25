@@ -37,6 +37,14 @@ object RuleRepository {
         // 微信 DNS 服务
         "dns.weixin.qq.com.cn",
         "aedns.weixin.qq.com",
+        // APP 启动核心域名（精确匹配，不做子域名通配）
+        "clientservices.googleapis.com",
+        "update.googleapis.com",
+        "android.clients.google.com",
+        "play.googleapis.com",
+        "firebaseinstallations.googleapis.com",
+        "app-measurement.com",
+        "firebase-analytics.com",
         // 阿里系
         "alicdn.com",
         "alibaba.com",
@@ -1339,6 +1347,21 @@ object RuleRepository {
         }
         return false
     }
+
+    val criticalStartupDomains: Set<String>
+        get() = setOf(
+            "clientservices.googleapis.com",
+            "update.googleapis.com",
+            "android.clients.google.com",
+            "play.googleapis.com",
+            "firebaseinstallations.googleapis.com",
+            "app-measurement.com",
+            "firebase-analytics.com",
+            "android.googleapis.com",
+            "ssl.gstatic.com",
+            "fonts.googleapis.com",
+            "fonts.gstatic.com"
+        )
 
     private val whitelistSuffixRoots by lazy {
         whitelistDomains.map { ".$it" }.toSet()
