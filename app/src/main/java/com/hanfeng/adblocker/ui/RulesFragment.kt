@@ -46,6 +46,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private var selectionMode = false
     private var filteredSelectionMode = false
     private var refreshVersion = 0
+    private var searchQuery = ""
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) importRuleFile(uri)
@@ -119,10 +120,18 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         binding.btnTrafficCard.setOnClickListener { mainActivity?.openTrafficCardPage() }
         binding.btnJoinGroup.setOnClickListener { mainActivity?.joinQqGroup() }
         binding.btnSuspiciousDomains.setOnClickListener { openSuspiciousDomainsPage() }
-        binding.btnFilter.setOnClickListener { filterNonAds() }
+        binding.btnFilter.setOnClickListener { deduplicateRules() }
         binding.btnSelectAll.setOnClickListener { selectAllVisible() }
         binding.btnDeleteSelected.setOnClickListener { confirmDelete(selectedIds) }
         binding.btnCancelSelection.setOnClickListener { exitSelection() }
+        binding.inputSearch.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                searchQuery = s?.toString().orEmpty().trim()
+                refreshList()
+            }
+        })
         refreshListDelayed()
     }
 
@@ -236,26 +245,34 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val expandedSnapshot = expandedGroups.toSet()
         val selectedSnapshot = selectedIds.toSet()
         val currentSelectionMode = selectionMode
+        val query = searchQuery.lowercase()
         viewLifecycleOwner.lifecycleScope.launch {
             val state = withContext(Dispatchers.Default) {
                 val rules = RuleRepository.getRules(appContext)
-                // 优化：规则已按 domain 排序，按顺序分组避免额外排序
                 val grouped = linkedMapOf<String, MutableList<BlockRule>>()
                 rules.forEach { rule ->
                     grouped.getOrPut(rule.vendor) { mutableListOf() }.add(rule)
                 }
                 val items = buildList {
                     grouped.forEach { (vendor, groupRules) ->
-                        add(RuleListItem.Group(vendor, groupRules.size, expandedSnapshot.contains(vendor)))
-                        if (expandedSnapshot.contains(vendor)) {
+                        val matchesVendor = query.isEmpty() || vendor.lowercase().contains(query)
+                        val filteredRules = if (query.isEmpty()) {
+                            groupRules
+                        } else {
+                            groupRules.filter { it.domain.lowercase().contains(query) }
+                        }
+                        if (filteredRules.isNotEmpty() || matchesVendor) {
+                            val autoExpand = query.isNotEmpty()
+                            add(RuleListItem.Group(vendor, filteredRules.size, if (autoExpand) true else expandedSnapshot.contains(vendor)))
+                            val visibleRules = if (autoExpand) filteredRules else if (expandedSnapshot.contains(vendor)) filteredRules else emptyList()
                             val maxVisible = 500
-                            if (groupRules.size > maxVisible) {
-                                groupRules.take(maxVisible).forEach { rule ->
+                            if (visibleRules.size > maxVisible) {
+                                visibleRules.take(maxVisible).forEach { rule ->
                                     add(RuleListItem.Domain(rule, selectedSnapshot.contains(rule.id), currentSelectionMode))
                                 }
-                                add(RuleListItem.More(vendor, groupRules.size - maxVisible))
+                                add(RuleListItem.More(vendor, visibleRules.size - maxVisible))
                             } else {
-                                groupRules.forEach { rule ->
+                                visibleRules.forEach { rule ->
                                     add(RuleListItem.Domain(rule, selectedSnapshot.contains(rule.id), currentSelectionMode))
                                 }
                             }
@@ -267,13 +284,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             }
             if (_binding == null || currentVersion != refreshVersion) return@launch
             binding.ruleSummary.text = buildString {
-                append("已保存 ${state.inventory.totalSavedCount} 条规则")
-                append("  当前可拦截 ${state.inventory.totalSupportedCount} 条")
-                append("  内置 ${state.inventory.referenceCount} 条")
-                append("  用户导入 ${state.inventory.importedCount} 条")
-                if (state.inventory.manualCount > 0) append("  手动 ${state.inventory.manualCount} 条")
-                if (state.inventory.regexCount > 0) append("  正则 ${state.inventory.regexCount} 条")
-                if (state.inventory.cosmeticCount > 0) append("  Cosmetic ${state.inventory.cosmeticCount} 条")
+                if (query.isNotEmpty()) {
+                    append("搜索 ${state.items.count { it is RuleListItem.Domain }} 条结果")
+                } else {
+                    append("已保存 ${state.inventory.totalSavedCount} 条规则")
+                    append("  当前可拦截 ${state.inventory.totalSupportedCount} 条")
+                    append("  内置 ${state.inventory.referenceCount} 条")
+                    append("  用户导入 ${state.inventory.importedCount} 条")
+                    if (state.inventory.manualCount > 0) append("  手动 ${state.inventory.manualCount} 条")
+                    if (state.inventory.regexCount > 0) append("  正则 ${state.inventory.regexCount} 条")
+                    if (state.inventory.cosmeticCount > 0) append("  Cosmetic ${state.inventory.cosmeticCount} 条")
+                }
             }
             binding.selectionBar.isVisible = currentSelectionMode
             binding.selectionCount.text = if (filteredSelectionMode) {
@@ -350,6 +371,23 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         } catch (e: Exception) {
             LogRepository.append(dialogContext, "Delete dialog failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
             Toast.makeText(dialogContext, "打开删除确认失败：${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun deduplicateRules() {
+        val actionContext = safeDialogActivity() ?: return
+        try {
+            val removed = RuleRepository.deduplicateRules(actionContext)
+            if (removed == 0) {
+                Toast.makeText(actionContext, "没有检测到重复规则", Toast.LENGTH_SHORT).show()
+                return
+            }
+            LogRepository.append(actionContext, "Removed $removed duplicate rules")
+            refreshList()
+            Toast.makeText(actionContext, "已清理 $removed 条重复规则", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            LogRepository.append(actionContext, "Deduplicate rules failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
+            Toast.makeText(actionContext, "清理失败：${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -649,11 +687,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private fun visibleDomainIds(): List<String> {
         val ctx = context ?: return emptyList()
         val grouped = RuleRepository.getRules(ctx).groupBy { it.vendor }
+        val query = searchQuery.lowercase()
         return grouped
-            .filterKeys { expandedGroups.contains(it) }
+            .filterKeys { vendor ->
+                val matchesVendor = query.isEmpty() || vendor.lowercase().contains(query)
+                val hasMatchingDomain = grouped[vendor]?.any { it.domain.lowercase().contains(query) } == true
+                matchesVendor || hasMatchingDomain
+            }
             .values
             .flatMap { rules ->
-                rules.map { it.id }.take(500)
+                val filtered = if (query.isEmpty()) rules else rules.filter { it.domain.lowercase().contains(query) }
+                filtered.map { it.id }.take(500)
             }
     }
 

@@ -98,8 +98,43 @@ object RuleRepository {
         "ghpym.com",
         "wscdns.com",
         "21vianet.com",
-        "chinacache.com",
-        "ksyuncdn.com"
+        "ksyuncdn.com",
+        // 视频直播流媒体 CDN - 完全保护（防卡顿/缓冲异常）
+        "douyinvod.com",
+        "douyincdn.com",
+        "bytegoofy.com",
+        "video.qq.com",
+        "qpic.cn",
+        "qcloudimg.com",
+        "cdn-go.cn",
+        "bcebos.com",
+        "bdstatic.com",
+        "iqiyi.com",
+        "71.am",
+        "71edge.com",
+        "gitv.tv",
+        "youku.com",
+        "ykimg.com",
+        "cibntv.net",
+        "mmstat.com",
+        "soku.com",
+        "le.com",
+        "letv.com",
+        "lecloud.com",
+        "letvcdn.com",
+        "letvimg.com",
+        "bilibili.com",
+        "bilivideo.com",
+        "biliapi.com",
+        "biligame.com",
+        "mcdn.bilivideo.com",
+        "mgtv.com",
+        "imgo.tv",
+        "hitv.com",
+        "hwcdn.net",
+        "myqcloud.com",
+        "tcdn.qq.com",
+        "liveplay.myqcloud.com"
     )
     
     // 友盟特殊处理 - 只保护基础服务子域名（日志相关）
@@ -150,6 +185,7 @@ object RuleRepository {
     @Volatile private var cachedCompiledRegexRules: Map<String, java.util.regex.Pattern> = emptyMap()
     @Volatile private var cachedVendorMap: MutableMap<String, String> = ConcurrentHashMap()
     @Volatile private var cachedKeywordRules: List<BlockRule>? = null
+    @Volatile private var cachedWhitelistHits = ConcurrentHashMap<String, Boolean>()
     private val adKeywords = listOf(
         "ad",
         "ads",
@@ -1132,7 +1168,8 @@ object RuleRepository {
                 blockedRule.regexPattern,
                 blockedRule.cosmeticSelector,
                 blockedRule.removeParams,
-                blockedRule.cspValue
+                blockedRule.cspValue,
+                blockedRule.keywordPattern
             )
             if (!existingRuleKeys.add(ruleKey)) return@forEach
             val existing = if (blockedRule.regexPattern == null && blockedRule.cosmeticSelector == null) {
@@ -1257,9 +1294,16 @@ object RuleRepository {
     fun isWhitelistedDomain(domain: String): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
         val lowerDomain = normalized.lowercase()
+        cachedWhitelistHits[lowerDomain]?.let { return it }
+        val result = checkDomainWhitelist(lowerDomain)
+        cachedWhitelistHits[lowerDomain] = result
+        return result
+    }
+
+    private fun checkDomainWhitelist(lowerDomain: String): Boolean {
         if (bypassProtectionDomains.contains(lowerDomain) || bypassProtectionDomains.any { lowerDomain.endsWith(".$it") }) return true
         if (whitelistDomains.contains(lowerDomain)) return true
-        if (whitelistDomains.any { lowerDomain.endsWith(".$it") }) return true
+        if (whitelistSuffixRoots.any { lowerDomain.endsWith(it) }) return true
         if (lowerDomain.contains("umeng.com") || lowerDomain.contains("umengcloud.com")) {
             if (umengWhitelistSubDomains.contains(lowerDomain) || umengWhitelistSubDomains.any { lowerDomain.endsWith(".$it") }) {
                 return true
@@ -1272,6 +1316,10 @@ object RuleRepository {
             return true
         }
         return false
+    }
+
+    private val whitelistSuffixRoots by lazy {
+        whitelistDomains.map { ".$it" }.toSet()
     }
 
     fun findMatchingRule(context: Context, domain: String, qType: Int? = null, appName: String? = null): BlockRule? {
@@ -1335,6 +1383,23 @@ object RuleRepository {
         return sensitiveAuthKeywords.any { keyword ->
             labels.any { it == keyword } || keywordMatches(lower, normalizedTokens, keyword)
         }
+    }
+
+    fun deduplicateRules(context: Context): Int {
+        val rules = getRules(context)
+        val seen = mutableSetOf<String>()
+        val toRemove = mutableSetOf<String>()
+        rules.forEach { rule ->
+            val key = "${rule.domain}|${rule.vendor}|${rule.source}|${rule.keywordPattern}|${rule.domainRegex}|${rule.regexPattern}|${rule.cosmeticSelector}"
+            if (!seen.add(key)) {
+                toRemove += rule.id
+            }
+        }
+        if (toRemove.isNotEmpty()) {
+            removeByIds(context, toRemove)
+            invalidateCaches()
+        }
+        return toRemove.size
     }
 
     fun filterNonAds(context: Context): List<BlockRule> {
@@ -1617,7 +1682,8 @@ object RuleRepository {
                             parsedRule.regexPattern,
                             parsedRule.cosmeticSelector,
                             parsedRule.removeParams,
-                            parsedRule.cspValue
+                            parsedRule.cspValue,
+                            parsedRule.keywordPattern
                         )
                         if (parsedRule.isException) {
                             if (!seenExceptions.add(ruleKey)) {
@@ -1731,6 +1797,7 @@ object RuleRepository {
         if (line.isBlank() || line.startsWith("#") || line.startsWith("!")) return emptyList()
         parseCosmeticRule(line)?.let { return listOf(it) }
         parseRegexRule(line)?.let { return listOf(it) }
+        parseClashRule(line)?.let { return listOf(it) }
 
         val isException = line.startsWith("@@")
         val working = if (isException) line.removePrefix("@@") else line
@@ -1792,6 +1859,29 @@ object RuleRepository {
             isException = marker == "#@#",
             cosmeticSelector = selector
         )
+    }
+
+    private fun parseClashRule(line: String): List<ParsedRule>? {
+        if (!line.contains(',')) return null
+        val segments = line.split(',').map { it.trim() }.filter { it.isNotBlank() }
+        if (segments.size < 2) return null
+        val ruleType = segments[0].uppercase()
+        val value = segments[1]
+        if (value.isBlank()) return null
+        return when (ruleType) {
+            "DOMAIN-SUFFIX", "HOST-SUFFIX" -> {
+                val domain = sanitizeDomain(value) ?: return null
+                listOf(ParsedRule(domain = domain))
+            }
+            "DOMAIN", "HOST" -> {
+                val domain = sanitizeDomain(value) ?: return null
+                listOf(ParsedRule(domain = domain))
+            }
+            "DOMAIN-KEYWORD", "HOST-KEYWORD" -> {
+                listOf(ParsedRule(domain = value, keywordPattern = value.lowercase()))
+            }
+            else -> null
+        }
     }
 
     private fun extractRegexRuleDomain(pattern: String): String? {
@@ -1958,6 +2048,9 @@ object RuleRepository {
             }
             "full", "full-domain", "hostname", "host-full", "hostname-full", "domain-full", "domain-exact", "host-exact" -> {
                 listOfNotNull(parseStructuredDomainToken(domainToken))
+            }
+            "domain-keyword", "host-keyword", "keyword" -> {
+                emptyList()
             }
             "keyword", "domain-keyword", "host-keyword", "domain-regex", "host-regex", "url-regex",
             "ip-cidr", "ip-cidr6", "src-ip-cidr", "geoip", "geosite", "rule-set", "process-name",
@@ -2295,7 +2388,8 @@ object RuleRepository {
         regexPattern: String? = null,
         cosmeticSelector: String? = null,
         removeParams: Set<String> = emptySet(),
-        cspValue: String? = null
+        cspValue: String? = null,
+        keywordPattern: String? = null
     ): String {
         val dnsKey = normalizeDnsTypes(dnsTypes)?.joinToString("|") ?: "*"
         val excludedDnsKey = normalizeDnsTypes(excludedDnsTypes)?.joinToString("|") ?: "-"
@@ -2308,7 +2402,8 @@ object RuleRepository {
             regexPattern.orEmpty(),
             cosmeticSelector.orEmpty(),
             removeParamKey,
-            cspValue.orEmpty()
+            cspValue.orEmpty(),
+            "kw:${keywordPattern.orEmpty()}"
         ).joinToString("#")
     }
 
@@ -2505,7 +2600,8 @@ object RuleRepository {
             regexPattern = rule.regexPattern,
             cosmeticSelector = rule.cosmeticSelector,
             removeParams = rule.removeParams,
-            cspValue = rule.cspValue
+            cspValue = rule.cspValue,
+            keywordPattern = rule.keywordPattern
         )
     }
 

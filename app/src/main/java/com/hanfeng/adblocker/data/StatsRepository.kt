@@ -63,9 +63,13 @@ object StatsRepository {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var flushPending = false
     private var initialized = false
+    private val dirtyEvents = AtomicInteger(0)
+    private var pendingFlushRunnable: Runnable? = null
     private val updateDispatchPending = AtomicBoolean(false)
     @Volatile private var lastUpdateDispatchAt = 0L
     private const val UI_UPDATE_MIN_INTERVAL_MILLIS = 1200L
+    private const val FLUSH_DELAY_MILLIS = 15_000L
+    private const val FLUSH_EVENT_THRESHOLD = 24
 
     private fun ensureInitialized(context: Context) {
         if (initialized) {
@@ -167,15 +171,30 @@ object StatsRepository {
     }
 
     private fun scheduleFlush(context: Context) {
+        val dirtyCount = dirtyEvents.incrementAndGet()
+        if (dirtyCount >= FLUSH_EVENT_THRESHOLD) {
+            if (flushPending) {
+                pendingFlushRunnable?.let(mainHandler::removeCallbacks)
+                pendingFlushRunnable = null
+                flushPending = false
+            }
+            persistAll(context)
+            return
+        }
         if (flushPending) return
         flushPending = true
-        mainHandler.postDelayed({
+        val appContext = context.applicationContext
+        val flushRunnable = Runnable {
             flushPending = false
-            persistAll(context)
-        }, 5000L)
+            pendingFlushRunnable = null
+            persistAll(appContext)
+        }
+        pendingFlushRunnable = flushRunnable
+        mainHandler.postDelayed(flushRunnable, FLUSH_DELAY_MILLIS)
     }
 
     private fun persistAll(context: Context) {
+        dirtyEvents.set(0)
         val prefs = prefs(context)
         val editor = prefs.edit()
             .putInt(KEY_TODAY_BLOCKED, todayBlocked.get())
@@ -197,6 +216,11 @@ object StatsRepository {
     }
 
     fun flushNow(context: Context) {
+        if (flushPending) {
+            pendingFlushRunnable?.let(mainHandler::removeCallbacks)
+            pendingFlushRunnable = null
+            flushPending = false
+        }
         persistAll(context)
     }
 

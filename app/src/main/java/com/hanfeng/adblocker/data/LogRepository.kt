@@ -13,22 +13,57 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 object LogRepository {
     private const val LOG_DIR = "logs"
     private const val LOG_FILE = "adblock.log"
+    private const val LOG_CHANNEL_CAPACITY = 2048
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val logChannel = Channel<String>(capacity = Channel.UNLIMITED)
+    private val logChannel = Channel<String>(capacity = LOG_CHANNEL_CAPACITY)
     private var writerJob: Job? = null
     private var currentContext: Context? = null
+    private val droppedLogCount = AtomicInteger(0)
+    private val noisyLogPrefixes = listOf(
+        "HTTP/2 frame ",
+        "HTTP/2 headers decoded ",
+        "HTTP/2 header inspection ",
+        "HTTP/2 action decision ",
+        "HTTP/2 stream ",
+        "HTTP/2 data inspection ",
+        "HTTP/2 preface ",
+        "HTTP/2 client rewrite buffering ",
+        "HTTP/2 payload suppressed ",
+        "HTTP/2 frame filtering tail-preserved ",
+        "HTTPS request host=",
+        "HTTPS response passthrough host=",
+        "Accepted local HTTPS bridge client host=",
+        "Connected local HTTPS bridge socket flow="
+    )
 
     fun append(context: Context, message: String) {
+        if (shouldDropNoisyLog(message)) return
         // Capture context once for the writer
         if (currentContext == null) currentContext = context.applicationContext
-        logChannel.trySend("${System.currentTimeMillis()} $message\n")
+        flushDroppedNoticeIfNeeded()
+        if (logChannel.trySend("${System.currentTimeMillis()} $message\n").isFailure) {
+            droppedLogCount.incrementAndGet()
+        }
         ensureWriterRunning()
+    }
+
+    private fun shouldDropNoisyLog(message: String): Boolean {
+        return noisyLogPrefixes.any { prefix -> message.startsWith(prefix) }
+    }
+
+    private fun flushDroppedNoticeIfNeeded() {
+        val dropped = droppedLogCount.getAndSet(0)
+        if (dropped <= 0) return
+        if (logChannel.trySend("${System.currentTimeMillis()} Log queue pressure dropped=$dropped\n").isFailure) {
+            droppedLogCount.addAndGet(dropped)
+        }
     }
 
     private fun ensureWriterRunning() {

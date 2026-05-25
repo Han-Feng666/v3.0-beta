@@ -35,6 +35,23 @@
             android:textColor="@color/hf_text_secondary"
             android:textSize="14sp" />
 
+        <EditText
+            android:id="@+id/inputSearch"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_panel"
+            android:drawableStart="@android:drawable/ic_menu_search"
+            android:drawablePadding="8dp"
+            android:hint="搜索域名或厂商名称"
+            android:imeOptions="actionSearch"
+            android:inputType="text"
+            android:maxLines="1"
+            android:paddingHorizontal="12dp"
+            android:textColor="@color/hf_text_primary"
+            android:textColorHint="@color/hf_text_secondary"
+            android:textSize="14sp" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -165,7 +182,7 @@
                 android:layout_height="48dp"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
-                android:text="清理重复与无效规则"
+                android:text="清理重复规则"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="16sp" />

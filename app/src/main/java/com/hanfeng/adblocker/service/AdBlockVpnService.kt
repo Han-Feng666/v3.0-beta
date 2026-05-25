@@ -117,6 +117,8 @@ class AdBlockVpnService : VpnService() {
         upstreamFallbackDnsHosts.mapNotNull { host -> runCatching { InetAddress.getByName(host) }.getOrNull() }
     }
     @Volatile private var cachedDnsServers: CachedDnsServers? = null
+    @Volatile private var httpDecryptEnabled = false
+    @Volatile private var mitmCertificateInstalled = false
     private val handledDnsHosts by lazy(LazyThreadSafetyMode.NONE) {
         setOf(localDnsV4, localDnsV6).mapNotNull { host ->
             runCatching { InetAddress.getByName(host).hostAddress }.getOrNull()
@@ -172,6 +174,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun startVpn() {
+        refreshRuntimeFeatureFlags()
         if (vpnInterface != null && packetJob?.isActive == true) {
             isRunning = true
             LogRepository.append(this, "VPN start called while already running")
@@ -222,6 +225,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun reloadVpn() {
+        refreshRuntimeFeatureFlags()
         LogRepository.append(this, "VPN reload requested")
         stopVpn(stopService = false)
         startVpn()
@@ -240,6 +244,8 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun clearRuntimeState() {
+        httpDecryptEnabled = false
+        mitmCertificateInstalled = false
         TlsMitmSessionManager.clear(this)
         appNameCache.clear()
         domainAppCache.clear()
@@ -338,77 +344,86 @@ class AdBlockVpnService : VpnService() {
         findBlockedIpNetwork(info.destinationAddress)?.let { network ->
             return
         }
-        if (shouldBlockHttpDecryptConnection(info)) {
-            return
-        }
-        if (shouldBlockQuicFlow(info)) {
-            return
-        }
-        observeHttpsTransparentProxyFlow(info)
-        if (handleHttpsProxyHandshake(info, output)) {
-            return
-        }
-        observeHttpsClientHello(info)
-        if (info.protocol != OsConstants.IPPROTO_UDP || info.destinationPort != 53) {
-            return
-        }
-        if (!shouldHandleDns(info.destinationAddress)) {
-            return
-        }
+        val isUdp = info.protocol == OsConstants.IPPROTO_UDP
+        val isTcp = info.protocol == OsConstants.IPPROTO_TCP
+        if (isUdp && info.destinationPort == 53) {
+            if (!shouldHandleDns(info.destinationAddress)) {
+                return
+            }
 
-        val question = DnsMessageParser.parseQuestion(info.payload) ?: return
-        val matchedRule = RuleRepository.findMatchingRule(this, question.domain, question.qType)
-        val isBlocked = RuleRepository.isBlocked(this, question.domain, question.qType)
-        val aggressiveNovelBlock = if (!isBlocked) {
+            val question = DnsMessageParser.parseQuestion(info.payload) ?: return
+            val matchedRule = RuleRepository.findMatchingRule(this, question.domain, question.qType)
+            val isBlocked = RuleRepository.isBlocked(this, question.domain, question.qType)
+            val aggressiveNovelBlock = if (!isBlocked) {
+                val appName = resolveAppName(question.domain, info)
+                val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, question.domain, appName)
+                RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, vendor)
+            } else false
+
+            if (isBlocked || aggressiveNovelBlock) {
+                val appName = resolveAppName(question.domain, info)
+                val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, question.domain, appName)
+                val response = DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return
+                output.write(PacketCodec.buildUdpResponse(info, response))
+                StatsRepository.recordBlockedDns(this, vendor, appName, 512)
+                return
+            }
+
             val appName = resolveAppName(question.domain, info)
             val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, question.domain, appName)
-            RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, vendor)
-        } else false
+            StatsRepository.recordRequest(this, vendor, appName)
+            RuleRepository.reportUnknownVendorIfNeeded(this, vendor, question.domain, appName)
 
-        if (isBlocked || aggressiveNovelBlock) {
-            val appName = resolveAppName(question.domain, info)
-            val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, question.domain, appName)
-            val response = DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return
-            output.write(PacketCodec.buildUdpResponse(info, response))
-            StatsRepository.recordBlockedDns(this, vendor, appName, 512)
+            readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
+                output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
+                return
+            }
+
+            val upstreamResult = queryUpstreamDns(info.payload)
+            val upstreamResponse = upstreamResult?.response
+                ?: readStaleCachedDnsResponse(question, info.payload)
+                ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
+
+            val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
+            val blockedAliasTarget = aliasTargets.firstOrNull { aliasTarget ->
+                RuleRepository.isBlocked(this, aliasTarget)
+            }
+            if (blockedAliasTarget != null) {
+                val sinkholeResponse = DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return
+                output.write(PacketCodec.buildUdpResponse(info, sinkholeResponse))
+                StatsRepository.recordBlockedDns(this, vendor, appName, 512)
+                return
+            }
+            if (aliasTargets.isNotEmpty()) {
+                rememberHttpDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
+                rememberHttpsDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
+                rememberQuicAliasTargets(question, aliasTargets, upstreamResponse, appName)
+            }
+            rememberQuicTargets(question, upstreamResponse, appName, vendor)
+            rememberHttpDecryptTargets(question, upstreamResponse, appName, vendor)
+            rememberHttpsDecryptTargets(question, upstreamResponse, appName, vendor)
+            cacheDnsResponse(question, upstreamResponse)
+            output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
             return
         }
 
-        val appName = resolveAppName(question.domain, info)
-        val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, question.domain, appName)
-        StatsRepository.recordRequest(this, vendor, appName)
-        RuleRepository.reportUnknownVendorIfNeeded(this, vendor, question.domain, appName)
-
-        readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
-            output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
+        if (!httpDecryptEnabled) {
             return
         }
-
-        val upstreamResult = queryUpstreamDns(info.payload)
-        val upstreamResponse = upstreamResult?.response
-            ?: readStaleCachedDnsResponse(question, info.payload)
-            ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
-
-        val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
-        val blockedAliasTarget = aliasTargets.firstOrNull { aliasTarget ->
-            RuleRepository.isBlocked(this, aliasTarget)
-        }
-        if (blockedAliasTarget != null) {
-            val sinkholeResponse = DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return
-            output.write(PacketCodec.buildUdpResponse(info, sinkholeResponse))
-            StatsRepository.recordBlockedDns(this, vendor, appName, 512)
+        if (isTcp) {
+            if (shouldBlockHttpDecryptConnection(info)) {
+                return
+            }
+            observeHttpsTransparentProxyFlow(info)
+            if (handleHttpsProxyHandshake(info, output)) {
+                return
+            }
+            observeHttpsClientHello(info)
             return
         }
-        if (aliasTargets.isNotEmpty()) {
-            rememberHttpDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
-            rememberHttpsDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
-            rememberQuicAliasTargets(question, aliasTargets, upstreamResponse, appName)
+        if (isUdp && info.destinationPort == 443 && shouldBlockQuicFlow(info)) {
+            return
         }
-        rememberQuicTargets(question, upstreamResponse, appName, vendor)
-        rememberHttpDecryptTargets(question, upstreamResponse, appName, vendor)
-        rememberHttpsDecryptTargets(question, upstreamResponse, appName, vendor)
-        cacheDnsResponse(question, upstreamResponse)
-        output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
     }
 
     private fun shouldBlockQuicFlow(info: com.HanFeng.model.PacketInfo): Boolean {
@@ -438,7 +453,7 @@ class AdBlockVpnService : VpnService() {
         val matchedRule = RuleRepository.findMatchingRule(this, domain)
         val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, domain, appName, vendor)
         val bypassReason = HttpsMitmRepository.getActiveBypassReason(this, domain)
-        val shouldForceTcpFallback = FeatureSettingsRepository.isHttpDecryptEnabled(this) && httpsTarget != null && bypassReason == null
+        val shouldForceTcpFallback = httpDecryptEnabled && httpsTarget != null && bypassReason == null
         if (matchedRule == null && !aggressiveNovelBlock && !shouldForceTcpFallback) return false
 
         val reason = when {
@@ -462,7 +477,6 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun shouldBlockHttpDecryptConnection(info: com.HanFeng.model.PacketInfo): Boolean {
-        if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return false
         if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 80) return false
         val ip = formatAddress(info.destinationAddress)
         maybePruneRouteCaches()
@@ -481,19 +495,21 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun observeHttpsClientHello(info: com.HanFeng.model.PacketInfo) {
-        if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
         if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return
         if (info.payload.isEmpty()) return
+        val destinationIp = formatAddress(info.destinationAddress)
+        maybePruneRouteCaches()
+        val decryptTarget = synchronized(httpsDecryptIpCache) {
+            httpsDecryptIpCache[destinationIp]
+        } ?: return
+        if (RuleRepository.isWhitelistedDomain(decryptTarget.domain)) return
+        if (RuleRepository.isSensitiveAuthDomain(decryptTarget.domain)) return
         val clientHelloInfo = TlsClientHelloParser.extractClientHelloInfo(info.payload) ?: return
         val sniHost = clientHelloInfo.sniHost ?: return
         if (RuleRepository.isWhitelistedDomain(sniHost)) return
         if (RuleRepository.isSensitiveAuthDomain(sniHost)) return
         val appName = resolveAppName(sniHost, info)
-        val destinationIp = formatAddress(info.destinationAddress)
-        maybePruneRouteCaches()
-        val decryptSource = synchronized(httpsDecryptIpCache) {
-            httpsDecryptIpCache[destinationIp]?.source
-        } ?: "unknown"
+        val decryptSource = decryptTarget.source
         logDecisionOnce(
             key = "https-sni:$sniHost:${formatAddress(info.destinationAddress)}",
             message = "Observed HTTPS ClientHello SNI domain=$sniHost app=$appName target=$destinationIp source=$decryptSource alpn=${clientHelloInfo.offeredAlpnProtocols.joinToString(",").ifBlank { "none" }} prefersHttp2=${clientHelloInfo.offeredAlpnProtocols.any { it.equals("h2", ignoreCase = true) }} tls=${clientHelloInfo.handshakeVersion ?: "unknown"}",
@@ -505,7 +521,7 @@ class AdBlockVpnService : VpnService() {
             sniHost,
             appName
         )
-        if (!HttpsMitmRepository.isCertificateInstalled(this)) {
+        if (!mitmCertificateInstalled) {
             logDecisionOnce(
                 key = "https-mitm-not-ready:$sniHost",
                 message = "Skipped HTTPS MITM prewarm because CA is not installed domain=$sniHost app=$appName source=$decryptSource",
@@ -540,7 +556,6 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun observeHttpsTransparentProxyFlow(info: com.HanFeng.model.PacketInfo) {
-        if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
         if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return
         val ip = formatAddress(info.destinationAddress)
         maybePruneRouteCaches()
@@ -612,7 +627,6 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun handleHttpsProxyHandshake(info: com.HanFeng.model.PacketInfo, output: FileOutputStream): Boolean {
-        if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return false
         if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return false
         val flowKey = flowCacheKey(info)
         val current = synchronized(httpsProxyFlowCache) {
@@ -1964,8 +1978,8 @@ class AdBlockVpnService : VpnService() {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val httpEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(this)
-        val certInstalled = HttpsMitmRepository.isCertificateInstalled(this)
+        val httpEnabled = httpDecryptEnabled
+        val certInstalled = mitmCertificateInstalled
         val contentText = when {
             httpEnabled && certInstalled -> "MITM+DNS拦截"
             httpEnabled -> "DNS拦截 (待装证书)"
@@ -1985,6 +1999,11 @@ class AdBlockVpnService : VpnService() {
         val manager = getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(CHANNEL_ID, "广告拦截服务", NotificationManager.IMPORTANCE_LOW)
         manager.createNotificationChannel(channel)
+    }
+
+    private fun refreshRuntimeFeatureFlags() {
+        httpDecryptEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(this)
+        mitmCertificateInstalled = HttpsMitmRepository.isCertificateInstalled(this)
     }
 
     companion object {

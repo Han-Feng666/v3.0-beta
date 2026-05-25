@@ -14,7 +14,9 @@ import java.net.SocketTimeoutException
 import javax.net.ssl.SSLHandshakeException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLParameters
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLServerSocketFactory
@@ -25,13 +27,27 @@ import com.HanFeng.service.HpackDecoder.HeaderField
 object HttpsTlsBridgeManager {
     private const val ACCEPT_TIMEOUT_MILLIS = 1_000
     private const val CONNECT_TIMEOUT_MILLIS = 4_000
-    private const val HTTP2_VERBOSE_FRAME_LIMIT = 12
-    private const val HTTP2_SUMMARY_FRAME_INTERVAL = 25
+    private const val HTTP2_VERBOSE_FRAME_LIMIT = 4
+    private const val HTTP2_SUMMARY_FRAME_INTERVAL = 100
     private const val HTTP2_HEADER_BLOCK_LARGE_THRESHOLD = 16 * 1024
+    private const val HTTP2_DATA_DEEP_INSPECTION_SCORE_THRESHOLD = 2
+    private const val HTTP2_DATA_SAMPLE_MAX_BYTES = 4 * 1024
+    private const val BRIDGE_EXECUTOR_CORE_THREADS = 2
+    private const val BRIDGE_EXECUTOR_MAX_THREADS = 8
+    private const val BRIDGE_EXECUTOR_QUEUE_CAPACITY = 64
     private val bridges = ConcurrentHashMap<String, RunningBridge>()
     private val http2LogStates = ConcurrentHashMap<String, Http2LogState>()
     private val http2FlowControls = ConcurrentHashMap<String, Http2FlowControl>()
-    private val executor = Executors.newCachedThreadPool()
+    private val executor = ThreadPoolExecutor(
+        BRIDGE_EXECUTOR_CORE_THREADS,
+        BRIDGE_EXECUTOR_MAX_THREADS,
+        30L,
+        TimeUnit.SECONDS,
+        LinkedBlockingQueue(BRIDGE_EXECUTOR_QUEUE_CAPACITY),
+        ThreadPoolExecutor.CallerRunsPolicy()
+    ).apply {
+        allowCoreThreadTimeOut(true)
+    }
 
     fun ensureBridge(
         context: Context,
@@ -640,9 +656,18 @@ object HttpsTlsBridgeManager {
                         streamState.dataFrames += 1
                         streamState.dataBytes += event.payloadLength.toLong()
                         if (direction == "server" && event.dataFragment.isNotEmpty()) {
+                            val headerInspection = streamState.lastHeaderInspection
+                            val shouldInspectData = headerInspection != null &&
+                                !streamState.blockedByAction &&
+                                headerInspection.responseLike &&
+                                headerInspection.suspiciousScore >= HTTP2_DATA_DEEP_INSPECTION_SCORE_THRESHOLD
+                            if (!shouldInspectData) {
+                                streamState.lastDataSample = trimHttp2DataSample(streamState.lastDataSample, event.dataFragment)
+                                return@forEachIndexed
+                            }
                             val dataInspection = HttpMitmFilter.inspectHttp2DataSample(
                                 session = session,
-                                headerInspection = streamState.lastHeaderInspection,
+                                headerInspection = headerInspection,
                                 currentSample = streamState.lastDataSample,
                                 incomingFragment = event.dataFragment
                             )
@@ -972,7 +997,7 @@ object HttpsTlsBridgeManager {
     }
 
     private fun trimHttp2DataSample(existing: ByteArray, incoming: ByteArray): ByteArray {
-        val maxBytes = 8 * 1024
+        val maxBytes = HTTP2_DATA_SAMPLE_MAX_BYTES
         if (existing.size >= maxBytes) return existing.copyOf(maxBytes)
         val remaining = maxBytes - existing.size
         val addition = if (incoming.size <= remaining) incoming else incoming.copyOf(remaining)
