@@ -1390,14 +1390,14 @@ object RuleRepository {
         val seen = mutableSetOf<String>()
         val toRemove = mutableSetOf<String>()
         rules.forEach { rule ->
-            val key = "${rule.domain}|${rule.vendor}|${rule.source}|${rule.keywordPattern}|${rule.domainRegex}|${rule.regexPattern}|${rule.cosmeticSelector}"
+            val key = "${rule.domain}|${rule.vendor}|${rule.source}|${rule.keywordPattern}|${rule.regexPattern}|${rule.cosmeticSelector}"
             if (!seen.add(key)) {
                 toRemove += rule.id
             }
         }
         if (toRemove.isNotEmpty()) {
             removeByIds(context, toRemove)
-            invalidateCaches()
+            clearCaches()
         }
         return toRemove.size
     }
@@ -1797,7 +1797,6 @@ object RuleRepository {
         if (line.isBlank() || line.startsWith("#") || line.startsWith("!")) return emptyList()
         parseCosmeticRule(line)?.let { return listOf(it) }
         parseRegexRule(line)?.let { return listOf(it) }
-        parseSurgeOrChain(line)?.let { return it }
         parseClashRule(line)?.let { return it }
         parseSurgeWildcardDomain(line)?.let { return it }
         parseLoonKeywordRule(line)?.let { return it }
@@ -1809,7 +1808,7 @@ object RuleRepository {
         val trimmedLine = line.trim()
         if (trimmedLine.startsWith("+.") && trimmedLine.substring(2).isNotBlank()) {
             val suffixDomain = sanitizeDomain(trimmedLine.substring(2))
-            if (suffixDomain != null) return listOf(ParsedRule(domain = suffixDomain))
+            if (suffixDomain != null) return listOf(ParsedRule(domain = suffixDomain, isException = false))
         }
 
         val isException = line.startsWith("@@")
@@ -1880,7 +1879,7 @@ object RuleRepository {
         if (trimmed.startsWith("..") || trimmed.startsWith("*.")) {
             val domainPart = trimmed.removePrefix("*.").removePrefix(".")
             val domain = sanitizeDomain(domainPart) ?: return null
-            return listOf(ParsedRule(domain = domain))
+            return listOf(ParsedRule(domain = domain, isException = false))
         }
         return null
     }
@@ -1892,7 +1891,7 @@ object RuleRepository {
             !trimmed.startsWith("HOST-KEYWORD:", ignoreCase = true)) return null
         val value = trimmed.substringAfter(':', missingDelimiterValue = "").trim()
         if (value.isBlank()) return null
-        return listOf(ParsedRule(domain = value, keywordPattern = value.lowercase()))
+        return listOf(ParsedRule(domain = value, isException = false, keywordPattern = value.lowercase()))
     }
 
     private fun parseLoonUrlRegex(line: String): List<ParsedRule>? {
@@ -1902,7 +1901,7 @@ object RuleRepository {
         val value = trimmed.substringAfter(':', missingDelimiterValue = "").trim()
         if (value.isBlank()) return null
         val cleaned = value.removePrefix("\"").removeSuffix("\"")
-        return listOf(ParsedRule(domain = cleaned, regexPattern = cleaned))
+        return listOf(ParsedRule(domain = cleaned, isException = false, regexPattern = cleaned))
     }
 
     private fun parseAbpDomainRule(line: String): List<ParsedRule>? {
@@ -1915,7 +1914,7 @@ object RuleRepository {
         val domain = abpPart.removePrefix("||").substringBefore('^').substringBefore('/').trim()
         if (domain.isBlank()) return null
         val sanitized = sanitizeDomain(domain) ?: return null
-        return listOf(ParsedRule(domain = sanitized))
+        return listOf(ParsedRule(domain = sanitized, isException = false))
     }
 
     private fun parseShadowrocketRule(line: String): List<ParsedRule>? {
@@ -1927,17 +1926,17 @@ object RuleRepository {
         return when (prefix.lowercase()) {
             "domain", "full", "full-domain", "host", "hostname" -> {
                 val domain = sanitizeDomain(value) ?: return null
-                listOf(ParsedRule(domain = domain))
+                listOf(ParsedRule(domain = domain, isException = false))
             }
             "domain-suffix", "host-suffix", "suffix" -> {
                 val domain = sanitizeDomain(value) ?: return null
-                listOf(ParsedRule(domain = domain))
+                listOf(ParsedRule(domain = domain, isException = false))
             }
             "domain-keyword", "host-keyword", "keyword" -> {
-                listOf(ParsedRule(domain = value, keywordPattern = value.lowercase()))
+                listOf(ParsedRule(domain = value, isException = false, keywordPattern = value.lowercase()))
             }
             "url-regex", "url-regexp", "regex" -> {
-                listOf(ParsedRule(domain = value, regexPattern = value))
+                listOf(ParsedRule(domain = value, isException = false, regexPattern = value))
             }
             "user-agent", "ua" -> {
                 emptyList()
@@ -1954,7 +1953,7 @@ object RuleRepository {
         if (!trimmed.startsWith("URL-KEYWORD:", ignoreCase = true)) return null
         val value = trimmed.substringAfter(':', missingDelimiterValue = "").trim()
         if (value.isBlank()) return null
-        return listOf(ParsedRule(domain = value, keywordPattern = value.lowercase()))
+        return listOf(ParsedRule(domain = value, isException = false, keywordPattern = value.lowercase()))
     }
 
     private fun parseClashRule(line: String): List<ParsedRule>? {
@@ -1967,25 +1966,25 @@ object RuleRepository {
         return when (ruleType) {
             "DOMAIN-SUFFIX", "HOST-SUFFIX", "DOMAIN-SUFFIXES" -> {
                 val domain = sanitizeDomain(value) ?: return null
-                listOf(ParsedRule(domain = domain))
+                listOf(ParsedRule(domain = domain, isException = false))
             }
             "DOMAIN", "HOST" -> {
                 val domain = sanitizeDomain(value) ?: return null
-                listOf(ParsedRule(domain = domain))
+                listOf(ParsedRule(domain = domain, isException = false))
             }
             "DOMAIN-KEYWORD", "HOST-KEYWORD" -> {
-                listOf(ParsedRule(domain = value, keywordPattern = value.lowercase()))
+                listOf(ParsedRule(domain = value, isException = false, keywordPattern = value.lowercase()))
             }
             "DOMAIN-WILDCARD", "HOST-WILDCARD" -> {
                 val cleaned = value.removePrefix("*.").removePrefix("*.")
                 val domain = sanitizeDomain(cleaned) ?: return null
-                listOf(ParsedRule(domain = domain))
+                listOf(ParsedRule(domain = domain, isException = false))
             }
             "URL-REGEX", "URL-REGEXP" -> {
-                listOf(ParsedRule(domain = value, regexPattern = value))
+                listOf(ParsedRule(domain = value, isException = false, regexPattern = value))
             }
             "URL-KEYWORD" -> {
-                listOf(ParsedRule(domain = value, keywordPattern = value.lowercase()))
+                listOf(ParsedRule(domain = value, isException = false, keywordPattern = value.lowercase()))
             }
             "USER-AGENT", "UA" -> {
                 emptyList()
@@ -2544,6 +2543,18 @@ object RuleRepository {
             .putString(KEY_RULES, gson.toJson(normalizedRules))
             .apply()
         updateRuleCache(normalizedRules)
+    }
+
+    private fun clearCaches() {
+        cachedRules = null
+        cachedBlockedDomains = null
+        cachedRuleMap = null
+        cachedRegexRules = null
+        cachedCosmeticRules = null
+        cachedKeywordRules = null
+        cachedRuleInventory = null
+        cachedCompiledRegexRules = emptyMap()
+        cachedWhitelistHits.clear()
     }
 
     private fun readCustomVendorMap(context: Context): Map<String, String> {
