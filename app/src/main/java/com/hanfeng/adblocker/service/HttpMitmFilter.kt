@@ -1049,6 +1049,10 @@ object HttpMitmFilter {
         val context = TlsMitmSessionManager.requireContext()
         val normalizedHost = normalizeAuthority(host)
         if (normalizedHost.isBlank()) return false
+        // 游戏和社交 APP 核心服务跳过深度检查（提升性能，降低延迟）
+        val lowerHost = normalizedHost.lowercase()
+        if (RuleRepository.gameCoreDomains.any { lowerHost == it || lowerHost.endsWith(".$it") }) return false
+        if (RuleRepository.socialCoreDomains.any { lowerHost == it || lowerHost.endsWith(".$it") }) return false
         if (RuleRepository.isWhitelistedDomain(normalizedHost)) return false
         if (RuleRepository.isBlocked(context, normalizedHost, appName = appName)) return true
         if (path != null && RuleRepository.isUrlBlocked(context, normalizedHost, path.lowercase(), appName)) return true

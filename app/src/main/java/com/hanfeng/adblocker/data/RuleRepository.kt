@@ -30,32 +30,90 @@ object RuleRepository {
     // 策略：只保护基础服务，不保护纯广告域名
     // 包含主域名和通配符规则，防止 ||domain.com^ 这种规则导致整个域名被拦截
     private val whitelistDomains = setOf(
-        // 微信小程序/支付宝 - 完全保护
+        // 微信/QQ 核心服务 - 完全保护（确保聊天、支付、小程序正常）
         "servicewechat.com",
         "alipay.com",
         "alipay.cn",
-        // 微信 DNS 服务
         "dns.weixin.qq.com.cn",
         "aedns.weixin.qq.com",
-        // APP 启动核心域名（精确匹配，不做子域名通配）
-        "clientservices.googleapis.com",
-        "update.googleapis.com",
-        "android.clients.google.com",
-        "play.googleapis.com",
-        "firebaseinstallations.googleapis.com",
-        "app-measurement.com",
-        "firebase-analytics.com",
-        // 阿里系
+        "wx.qq.com",
+        "web.weixin.qq.com",
+        "mp.weixin.qq.com",
+        "long.weixin.qq.com",
+        "szshort.weixin.qq.com",
+        "wa.gtimg.com",
+        "qlogo.cn",
+        "qlogo.com",
+        "qpic.cn",
+        "qpic.com",
+        "gtimg.com",
+        "gtimg.cn",
+        "tencent.com",
+        "qq.com",
+        "weixin.com",
+        "wechat.com",
+        // 支付相关 - 完全保护
+        "qpay.tf.qq.com",
+        "qpay.qq.com",
+        "tenpay.com",
+        "paipai.com",
+        // 游戏核心服务 - 完全保护（确保登录、联机、更新正常）
+        "gamedl.qq.com",
+        "game.qq.com",
+        "gamesafe.qq.com",
+        "gameinfo.qq.com",
+        "gamecenter.qq.com",
+        "sso.10.qq.com",
+        "open.id.qq.com",
+        "ssl.ptlogin2.qq.com",
+        "ptlogin2.qq.com",
+        "dl.dir.qq.com",
+        "dlied1.qq.com",
+        "dlied2.qq.com",
+        "dlied3.qq.com",
+        "dlied4.qq.com",
+        "dlied5.qq.com",
+        "dlied6.qq.com",
+        // 王者荣耀/和平精英等游戏资源
+        "gamehelper.com.cn",
+        "act.qq.com",
+        "imgcache.qq.com",
+        // 原神/米哈游游戏
+        "miHoYo.com",
+        "mihayo.com",
+        "yuanshen.com",
+        "hoyolab.com",
+        "hoyoverse.com",
+        "bhsr.com",
+        "starrails.com",
+        "genshin impact.com",
+        // 腾讯其他游戏
+        "dnf.qq.com",
+        "cf.qq.com",
+        "lol.qq.com",
+        "speed.qq.com",
+        "fifa.qq.com",
+        "2k.qq.com",
+        // 网易游戏
+        "game.163.com",
+        "163.com",
+        "netease.com",
+        "126.net",
+        "127.net",
+        // 通用 CDN 和下载服务 - 完全保护
         "alicdn.com",
         "alibaba.com",
         "taobao.com",
         "aliyun.com",
-        // 网商银行/金融机构 - 完全保护
+        "cdndm.com",
+        "cdn.hockeyapp.net",
+        "fir.im",
+        // 金融/银行 - 完全保护
         "webank.com",
         "webankcdn.net",
         "wldservice.com",
         "constid.dingxiang-inc.com",
-        // Google 服务 - 完全保护
+        // Google 基础服务 - 完全保护（确保 Play 商店、推送正常）
         "firebaseinstallations.googleapis.com",
         "googleapis.com",
         "gstatic.com",
@@ -78,54 +136,12 @@ object RuleRepository {
         // 友盟统计 - 保护主域名和基础日志服务
         "umeng.com",
         "umengcloud.com",
-        // 网飞猫/在线视频 - 完全保护
-        "netease.com",
-        "126.net",
-        "127.net",
+        // 在线视频 CDN - 完全保护（防卡顿/缓冲异常）
         "hdzixun.com",
-        // 夸克/UC/阿里系 - 完全保护
-        "uczzd.cn",
-        "ucweb.com",
-        "quark.cn",
-        "alibaba-inc.com",
-        // 豌豆荚 - 完全保护
-        "wandoujia.com",
-        "wdj.com",
-        "wdjimg.com",
-        // 百度贴吧/百度系 - 完全保护
-        "baidu.com",
-        "bdstatic.com",
-        "tieba.com",
-        "tiebaimg.com",
-        "baidustatic.com",
-        // 知乎 - 完全保护
-        "zhihu.com",
-        "zhimg.com",
-        "zhihuimg.com",
-        // 腾讯系 - 完全保护
-        "qq.com",
-        "tencent.com",
-        "weixin.com",
-        "wechat.com",
-        "gtimg.cn",
-        "qpic.cn",
-        // 字节系 - 完全保护
-        "snssdk.com",
-        "toutiao.com",
-        "iesdouyin.com",
-        "amemv.com",
-        "pstatp.com",
-        // 通用 CDN
-        "ghpym.com",
-        "wscdns.com",
-        "21vianet.com",
-        "ksyuncdn.com",
-        // 视频直播流媒体 CDN - 完全保护（防卡顿/缓冲异常）
         "douyinvod.com",
         "douyincdn.com",
         "bytegoofy.com",
         "video.qq.com",
-        "qpic.cn",
         "qcloudimg.com",
         "cdn-go.cn",
         "bcebos.com",
@@ -338,6 +354,35 @@ object RuleRepository {
         "zongheng.com",
         "17k.com",
         "changdu.com"
+    )
+    
+    // 游戏核心服务域名（确保登录、联机、更新正常）
+    private val gameCoreDomains = setOf(
+        // 腾讯游戏
+        "gamehelper.com.cn", "act.qq.com", "imgcache.qq.com",
+        "gamedl.qq.com", "game.qq.com", "gamesafe.qq.com", "gameinfo.qq.com",
+        "gamecenter.qq.com", "sso.10.qq.com", "open.id.qq.com",
+        "ssl.ptlogin2.qq.com", "ptlogin2.qq.com",
+        "dl.dir.qq.com", "dlied1.qq.com", "dlied2.qq.com",
+        "dlied3.qq.com", "dlied4.qq.com", "dlied5.qq.com", "dlied6.qq.com",
+        // 米哈游
+        "miHoYo.com", "mihayo.com", "yuanshen.com", "hoyolab.com",
+        "hoyoverse.com", "bhsr.com", "starrails.com",
+        // 网易
+        "game.163.com",
+        // 通用下载 CDN
+        "cdndm.com", "cdn.hockeyapp.net", "fir.im"
+    )
+    
+    // 社交 APP 核心域名（确保聊天、语音、视频正常）
+    private val socialCoreDomains = setOf(
+        // 微信 QQ
+        "wx.qq.com", "web.weixin.qq.com", "mp.weixin.qq.com",
+        "long.weixin.qq.com", "szshort.weixin.qq.com",
+        "qlogo.cn", "qlogo.com", "qpic.cn", "qpic.com",
+        "gtimg.com", "gtimg.cn",
+        // 支付
+        "qpay.tf.qq.com", "qpay.qq.com", "tenpay.com", "paipai.com"
     )
     
     // 小说内容 API 白名单 (这些域名/子域名专门提供小说内容，不拦截)
@@ -1460,6 +1505,10 @@ object RuleRepository {
         if (hasMatchingRule(context, normalized)) return false
         // 小说内容 API 域名不拦截
         if (novelContentApiDomains.contains(normalized) || novelContentApiDomains.any { normalized.endsWith(".$it") }) return false
+        // 游戏核心服务不拦截（确保游戏正常运行）
+        if (gameCoreDomains.contains(normalized) || gameCoreDomains.any { normalized.endsWith(".$it") }) return false
+        // 社交 APP 核心服务不拦截（确保微信 QQ 正常）
+        if (socialCoreDomains.contains(normalized) || socialCoreDomains.any { normalized.endsWith(".$it") }) return false
         val normalizedVendor = normalizeVendorName(vendor)
         val lower = normalized.lowercase()
         // 增强广告域名信号检测 - 扩大关键词范围
@@ -1722,6 +1771,10 @@ object RuleRepository {
         // 排除明显的广告子域名
         val adSubdomainPatterns = listOf("ad", "ads", "adserver", "adtrack", "adlog", "adx", "adv", "banner", "splash", "promotion", "promo", "marketing", "track", "tracking", "log", "logger", "stat", "stats", "analytics")
         if (adSubdomainPatterns.any { lower.startsWith("$it.") || lower.startsWith("$it-") || lower == it }) return false
+        // 游戏核心服务不保护（避免误拦截）
+        if (gameCoreDomains.contains(normalized) || gameCoreDomains.any { normalized.endsWith(".$it") }) return false
+        // 社交核心服务不保护（避免误拦截）
+        if (socialCoreDomains.contains(normalized) || socialCoreDomains.any { normalized.endsWith(".$it") }) return false
         return buildDomainCandidates(normalized).any(novelAppProtectedSuffixes::contains)
     }
 
