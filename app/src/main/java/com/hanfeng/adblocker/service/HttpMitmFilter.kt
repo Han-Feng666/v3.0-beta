@@ -16,7 +16,11 @@ object HttpMitmFilter {
     private val responseAdKeywords = listOf(
         "adview", "adslot", "adunit", "advert", "banner", "splash", "reward", "preload", "promo", "promotion", "tracker", "tracking",
         "launch", "startup", "popup", "interstitial", "feedad", "open_screen", "openad", "floatad", "bottomad", "fullscreen",
-        "nativead", "nativead", "videoad", "rewardad", "loginad", "guidead", "scrollad", "pushad"
+        "nativead", "nativead", "videoad", "rewardad", "loginad", "guidead", "scrollad", "pushad",
+        // 新增广告响应特征
+        "ad_response", "adresponse", "ad_result", "adresult", "ad_result_data", "addata",
+        "ad_config", "adconfig", "ad_material", "admaterial", "ad_creative", "adcreative",
+        "ad_sequence", "adsequence", "ad_strategy", "adstrategy", "ad_serving", "adserving"
     )
     private val htmlAdMarkers = listOf(
         "adsbygoogle",
@@ -276,7 +280,10 @@ object HttpMitmFilter {
         ".native-ad"
     )
     private const val HTTP2_REQUEST_BLOCK_CANDIDATE_SCORE = 5
-    private const val HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE = 4
+    private const val HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE = 3
+    private const val HTTP1_RESPONSE_BLOCK_SCORE = 2
+    private const val HTTP1_NOVEL_RESPONSE_BLOCK_SCORE = 1
+    private const val HTTP2_NOVEL_RESPONSE_BLOCK_SCORE = 2
 
     private val TRANSPARENT_1X1_GIF = byteArrayOf(
         0x47.toByte(), 0x49.toByte(), 0x46.toByte(), 0x38.toByte(), 0x39.toByte(), 0x61.toByte(),
@@ -612,12 +619,17 @@ object HttpMitmFilter {
         if (isKnownAdVendor(vendor)) suspiciousScore += 2
         if (aggressiveNovelTarget) suspiciousScore += 3
         // 降低拦截阈值：小说 APP 1 分拦截，普通应用 2 分拦截
-        val threshold = if (isNovelApp) 1 else 2
+        val threshold = if (isNovelApp) HTTP2_NOVEL_RESPONSE_BLOCK_SCORE else HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE
         if (suspiciousScore < threshold) return null
         val preview = decoded.replace('\r', ' ').replace('\n', ' ').take(160)
         val reasons = bodySignals.reasons.toMutableList()
         if (isKnownAdVendor(vendor)) reasons += "vendor:$vendor"
         if (aggressiveNovelTarget) reasons += "novel-app-aggressive"
+        // 新增：Content-Type 包含广告特征
+        if (contentType.contains("json") && strongResponseAdKeywords.any { lowerBody.contains(it) }) {
+            suspiciousScore += 2
+            reasons += "json-ad-content"
+        }
         return Http2DataInspection(
             suspiciousScore = suspiciousScore,
             suspiciousReasons = reasons.distinct(),
@@ -747,26 +759,43 @@ object HttpMitmFilter {
         val host = normalizeAuthority(requestInspection?.host ?: session.host)
         if (host.isBlank()) return null
         val lowerPath = requestInspection?.path?.lowercase().orEmpty()
+        val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         if (RuleRepository.isBlocked(context, host, appName = session.appName)) return "neutralized-blocked-host"
         if (RuleRepository.isUrlBlocked(context, host, lowerPath, session.appName)) return "neutralized-blocked-url"
         if (RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(context, host, lowerPath, session.appName)) {
             return "neutralized-novel-protected-path"
         }
         val vendor = RuleRepository.classifyVendorFromHints(context, host, session.appName)
-        if (RuleRepository.shouldAggressivelyBlockForNovelApp(context, host, session.appName, vendor)) {
+        // 小说 APP 激进拦截
+        if (isNovelApp && RuleRepository.shouldAggressivelyBlockForNovelApp(context, host, session.appName, vendor)) {
+            return "neutralized-novel-app-aggressive"
+        }
+        if (!isNovelApp && RuleRepository.shouldAggressivelyBlockForNovelApp(context, host, session.appName, vendor)) {
             return "neutralized-novel-app-aggressive"
         }
         if (looksLikeSuspiciousHttpPath(lowerPath)) {
             return "neutralized-suspicious-path"
         }
+        // 增强 Header 追踪字段检测
         val headerTrackingHits = adTrackingHeaderFields.count { field ->
             location.contains(field) || setCookie.contains(field)
+        }
+        if (headerTrackingHits >= 1 && isNovelApp) {
+            return "neutralized-header-tracking"
         }
         if (headerTrackingHits >= 2) {
             return "neutralized-header-tracking"
         }
+        // 增强广告 Vendor 检测
         if (isKnownAdVendor(vendor) && (strongResponseAdKeywords.any { location.contains(it) } || strongResponseAdKeywords.any { setCookie.contains(it) })) {
             return "neutralized-header-vendor-signal"
+        }
+        // 新增：Location/Response Header 中包含广告强特征
+        if (strongResponseAdKeywords.any { location.lowercase().contains(it) }) {
+            return "neutralized-location-ad-keyword"
+        }
+        if (strongResponseAdKeywords.any { setCookie.lowercase().contains(it) }) {
+            return "neutralized-setcookie-ad-keyword"
         }
         return null
     }
@@ -1144,51 +1173,54 @@ object HttpMitmFilter {
             reasons += "blocked-url"
         }
         if (RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(context, lowerAuthority, lowerPath, session.appName)) {
-            suspiciousScore += 3
+            suspiciousScore += 4
             reasons += "novel-protected-path"
         }
         val vendor = RuleRepository.classifyVendorFromHints(context, lowerAuthority, session.appName)
+        val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         if (isKnownAdVendor(vendor)) {
-            suspiciousScore += 1
+            suspiciousScore += 2
             reasons += "vendor:$vendor"
         }
+        // 小说 APP 激进拦截 - 增加权重
         if (RuleRepository.shouldAggressivelyBlockForNovelApp(context, lowerAuthority, session.appName, vendor)) {
-            suspiciousScore += 2
+            suspiciousScore += if (isNovelApp) 4 else 3
             reasons += "novel-app-aggressive"
         }
         if (looksLikeSuspiciousHttpPath(lowerPath)) {
-            suspiciousScore += 2
+            suspiciousScore += if (isNovelApp) 3 else 2
             reasons += "path-keyword"
         }
         if (suspiciousHeaderKeywords.any { lowerReferer.contains(it) }) {
-            suspiciousScore += 1
+            suspiciousScore += if (isNovelApp) 2 else 1
             reasons += "referer-keyword"
         }
         if (suspiciousHeaderKeywords.any { lowerLocation.contains(it) }) {
-            suspiciousScore += 1
+            suspiciousScore += if (isNovelApp) 2 else 1
             reasons += "location-keyword"
         }
         if (suspiciousHeaderKeywords.any { lowerSetCookie.contains(it) }) {
-            suspiciousScore += 1
+            suspiciousScore += if (isNovelApp) 2 else 1
             reasons += "set-cookie-keyword"
         }
         if (strongResponseAdKeywords.any { lowerPath.contains(it) }) {
-            suspiciousScore += 2
+            suspiciousScore += 3
             reasons += "path-strong-keyword"
         }
         if (strongResponseAdKeywords.any { lowerLocation.contains(it) }) {
-            suspiciousScore += 2
+            suspiciousScore += 3
             reasons += "location-strong-keyword"
         }
         if (strongResponseAdKeywords.any { lowerSetCookie.contains(it) }) {
-            suspiciousScore += 2
+            suspiciousScore += 3
             reasons += "set-cookie-strong-keyword"
         }
+        // 增强追踪字段检测
         val headerTrackingHits = adTrackingHeaderFields.filter { field ->
             lowerLocation.contains(field) || lowerSetCookie.contains(field)
         }
         if (headerTrackingHits.isNotEmpty()) {
-            suspiciousScore += if (headerTrackingHits.size >= 2) 3 else 2
+            suspiciousScore += if (headerTrackingHits.size >= 2) 4 else (if (isNovelApp) 3 else 2)
             reasons += "header-tracking"
         }
         if (strongResponseAdKeywords.any { lowerContentType.contains(it) }) {
@@ -1219,7 +1251,11 @@ object HttpMitmFilter {
     }
 
     fun decideHttp2Action(inspection: Http2HeaderInspection): Http2ActionDecision {
-        if (inspection.suspiciousScore < HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE) {
+        val context = TlsMitmSessionManager.requireContext()
+        val isNovelApp = RuleRepository.isNovelAppHint(inspection.appName)
+        val threshold = if (isNovelApp) HTTP2_NOVEL_RESPONSE_BLOCK_SCORE else HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE
+        
+        if (inspection.suspiciousScore < threshold) {
             return Http2ActionDecision(
                 action = "allow",
                 confidence = "high",
@@ -1227,7 +1263,7 @@ object HttpMitmFilter {
                 shouldSyntheticRespond = false
             )
         }
-        val shouldBlock = shouldBlockHttp2ResponseFromHeaders(inspection)
+        val shouldBlock = shouldBlockHttp2ResponseFromHeaders(inspection, isNovelApp)
         return Http2ActionDecision(
             action = if (shouldBlock) "block" else "monitor",
             confidence = if (inspection.suspiciousScore >= 4) "high" else "medium",
@@ -1236,13 +1272,18 @@ object HttpMitmFilter {
         )
     }
 
-    private fun shouldBlockHttp2ResponseFromHeaders(inspection: Http2HeaderInspection): Boolean {
-        if (inspection.suspiciousScore < HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE) return false
+    private fun shouldBlockHttp2ResponseFromHeaders(inspection: Http2HeaderInspection, isNovelApp: Boolean = false): Boolean {
+        val context = TlsMitmSessionManager.requireContext()
+        val threshold = if (isNovelApp) HTTP2_NOVEL_RESPONSE_BLOCK_SCORE else HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE
+        if (inspection.suspiciousScore < threshold) return false
+        // 小说 APP 降低拦截门槛
+        if (isNovelApp && inspection.suspiciousScore >= 2) return true
         if (inspection.suspiciousScore >= 4) return true
         val reasons = inspection.suspiciousReasons.toSet()
         if (reasons.any { reason ->
                 reason == "blocked-host" ||
                     reason == "novel-app-aggressive" ||
+                    reason == "novel-protected-path" ||
                     reason.startsWith("header-field:") ||
                     reason == "path-strong-keyword" ||
                     reason == "location-strong-keyword" ||
