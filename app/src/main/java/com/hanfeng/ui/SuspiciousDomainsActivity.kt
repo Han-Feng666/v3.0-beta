@@ -27,6 +27,7 @@ import com.HanFeng.data.RuleRepository
 import com.HanFeng.databinding.ActivitySuspiciousDomainsBinding
 import com.HanFeng.databinding.ItemSuspiciousDomainBinding
 import com.HanFeng.model.RuleSource
+import com.HanFeng.service.AdBlockVpnService
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -43,6 +44,7 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
     private val selectedDomains = linkedSetOf<String>()
     private var hasChanges = false
     private var syncingFilterChecks = false
+    private var batchAdding = false
 
     private val adapter = SuspiciousDomainAdapter(
         onToggle = { sample, checked ->
@@ -85,6 +87,7 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
             adapter.setSelection(selectedDomains)
             updateSelectionSummary()
         }
+        binding.btnAddRecommended.setOnClickListener { addRecommendedRules() }
         binding.btnAddSelected.setOnClickListener { addSelectedRules() }
         binding.searchInput.doAfterTextChanged { applyFilter(it?.toString().orEmpty()) }
         binding.checkOnlyUnadded.setOnCheckedChangeListener { _, _ ->
@@ -119,6 +122,13 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val samples = withContext(Dispatchers.Default) {
                 RuleRepository.getSuspiciousDomainSamples(this@SuspiciousDomainsActivity).map { sample ->
+                    val confidenceScore = RuleRepository.suspiciousDomainConfidenceScore(
+                        domain = sample.domain,
+                        vendor = sample.lastVendor,
+                        novelHits = sample.novelHits,
+                        count = sample.count,
+                        appName = sample.lastAppName
+                    )
                     SuspiciousDomainItem(
                         domain = sample.domain,
                         count = sample.count,
@@ -126,7 +136,9 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
                         alreadyAdded = RuleRepository.hasMatchingRule(this@SuspiciousDomainsActivity, sample.domain),
                         lastAppName = sample.lastAppName,
                         vendor = sample.lastVendor,
-                        novelHits = sample.novelHits
+                        novelHits = sample.novelHits,
+                        confidenceScore = confidenceScore,
+                        highConfidence = confidenceScore >= 6
                     )
                 }
             }
@@ -154,7 +166,14 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
             }
             val matchesNovel = !onlyNovelApps || item.novelHits > 0 || RuleRepository.isNovelVendor(item.vendor)
             matchesKeyword && matchesAddedState && matchesNovel
-        }
+        }.sortedWith(
+            compareByDescending<SuspiciousDomainItem> { it.highConfidence }
+                .thenByDescending { it.confidenceScore }
+                .thenByDescending { it.novelHits }
+                .thenByDescending { it.count }
+                .thenByDescending { it.lastSeenAt }
+                .thenBy { it.domain }
+        )
         adapter.submit(visibleSamples, selectedDomains)
         binding.emptyText.text = if (allSamples.isEmpty()) "暂无可疑域名" else "当前筛选条件下暂无结果"
         binding.emptyText.visibility = if (visibleSamples.isEmpty()) View.VISIBLE else View.GONE
@@ -164,13 +183,28 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
     private fun updateSelectionSummary() {
         val selectableVisibleCount = visibleSamples.count { !it.alreadyAdded }
         val novelVisibleCount = visibleSamples.count { it.novelHits > 0 || RuleRepository.isNovelVendor(it.vendor) }
-        binding.selectionSummary.text = "已选择 ${selectedDomains.size} 项，可选 ${selectableVisibleCount} 项，当前可见 ${visibleSamples.size} 项，小说专项 ${novelVisibleCount} 项"
+        val recommendedVisibleCount = visibleSamples.count { it.highConfidence && !it.alreadyAdded }
+        binding.selectionSummary.text = "已选择 ${selectedDomains.size} 项，可选 ${selectableVisibleCount} 项，当前可见 ${visibleSamples.size} 项，推荐 ${recommendedVisibleCount} 项，小说专项 ${novelVisibleCount} 项"
         binding.btnSelectVisible.isEnabled = selectableVisibleCount > 0
         binding.btnSelectVisible.alpha = if (selectableVisibleCount > 0) 1f else 0.6f
+        binding.btnAddRecommended.isEnabled = recommendedVisibleCount > 0 && !batchAdding
+        binding.btnAddRecommended.alpha = if (recommendedVisibleCount > 0 && !batchAdding) 1f else 0.6f
         binding.btnClearSelection.isEnabled = selectedDomains.isNotEmpty()
         binding.btnClearSelection.alpha = if (selectedDomains.isNotEmpty()) 1f else 0.6f
-        binding.btnAddSelected.isEnabled = selectedDomains.isNotEmpty()
-        binding.btnAddSelected.alpha = if (selectedDomains.isNotEmpty()) 1f else 0.6f
+        binding.btnAddSelected.isEnabled = selectedDomains.isNotEmpty() && !batchAdding
+        binding.btnAddSelected.alpha = if (selectedDomains.isNotEmpty() && !batchAdding) 1f else 0.6f
+    }
+
+    private fun addRecommendedRules() {
+        if (batchAdding) return
+        val recommendedDomains = visibleSamples
+            .filter { it.highConfidence && !it.alreadyAdded }
+            .map { it.domain }
+        if (recommendedDomains.isEmpty()) {
+            Toast.makeText(this, "当前没有可直接添加的推荐规则", Toast.LENGTH_SHORT).show()
+            return
+        }
+        addDomainsInBackground(recommendedDomains, "已新增 %d 条推荐拦截规则，拦截服务已刷新")
     }
 
     private fun syncExclusiveFilter(isUnadded: Boolean) {
@@ -189,23 +223,39 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
             Toast.makeText(this, "请先选择要添加的域名", Toast.LENGTH_SHORT).show()
             return
         }
-        var addedCount = 0
-        selectedDomains.forEach { domain ->
-            if (RuleRepository.addRule(this, domain, RuleSource.MANUAL) != null) {
-                addedCount += 1
+        addDomainsInBackground(selectedDomains.toList(), "已新增 %d 条拦截规则，拦截服务已刷新")
+    }
+
+    private fun addDomainsInBackground(domains: List<String>, successMessageTemplate: String) {
+        if (batchAdding) return
+        batchAdding = true
+        binding.btnAddSelected.isEnabled = false
+        binding.btnAddSelected.alpha = 0.6f
+        binding.btnAddRecommended.isEnabled = false
+        binding.btnAddRecommended.alpha = 0.6f
+        binding.emptyText.visibility = View.VISIBLE
+        binding.emptyText.text = "正在添加拦截规则..."
+        lifecycleScope.launch {
+            val added = withContext(Dispatchers.Default) {
+                RuleRepository.addRules(this@SuspiciousDomainsActivity, domains, RuleSource.MANUAL)
             }
+            batchAdding = false
+            val addedCount = added.size
+            if (addedCount <= 0) {
+                binding.emptyText.visibility = if (visibleSamples.isEmpty()) View.VISIBLE else View.GONE
+                Toast.makeText(this@SuspiciousDomainsActivity, "这些域名已经添加过了", Toast.LENGTH_SHORT).show()
+                updateSelectionSummary()
+                return@launch
+            }
+            hasChanges = true
+            markDomainsAsAdded(added.map { it.domain })
+            selectedDomains.clear()
+            adapter.setSelection(selectedDomains)
+            startService(Intent(this@SuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+            LogRepository.append(this@SuspiciousDomainsActivity, "Batch added $addedCount suspicious domain rules")
+            Toast.makeText(this@SuspiciousDomainsActivity, successMessageTemplate.format(addedCount), Toast.LENGTH_SHORT).show()
+            finish()
         }
-        LogRepository.append(this, "Batch added $addedCount suspicious domain rules")
-        if (addedCount <= 0) {
-            Toast.makeText(this, "所选域名已存在", Toast.LENGTH_SHORT).show()
-            return
-        }
-        hasChanges = true
-        markDomainsAsAdded(selectedDomains)
-        selectedDomains.clear()
-        adapter.setSelection(selectedDomains)
-        Toast.makeText(this, "已新增 $addedCount 条拦截规则，规则页将自动刷新", Toast.LENGTH_SHORT).show()
-        finish()
     }
 
     private fun markDomainsAsAdded(domains: Collection<String>) {
@@ -245,14 +295,19 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
     }
 
     private fun addSingleRule(domain: String) {
-        val added = RuleRepository.addRule(this, domain, RuleSource.MANUAL)
-        if (added == null) {
-            Toast.makeText(this, "规则无效或已存在", Toast.LENGTH_SHORT).show()
-            return
+        lifecycleScope.launch {
+            val added = withContext(Dispatchers.Default) {
+                RuleRepository.addRule(this@SuspiciousDomainsActivity, domain, RuleSource.MANUAL)
+            }
+            if (added == null) {
+                Toast.makeText(this@SuspiciousDomainsActivity, "规则无效或已存在", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            hasChanges = true
+            markDomainsAsAdded(setOf(domain))
+            startService(Intent(this@SuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+            Toast.makeText(this@SuspiciousDomainsActivity, "已添加拦截规则并刷新拦截服务", Toast.LENGTH_SHORT).show()
         }
-        hasChanges = true
-        markDomainsAsAdded(setOf(domain))
-        Toast.makeText(this, "已添加拦截规则", Toast.LENGTH_SHORT).show()
     }
 
     private fun showVendorDialog(domain: String) {
@@ -277,17 +332,24 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
                     Toast.makeText(this, "分组名称不能为空", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
-                val added = RuleRepository.addRule(this, domain, RuleSource.MANUAL)
-                val targetRule = added ?: RuleRepository.findMatchingRule(this, domain)
-                if (targetRule == null) {
-                    Toast.makeText(this, "规则无效", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
+                lifecycleScope.launch {
+                    val targetRule = withContext(Dispatchers.Default) {
+                        val added = RuleRepository.addRule(this@SuspiciousDomainsActivity, domain, RuleSource.MANUAL)
+                        added ?: RuleRepository.findMatchingRule(this@SuspiciousDomainsActivity, domain)
+                    }
+                    if (targetRule == null) {
+                        Toast.makeText(this@SuspiciousDomainsActivity, "规则无效", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    withContext(Dispatchers.Default) {
+                        RuleRepository.updateRuleVendor(this@SuspiciousDomainsActivity, targetRule.id, vendor)
+                    }
+                    hasChanges = true
+                    markDomainsAsAdded(setOf(domain))
+                    startService(Intent(this@SuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+                    Toast.makeText(this@SuspiciousDomainsActivity, "已添加并分类，拦截服务已刷新", Toast.LENGTH_SHORT).show()
+                    dialog.dismiss()
                 }
-                RuleRepository.updateRuleVendor(this, targetRule.id, vendor)
-                hasChanges = true
-                markDomainsAsAdded(setOf(domain))
-                Toast.makeText(this, "已添加并分类", Toast.LENGTH_SHORT).show()
-                dialog.dismiss()
             }
         }
         dialog.show()
@@ -329,7 +391,9 @@ private data class SuspiciousDomainItem(
     val alreadyAdded: Boolean,
     val lastAppName: String,
     val vendor: String,
-    val novelHits: Int
+    val novelHits: Int,
+    val confidenceScore: Int,
+    val highConfidence: Boolean
 )
 
 private class SuspiciousDomainAdapter(
@@ -369,7 +433,8 @@ private class SuspiciousDomainAdapter(
             val appPart = item.lastAppName.ifBlank { "未知应用" }
             binding.countText.text = "最近出现：${formatItemTimestamp(item.lastSeenAt)}  ·  应用：$appPart"
             val novelPart = if (item.novelHits > 0) "  ·  小说专项 ${item.novelHits} 次" else ""
-            binding.statusText.text = (if (item.alreadyAdded) "状态：已添加规则" else "状态：未添加规则") + "  ·  厂商：${item.vendor}  ·  累计出现 ${item.count} 次$novelPart"
+            val confidencePart = if (item.highConfidence) "  ·  推荐 ${item.confidenceScore} 分" else "  ·  参考 ${item.confidenceScore} 分"
+            binding.statusText.text = (if (item.alreadyAdded) "状态：已添加规则" else "状态：未添加规则") + "  ·  厂商：${item.vendor}  ·  累计出现 ${item.count} 次$novelPart$confidencePart"
             binding.selectBox.setOnCheckedChangeListener(null)
             binding.selectBox.isChecked = selectedDomains.contains(item.domain)
             binding.selectBox.isEnabled = !item.alreadyAdded

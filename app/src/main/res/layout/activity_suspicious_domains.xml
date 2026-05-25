@@ -134,6 +134,18 @@
     </LinearLayout>
 
     <Button
+        android:id="@+id/btnAddRecommended"
+        android:layout_width="match_parent"
+        android:layout_height="40dp"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_button"
+        android:backgroundTint="@null"
+        android:text="一键添加推荐规则"
+        android:textAllCaps="false"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="14sp" />
+
+    <Button
         android:id="@+id/btnAddSelected"
         android:layout_width="match_parent"
         android:layout_height="48dp"

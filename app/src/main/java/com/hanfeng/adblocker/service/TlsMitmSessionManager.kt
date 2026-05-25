@@ -156,9 +156,9 @@ object TlsMitmSessionManager {
             normalized.startsWith("ssl-certificate-time:") -> 20 * 60 * 1000L
             normalized.startsWith("ssl-protocol:") -> 10 * 60 * 1000L
             normalized.startsWith("ssl-handshake:") && listOf("certificate", "cert", "pin", "trust anchor", "hostname").any { normalized.contains(it) } -> 30 * 60 * 1000L
-            normalized.startsWith("ssl-handshake:") -> 15 * 60 * 1000L
-            normalized.startsWith("io-bridge:") && listOf("connection reset", "broken pipe", "eof").any { normalized.contains(it) } -> 5 * 60 * 1000L
-            normalized.startsWith("io-bridge:") -> 2 * 60 * 1000L
+            normalized.startsWith("ssl-handshake:") -> 3 * 60 * 1000L
+            normalized.startsWith("io-bridge:") && listOf("connection reset", "broken pipe", "eof").any { normalized.contains(it) } -> 60 * 1000L
+            normalized.startsWith("io-bridge:") -> 30 * 1000L
             else -> 10 * 60 * 1000L
         }
     }

@@ -67,9 +67,9 @@ object StatsRepository {
     private var pendingFlushRunnable: Runnable? = null
     private val updateDispatchPending = AtomicBoolean(false)
     @Volatile private var lastUpdateDispatchAt = 0L
-    private const val UI_UPDATE_MIN_INTERVAL_MILLIS = 1200L
-    private const val FLUSH_DELAY_MILLIS = 15_000L
-    private const val FLUSH_EVENT_THRESHOLD = 24
+    private const val UI_UPDATE_MIN_INTERVAL_MILLIS = 2500L
+    private const val FLUSH_DELAY_MILLIS = 45_000L
+    private const val FLUSH_EVENT_THRESHOLD = 80
 
     private fun ensureInitialized(context: Context) {
         if (initialized) {

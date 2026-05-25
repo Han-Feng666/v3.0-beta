@@ -19,7 +19,9 @@ import kotlinx.coroutines.withContext
 
 class WhitelistActivity : AppCompatActivity() {
     private lateinit var binding: ActivityWhitelistBinding
+    private var batchUpdating = false
     private val adapter = AppListAdapter { app, checked ->
+        if (batchUpdating) return@AppListAdapter
         WhitelistRepository.toggle(this, app.packageName, checked)
         if (AdBlockVpnService.isRunning) {
             startService(Intent(this, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
@@ -40,6 +42,9 @@ class WhitelistActivity : AppCompatActivity() {
         }
         binding.appList.layoutManager = LinearLayoutManager(this)
         binding.appList.adapter = adapter
+
+        binding.btnInvertSelection.setOnClickListener { invertSelection() }
+
         loadApps()
     }
 
@@ -58,6 +63,35 @@ class WhitelistActivity : AppCompatActivity() {
             if (isFinishing || isDestroyed) return@launch
             adapter.submit(apps)
             binding.loadingOverlay.isVisible = false
+        }
+    }
+
+    private fun invertSelection() {
+        lifecycleScope.launch {
+            if (batchUpdating) return@launch
+            val apps = adapter.currentList
+            if (apps.isEmpty()) return@launch
+            batchUpdating = true
+            binding.btnInvertSelection.isEnabled = false
+            binding.loadingOverlay.isVisible = true
+
+            try {
+                withContext(Dispatchers.Default) {
+                    val updatedPackages = apps.asSequence()
+                        .filterNot { it.whitelisted }
+                        .mapTo(linkedSetOf()) { it.packageName }
+                    WhitelistRepository.replacePackages(this@WhitelistActivity, updatedPackages)
+                }
+
+                if (AdBlockVpnService.isRunning) {
+                    startService(Intent(this@WhitelistActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+                }
+                Toast.makeText(this@WhitelistActivity, "已反选并立即生效", Toast.LENGTH_SHORT).show()
+                loadApps()
+            } finally {
+                batchUpdating = false
+                binding.btnInvertSelection.isEnabled = true
+            }
         }
     }
 

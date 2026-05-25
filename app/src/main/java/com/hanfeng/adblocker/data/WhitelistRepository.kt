@@ -24,6 +24,13 @@ object WhitelistRepository {
             .apply()
     }
 
+    fun replacePackages(context: Context, packages: Set<String>) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet(KEY_PACKAGES, packages.toSet())
+            .apply()
+    }
+
     fun loadInstalledApps(context: Context): List<InstalledApp> {
         val pm = context.packageManager
         val white = getPackages(context)

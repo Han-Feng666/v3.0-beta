@@ -275,6 +275,7 @@ class MainActivity : AppCompatActivity() {
                 CertificateAuthorityManager.ensureCaInstalledFiles(applicationContext)
             }
             generated.onSuccess { cert ->
+                HttpsMitmRepository.clearRuntimeState(this@MainActivity)
                 if (AdBlockVpnService.isRunning) {
                     startService(Intent(this@MainActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
                 }
