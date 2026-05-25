@@ -51,6 +51,19 @@ object RuleRepository {
         "firebaseinstallations.googleapis.com",
         "googleapis.com",
         "gstatic.com",
+        "google.com",
+        "googleapis.cn",
+        "gvt1.com",
+        "gvt2.com",
+        "android.googleapis.com",
+        "play.googleapis.com",
+        "play.google.com",
+        "clientservices.googleapis.com",
+        "update.googleapis.com",
+        "android.clients.google.com",
+        "ssl.gstatic.com",
+        "fonts.googleapis.com",
+        "fonts.gstatic.com",
         // 隐私保护服务（误报）- 完全保护
         "ghostery.com",
         "ghostery.net",
@@ -1102,6 +1115,15 @@ object RuleRepository {
         }
     }
 
+    fun prewarmCaches(context: Context) {
+        if (cachedRules != null) return
+        getRules(context)
+        getRuleMap(context)
+        getRegexRules(context)
+        getCosmeticRules(context)
+        getKeywordRules(context)
+    }
+
     fun addRule(context: Context, rawDomain: String, source: RuleSource): BlockRule? {
         val domain = sanitizeDomain(rawDomain) ?: return null
         val current = getRules(context).toMutableList()
@@ -1442,6 +1464,33 @@ object RuleRepository {
         vendorSdkIdentifiers.entries.firstOrNull { (_, identifiers) -> identifiers.any { identifierMatches(lower, normalizedTokens, it) } }?.let {
             return normalizeVendorName(it.key).also { v -> cachedVendorMap[normalized] = v }
         }
+        val result = if (looksLikeAdDomain(lower)) GENERIC_AD_VENDOR else DEFAULT_VENDOR
+        cachedVendorMap[normalized] = result
+        return result
+    }
+
+    fun classifyVendorSimple(context: Context, domain: String, vararg hints: String?): String? {
+        val normalized = sanitizeDomain(domain) ?: return null
+        cachedVendorMap[normalized]?.let { return it }
+        val lower = normalized.lowercase()
+        val normalizedTokens = lower.replace(alphanumericRegex, "")
+        vendorPatterns.entries.firstOrNull { (_, patterns) -> patterns.any { lower.contains(it) } }?.let {
+            return normalizeVendorName(it.key).also { v -> cachedVendorMap[normalized] = v }
+        }
+        vendorKeywords.entries.firstOrNull { (_, keywords) -> keywords.any { keywordMatches(lower, normalizedTokens, it) } }?.let {
+            return normalizeVendorName(it.key).also { v -> cachedVendorMap[normalized] = v }
+        }
+        val hintMatches = hints
+            .asSequence()
+            .filterNotNull()
+            .map { it.trim().lowercase() }
+            .filter { it.isNotBlank() }
+            .mapNotNull { hint ->
+                val hintTokens = hint.replace(alphanumericCnRegex, "")
+                vendorSdkIdentifiers.entries.firstOrNull { (_, identifiers) -> identifiers.any { identifierMatches(hint, hintTokens, it) } }?.key
+            }
+            .firstOrNull()
+        hintMatches?.let { return normalizeVendorName(it).also { v -> cachedVendorMap[normalized] = v } }
         val result = if (looksLikeAdDomain(lower)) GENERIC_AD_VENDOR else DEFAULT_VENDOR
         cachedVendorMap[normalized] = result
         return result

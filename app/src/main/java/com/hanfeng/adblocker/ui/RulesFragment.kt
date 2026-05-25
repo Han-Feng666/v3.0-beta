@@ -255,11 +255,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 }
                 val items = buildList {
                     grouped.forEach { (vendor, groupRules) ->
-                        val matchesVendor = query.isEmpty() || vendor.lowercase().contains(query)
+                        val vendorLower = vendor.lowercase()
+                        val matchesVendor = query.isEmpty() || vendorLower.contains(query)
                         val filteredRules = if (query.isEmpty()) {
                             groupRules
                         } else {
-                            groupRules.filter { it.domain.lowercase().contains(query) }
+                            groupRules.filter {
+                                it.domain.lowercase().contains(query)
+                                    || it.vendor.lowercase().contains(query)
+                                    || it.keywordPattern?.lowercase()?.contains(query) == true
+                                    || it.regexPattern?.lowercase()?.contains(query) == true
+                            }
                         }
                         if (filteredRules.isNotEmpty() || matchesVendor) {
                             val autoExpand = query.isNotEmpty()

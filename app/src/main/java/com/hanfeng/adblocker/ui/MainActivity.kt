@@ -111,12 +111,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun preloadBundledRules() {
         lifecycleScope.launch {
-            val imported = withContext(Dispatchers.Default) {
+            withContext(Dispatchers.Default) {
                 RuleRepository.ensureBundledReferenceRules(applicationContext)
+                RuleRepository.prewarmCaches(applicationContext)
             }
-            if (imported > 0) {
-                LogRepository.append(this@MainActivity, "Preloaded $imported bundled safe rules")
-            }
+            LogRepository.append(this@MainActivity, "Rules prewarmed")
         }
     }
 
