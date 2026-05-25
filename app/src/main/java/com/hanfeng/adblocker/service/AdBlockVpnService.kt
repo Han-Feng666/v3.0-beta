@@ -466,14 +466,18 @@ class AdBlockVpnService : VpnService() {
             ?: route?.vendor?.takeIf { it.isNotBlank() }
             ?: RuleRepository.classifyVendorFromHints(this, domain, appName)
         val matchedRule = RuleRepository.findMatchingRule(this, domain)
+        val isBlocked = RuleRepository.isBlocked(this, domain)
         val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, domain, appName, vendor)
+        val protectedNovelUrlBlock = RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(this, domain, null, appName)
         val bypassReason = HttpsMitmRepository.getActiveBypassReason(this, domain)
         val shouldForceTcpFallback = httpDecryptEnabled && httpsTarget != null && bypassReason == null
-        if (matchedRule == null && !aggressiveNovelBlock && !shouldForceTcpFallback) return false
+        if (matchedRule == null && !isBlocked && !aggressiveNovelBlock && !protectedNovelUrlBlock && !shouldForceTcpFallback) return false
 
         val reason = when {
             matchedRule != null -> "matched-rule"
+            isBlocked -> "is-blocked"
             aggressiveNovelBlock -> "novel-aggressive"
+            protectedNovelUrlBlock -> "novel-protected-url"
             else -> "force-tcp-fallback"
         }
         StatsRepository.recordBlockedHttp(this, vendor, appName, 64 * 1024)
@@ -486,9 +490,18 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun looksLikeQuicPacket(payload: ByteArray): Boolean {
+        if (payload.size < 5) return false
         val firstByte = payload[0].toInt() and 0xFF
-        if ((firstByte and 0x40) == 0) return false
-        return (firstByte and 0x80) != 0 || firstByte in 0x40..0x7f
+        // QUIC 包特征：header form bit (0x80) + fixed bit (0x40)
+        // Initial 包：0xC0-0xCF, Handshake 包：0xD0-0xDF, 0-RTT 包：0xE0-0xEF, 1-RTT 包：0x40-0x7F
+        val isQuicHeader = (firstByte and 0xC0) == 0xC0 || (firstByte and 0xC0) == 0x80 || (firstByte and 0x80) == 0x40
+        if (!isQuicHeader) return false
+        // 检查是否是 QUIC Initial 包（最常见于连接建立）
+        val packetType = (firstByte and 0x30) shr 4
+        val isInitialOrHandshake = packetType == 0x00 || packetType == 0x01 || packetType == 0x02
+        // 1-RTT 包（加密数据包）通过 range 0x40-0x7F 识别
+        val is1Rtt = (firstByte and 0xC0) == 0x40
+        return isInitialOrHandshake || is1Rtt
     }
 
     private fun shouldBlockHttpDecryptConnection(info: com.HanFeng.model.PacketInfo): Boolean {
