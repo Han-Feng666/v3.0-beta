@@ -339,6 +339,42 @@ object RuleRepository {
         "17k.com",
         "changdu.com"
     )
+    
+    // 小说内容 API 白名单 (这些域名/子域名专门提供小说内容，不拦截)
+    private val novelContentApiDomains = setOf(
+        // 番茄小说
+        "api.fanqienovel.com",
+        "api1.fanqienovel.com",
+        "api2.fanqienovel.com",
+        "reader-api.fanqienovel.com",
+        "api-access.fqnovel.com",
+        "reader-api.fqnovel.com",
+        // 七猫小说
+        "api.qimao.com",
+        "webnovel.qimao.com",
+        "reader-api.kmxs.com",
+        // 起点读书
+        "bookapi.qidian.com",
+        "read.qidian.com",
+        "trader.qidian.com",
+        // QQ 阅读
+        "book.qqreader.com",
+        "reader.qq.com",
+        "api.weread.qq.com",
+        // 书旗小说
+        "api.shuqi.com",
+        "reader.aliwx.com",
+        // 掌阅
+        "api.ireader.com",
+        "book.zhangyue.com",
+        // 其他
+        "api.cmread.com",
+        "api.migu.com",
+        "api.midu.com",
+        "api.zongheng.com",
+        "api.17k.com",
+        "api.changdu.com"
+    )
     private val novelAggressiveVendorNames = setOf(
         "优比客思 (UBIX Ads)",
         "QXM (QXM Ads)",
@@ -1401,10 +1437,16 @@ object RuleRepository {
         if (!isNovelAppHint(appName)) return false
         if (isWhitelistedDomain(normalized)) return false
         if (hasMatchingRule(context, normalized)) return false
-        if (isProtectedNovelAppDomain(normalized)) return false
-        if (buildDomainCandidates(normalized).any(novelAggressiveExactDomains::contains)) return true
+        // 小说内容 API 域名不拦截
+        if (novelContentApiDomains.contains(normalized) || novelContentApiDomains.any { normalized.endsWith(".$it") }) return false
         val normalizedVendor = normalizeVendorName(vendor)
         if (!novelAggressiveVendorNames.contains(normalizedVendor)) return false
+        val lower = normalized.lowercase()
+        // 明确的广告域名信号优先于保护逻辑
+        val hasAggressiveSignal = lower.contains("ad") || lower.contains("ads") || lower.contains("banner") || lower.contains("splash") || lower.contains("promo") || lower.contains("tracking")
+        if (hasAggressiveSignal) return true
+        if (isProtectedNovelAppDomain(normalized)) return false
+        if (buildDomainCandidates(normalized).any(novelAggressiveExactDomains::contains)) return true
         return looksLikeAdDomain(normalized) && hasAggressiveNovelAdSignal(normalized)
     }
 
@@ -1643,6 +1685,10 @@ object RuleRepository {
 
     fun isProtectedNovelAppDomain(domain: String): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
+        val lower = normalized.lowercase()
+        // 排除明显的广告子域名
+        val adSubdomainPatterns = listOf("ad", "ads", "adserver", "adtrack", "adlog", "adx", "adv", "banner", "splash", "promotion", "promo", "marketing", "track", "tracking", "log", "logger", "stat", "stats", "analytics")
+        if (adSubdomainPatterns.any { lower.startsWith("$it.") || lower.startsWith("$it-") || lower == it }) return false
         return buildDomainCandidates(normalized).any(novelAppProtectedSuffixes::contains)
     }
 
