@@ -1445,10 +1445,16 @@ object RuleRepository {
         val hasAggressiveSignal = lower.contains("ad") || lower.contains("ads") || lower.contains("banner") || lower.contains("splash") || 
             lower.contains("promo") || lower.contains("tracking") || lower.contains("log") || lower.contains("stat") || 
             lower.contains("analytics") || lower.contains("monitor") || lower.contains("track") || lower.contains("count") ||
-            lower.contains("report") || lower.contains("feed") || lower.contains("stream")
-        // 广告供应商或广告信号立即拦截
-        if (novelAggressiveVendorNames.contains(normalizedVendor) && hasAggressiveSignal) return true
+            lower.contains("report") || lower.contains("feed") || lower.contains("stream") || lower.contains("api") ||
+            lower.contains("cdn") || lower.contains("dsp") || lower.contains("adx") || lower.contains("ssp")
+        // 增强小说 APP 广告识别 - 包含广告域名特征立即拦截
         if (hasAggressiveSignal && looksLikeAdDomain(normalized)) return true
+        // 广告供应商域名一律拦截（针对小说 APP）
+        if (novelAggressiveVendorNames.contains(normalizedVendor)) return true
+        // 包含 SDK、service、platform 等字样也拦截
+        val hasSdkSignal = lower.contains("sdk") || lower.contains("service") || lower.contains("platform") || 
+            lower.contains("manager") || lower.contains("network") || lower.contains("server")
+        if (hasSdkSignal && hasAggressiveSignal) return true
         if (isProtectedNovelAppDomain(normalized)) return false
         val matchesExactAggressiveDomain = buildDomainCandidates(normalized).any(novelAggressiveExactDomains::contains)
         if (matchesExactAggressiveDomain) return true
@@ -2395,7 +2401,45 @@ object RuleRepository {
     private fun looksLikeAdDomain(domain: String): Boolean {
         val lower = domain.lowercase()
         val normalizedTokens = lower.replace(alphanumericRegex, "")
-        return adKeywords.any { keywordMatches(lower, normalizedTokens, it) }
+        // 基础关键词匹配
+        val baseMatch = adKeywords.any { keywordMatches(lower, normalizedTokens, it) }
+        if (baseMatch) return true
+        
+        // 增强广告域名模式识别
+        // 1. 广告子域名模式
+        val adSubdomainPatterns = listOf(
+            "ad.", "ads.", "ad-", "ads-", "advert.", "advert-",
+            "banner.", "banner-", "sponsor.", "sponsor-",
+            "promo.", "promo-", "promotion.", "promotion-"
+        )
+        if (adSubdomainPatterns.any { lower.startsWith(it) || ".$it" in lower }) return true
+        
+        // 2. 广告 SDK 和追踪域名
+        val adSdkPatterns = listOf(
+            ".adsdk.", ".adservice.", ".adnetwork.", ".adserver.",
+            ".adtrack.", ".adtracker.", ".admanager.", ".adplatform.",
+            ".ssp.", ".dsp.", ".adx.", ".rtb."
+        )
+        if (adSdkPatterns.any { it in lower }) return true
+        
+        // 3. 广告 vendor 域名包含特定字符串
+        val vendorAdDomains = listOf(
+            "pangle.", "gromore.", "sigmob.", "mintegral.", "applovin.",
+            "ironsrc.", "unity3d.", "vungle.", "topon.", "tradplus.",
+            "jjye.", "bytedance.", "tiktok.", "kwai.", "kuaishou.",
+            "qimao.", "kmxs.", "wtzw.", "fqnovel.", "fanqie.", "zijie."
+        )
+        if (vendorAdDomains.any { it in lower }) {
+            // 如果包含广告相关后缀，判定为广告
+            val adSuffixes = listOf("ad", "ads", "sdk", "api", "log", "stat", "track")
+            if (adSuffixes.any { suffix -> lower.contains(".$suffix") || lower.endsWith(".$suffix") }) return true
+        }
+        
+        // 4. 数字 + 广告关键词的域名（如 123ad.com, ad456.com）
+        val alphanumericAdPattern = Regex("[0-9]+.*ad|ad.*[0-9]+")
+        if (alphanumericAdPattern.containsMatchIn(lower) && !lower.contains("dad") && !lower.contains("grad")) return true
+        
+        return false
     }
 
     private fun looksLikeBypassProtectionDomain(domain: String): Boolean {

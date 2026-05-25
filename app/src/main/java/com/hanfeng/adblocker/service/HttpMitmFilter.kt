@@ -131,7 +131,7 @@ object HttpMitmFilter {
         "feed_banner",
         "open_ad",
         "startup_ad",
-        // 新增强力广告特征
+        // 新增强力广告特征 - 广告数据字段
         "ad_data", "addata", "ad_content", "adcontent", "ad_list", "adlist", "ad_count", "adcount",
         "has_ad", "hasad", "show_ad", "showad", "load_ad", "loadad", "fetch_ad", "fetchad",
         "ad_request", "adrequest", "ad_response", "adresponse", "ad_server", "adserver",
@@ -140,12 +140,24 @@ object HttpMitmFilter {
         "ad_strategy", "adstrategy", "ad_plan", "adplan", "ad_schedule", "adschedule",
         "ad_statistics", "adstatistics", "ad_track", "adtrack", "ad_log", "adlog",
         "ad_report", "adreport", "ad_analytics", "adanalytics", "ad_monitor", "admonitor",
+        // 字节/穿山甲广告
         "jjye", "groovy", "gromore", "ttad", "bytedance", "bytead", "douyin_ad", "douyinad",
         "tiktok_ads", "tiktokads", "pangle_ad", "panglead", "tiktok_pangle",
+        // 小说平台广告
         "qimao_ad", "qimaoad", "kmxs_ad", "kmxsad", "wtzw_ad", "wtzwad",
         "fqnovel_ad", "fqnovelad", "fanqie_ad", "fanqiead", "zijie_ad", "zijiead",
+        // API 路径特征
         "api/ad", "api/ad/", "/ad/api", "/ad/v", "/ad/v1", "/ad/v2", "/ads/v", "/ads/v1",
-        "ad=true", "ad=true", "type=ad", "type=adv", "cat=ad", "cat=adv"
+        "ad=true", "ad=true", "type=ad", "type=adv", "cat=ad", "cat=adv",
+        // 新增广告 SDK 和服务
+        "adcolony", "chartboost", "inmobi", "millennial", "medialand", "yandex_ad",
+        "ogury", " liftoff", "tapjoy", "sponsorpay", "fortumo", "bango", "carrier",
+        "admarvel", "inneractive", "jumptap", "millennial_media", "mydas", "smaato",
+        "startapp", "tumobi", "juniper", "greedygame", "feijiu", "9gamedw", "downcom",
+        // 广告行为特征
+        "auto_close", "autoclose", "count_down", "countdown", "skip_countdown", "jump_url",
+        "click_action", "monitoring_uri", "ad_close", "adclose", "ad_skip", "adskip",
+        "ad_detail", "adconvert", "conversion", "activate_url", "active_url"
     )
     private val suspiciousPathKeywords = listOf(
         "/ad", "/ads", "/advert", "/adview", "/adslot", "/adunit", "/adsdk", "/adservice", "/banner", "/splash", "/reward", "/promotion", "/promo", "/preload", "/material", "/creative", "/launch", "/startup", "/feedad", "/screenad", "/openad", "/popup", "/interstitial", "/floatad", "/bottomad"
@@ -216,6 +228,52 @@ object HttpMitmFilter {
         "reward_amount",
         "coin_reward",
         "chapter_reward"
+    )
+    // HTML 广告标记（增加更多）
+    private val htmlAdMarkers = listOf(
+        "adsbygoogle",
+        "google_ad",
+        "ad-container",
+        "ad-wrapper",
+        "ad-banner",
+        "adslot",
+        "ad-unit",
+        "adunit",
+        "adservice",
+        "splash-ad",
+        "open-screen",
+        "reward-video",
+        "window.__slot__",
+        "window.__ad__",
+        "window.__ads__",
+        "window.csj",
+        "window.gdt",
+        "window.pangle",
+        "window.gromore",
+        "window.topon",
+        "window.tradplus",
+        "window.applovin",
+        "window.mintegral",
+        // 新增广告框架标记
+        "window.byted",
+        "window.ttad",
+        "window.admar",
+        "window.sigmob",
+        "window.kwad",
+        "window.mimo",
+        "window.unityads",
+        "window.vungle",
+        "window.ironsrc",
+        ".ad-banner",
+        ".adBox",
+        "#adContainer",
+        "#adWrapper",
+        ".popup-ad",
+        ".float-ad",
+        ".bottom-ad",
+        ".feed-ad",
+        ".video-ad",
+        ".native-ad"
     )
     private const val HTTP2_REQUEST_BLOCK_CANDIDATE_SCORE = 5
     private const val HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE = 4
