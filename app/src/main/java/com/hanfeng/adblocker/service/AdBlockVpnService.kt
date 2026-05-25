@@ -502,12 +502,21 @@ class AdBlockVpnService : VpnService() {
             httpDecryptIpCache[ip]
         } ?: return false
         if (RuleRepository.isSensitiveAuthDomain(target.domain)) return false
+        // 检查是否匹配广告规则
         val appName = resolveAppName(target.domain, info)
-        StatsRepository.recordBlockedHttp(this, target.vendor, appName, 50 * 1024)
-        logDecisionOnce(
-            key = "blocked-http80:${target.domain}:$ip",
-            message = "Blocked HTTP connection domain=${target.domain} ip=$ip app=$appName vendor=${target.vendor} source=${target.source} via=http-decrypt-entry",
-            minIntervalMillis = 10_000L
+        val matchedRule = RuleRepository.findMatchingRule(this, target.domain)
+        val isBlocked = RuleRepository.isBlocked(this, target.domain)
+        val aggressiveNovelBlock = if (!isBlocked) {
+            val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, target.domain, appName)
+            RuleRepository.shouldAggressivelyBlockForNovelApp(this, target.domain, appName, vendor)
+        } else false
+        if (!isBlocked && !aggressiveNovelBlock) return false
+        // 需要拦截
+        val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, target.domain, appName)
+        StatsRepository.recordBlockedHttp(this, vendor, appName, 50 * 1024)
+        LogRepository.append(
+            this,
+            "Blocked HTTP connection domain=${target.domain} ip=$ip app=$appName vendor=$vendor source=${target.source} via=http-decrypt-entry"
         )
         return true
     }
@@ -585,6 +594,28 @@ class AdBlockVpnService : VpnService() {
                 httpsProxyFlowCache.remove(flowCacheKey(info))
             }
             return
+        }
+        // TCP SYN 阶段检查规则（早期拦截广告连接）
+        if (info.tcpFlags.hasTcpFlag(TCP_FLAG_SYN) && !info.tcpFlags.hasTcpFlag(TCP_FLAG_ACK)) {
+            val appName = resolveAppName(target.domain, info)
+            val matchedRule = RuleRepository.findMatchingRule(this, target.domain)
+            val isBlocked = RuleRepository.isBlocked(this, target.domain)
+            val aggressiveNovelBlock = if (!isBlocked) {
+                val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, target.domain, appName)
+                RuleRepository.shouldAggressivelyBlockForNovelApp(this, target.domain, appName, vendor)
+            } else false
+            if (isBlocked || aggressiveNovelBlock) {
+                val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, target.domain, appName)
+                StatsRepository.recordBlockedHttp(this, vendor, appName, 64 * 1024)
+                LogRepository.append(
+                    this,
+                    "Blocked HTTPS connection at SYN domain=${target.domain} ip=$ip app=$appName vendor=$vendor source=${target.source} via=https-decrypt-entry"
+                )
+                synchronized(httpsProxyFlowCache) {
+                    httpsProxyFlowCache.remove(flowCacheKey(info))
+                }
+                return
+            }
         }
         
         val cooldownReason = HttpsMitmRepository.getActiveBypassReason(this, target.domain)
