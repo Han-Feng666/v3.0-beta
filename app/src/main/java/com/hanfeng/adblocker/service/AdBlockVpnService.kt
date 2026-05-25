@@ -404,7 +404,8 @@ class AdBlockVpnService : VpnService() {
 
             val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
             val blockedAliasTarget = aliasTargets.firstOrNull { aliasTarget ->
-                RuleRepository.isBlocked(this, aliasTarget)
+                RuleRepository.isBlocked(this, aliasTarget) ||
+                    RuleRepository.shouldAggressivelyBlockForNovelApp(this, aliasTarget, appName, RuleRepository.classifyVendorFromHints(this, aliasTarget, appName))
             }
             if (blockedAliasTarget != null) {
                 val sinkholeResponse = DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return
