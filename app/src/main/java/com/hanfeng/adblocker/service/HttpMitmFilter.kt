@@ -15,7 +15,8 @@ object HttpMitmFilter {
     private val compressibleEncodings = listOf("gzip", "br", "deflate", "zstd")
     private val responseAdKeywords = listOf(
         "adview", "adslot", "adunit", "advert", "banner", "splash", "reward", "preload", "promo", "promotion", "tracker", "tracking",
-        "launch", "startup", "popup", "interstitial", "feedad", "open_screen", "openad"
+        "launch", "startup", "popup", "interstitial", "feedad", "open_screen", "openad", "floatad", "bottomad", "fullscreen",
+        "nativead", "nativead", "videoad", "rewardad", "loginad", "guidead", "scrollad", "pushad"
     )
     private val htmlAdMarkers = listOf(
         "adsbygoogle",
@@ -129,7 +130,22 @@ object HttpMitmFilter {
         "brand_banner",
         "feed_banner",
         "open_ad",
-        "startup_ad"
+        "startup_ad",
+        // 新增强力广告特征
+        "ad_data", "addata", "ad_content", "adcontent", "ad_list", "adlist", "ad_count", "adcount",
+        "has_ad", "hasad", "show_ad", "showad", "load_ad", "loadad", "fetch_ad", "fetchad",
+        "ad_request", "adrequest", "ad_response", "adresponse", "ad_server", "adserver",
+        "ad_platform", "adplatform", "ad_service", "adservice", "ad_manager", "admanager",
+        "ad_config", "adconfig", "ad_param", "adparam", "ad_params", "adparams",
+        "ad_strategy", "adstrategy", "ad_plan", "adplan", "ad_schedule", "adschedule",
+        "ad_statistics", "adstatistics", "ad_track", "adtrack", "ad_log", "adlog",
+        "ad_report", "adreport", "ad_analytics", "adanalytics", "ad_monitor", "admonitor",
+        "jjye", "groovy", "gromore", "ttad", "bytedance", "bytead", "douyin_ad", "douyinad",
+        "tiktok_ads", "tiktokads", "pangle_ad", "panglead", "tiktok_pangle",
+        "qimao_ad", "qimaoad", "kmxs_ad", "kmxsad", "wtzw_ad", "wtzwad",
+        "fqnovel_ad", "fqnovelad", "fanqie_ad", "fanqiead", "zijie_ad", "zijiead",
+        "api/ad", "api/ad/", "/ad/api", "/ad/v", "/ad/v1", "/ad/v2", "/ads/v", "/ads/v1",
+        "ad=true", "ad=true", "type=ad", "type=adv", "cat=ad", "cat=adv"
     )
     private val suspiciousPathKeywords = listOf(
         "/ad", "/ads", "/advert", "/adview", "/adslot", "/adunit", "/adsdk", "/adservice", "/banner", "/splash", "/reward", "/promotion", "/promo", "/preload", "/material", "/creative", "/launch", "/startup", "/feedad", "/screenad", "/openad", "/popup", "/interstitial", "/floatad", "/bottomad"
@@ -533,10 +549,13 @@ object HttpMitmFilter {
         )
         val bodySignals = inspectAdBodySignals(lowerBody)
         if (bodySignals.reasons.isEmpty()) return null
+        val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         var suspiciousScore = bodySignals.score + if (targetedContentType) 1 else 0
-        if (isKnownAdVendor(vendor)) suspiciousScore += 1
-        if (aggressiveNovelTarget) suspiciousScore += 2
-        if (suspiciousScore < 2) return null
+        if (isKnownAdVendor(vendor)) suspiciousScore += 2
+        if (aggressiveNovelTarget) suspiciousScore += 3
+        // 降低拦截阈值：小说 APP 1 分拦截，普通应用 2 分拦截
+        val threshold = if (isNovelApp) 1 else 2
+        if (suspiciousScore < threshold) return null
         val preview = decoded.replace('\r', ' ').replace('\n', ' ').take(160)
         val reasons = bodySignals.reasons.toMutableList()
         if (isKnownAdVendor(vendor)) reasons += "vendor:$vendor"
@@ -728,22 +747,25 @@ object HttpMitmFilter {
         val vendor = RuleRepository.classifyVendorFromHints(context, host, session.appName)
         val aggressiveNovelTarget = RuleRepository.shouldAggressivelyBlockForNovelApp(context, host, session.appName, vendor)
         val protectedNovelTarget = RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(context, host, requestInspection?.path, session.appName)
+        val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         if (contentType.contains("html") && cosmeticSelectors.isNotEmpty()) {
             return "neutralized-cosmetic-rule"
         }
         if (contentType.contains("text/html") || contentType.contains("json") || contentType.contains("javascript")) {
             val lowerBody = body.lowercase()
             val bodySignals = inspectAdBodySignals(lowerBody)
-            if (bodySignals.score >= 3) {
+            // 降低拦截阈值：普通应用 2 分拦截，小说 APP 1 分拦截
+            val threshold = if (isNovelApp) 1 else 2
+            if (bodySignals.score >= threshold) {
                 return "neutralized-body-strong-signal"
             }
-            if (bodySignals.score >= 2 && protectedNovelTarget) {
+            if (bodySignals.score >= 1 && protectedNovelTarget) {
                 return "neutralized-body-novel-protected"
             }
-            if (bodySignals.score >= 2 && aggressiveNovelTarget) {
+            if (bodySignals.score >= 1 && aggressiveNovelTarget) {
                 return "neutralized-body-novel-aggressive"
             }
-            if (bodySignals.score >= 2 && isKnownAdVendor(vendor)) {
+            if (bodySignals.score >= 1 && isKnownAdVendor(vendor)) {
                 return "neutralized-body-vendor-signal"
             }
         }
@@ -851,13 +873,22 @@ object HttpMitmFilter {
         val weakMatches = responseAdKeywords.filter { keyword -> lowerBody.contains(keyword) }.distinct()
         val reasons = mutableListOf<String>()
         var score = 0
+        // 增强强特征评分权重
         if (strongMatches.isNotEmpty()) {
             score += when {
-                strongMatches.size >= 3 -> 4
-                strongMatches.size == 2 -> 3
-                else -> 2
+                strongMatches.size >= 3 -> 5
+                strongMatches.size == 2 -> 4
+                strongMatches.size == 1 -> 3
             }
-            reasons += strongMatches.take(4).map { "data-strong-keyword:$it" }
+            reasons += strongMatches.take(5).map { "data-strong-keyword:$it" }
+        }
+        // 弱特征也计分
+        if (weakMatches.isNotEmpty()) {
+            score += when {
+                weakMatches.size >= 4 -> 2
+                weakMatches.size >= 2 -> 1
+            }
+            reasons += weakMatches.take(3).map { "data-weak-keyword:$it" }
         }
         val trackingFieldHits = listOf(
             "\"imp\"",

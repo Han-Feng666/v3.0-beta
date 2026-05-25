@@ -1440,13 +1440,19 @@ object RuleRepository {
         // 小说内容 API 域名不拦截
         if (novelContentApiDomains.contains(normalized) || novelContentApiDomains.any { normalized.endsWith(".$it") }) return false
         val normalizedVendor = normalizeVendorName(vendor)
-        if (!novelAggressiveVendorNames.contains(normalizedVendor)) return false
         val lower = normalized.lowercase()
-        // 明确的广告域名信号优先于保护逻辑
-        val hasAggressiveSignal = lower.contains("ad") || lower.contains("ads") || lower.contains("banner") || lower.contains("splash") || lower.contains("promo") || lower.contains("tracking")
-        if (hasAggressiveSignal) return true
+        // 增强广告域名信号检测 - 扩大关键词范围
+        val hasAggressiveSignal = lower.contains("ad") || lower.contains("ads") || lower.contains("banner") || lower.contains("splash") || 
+            lower.contains("promo") || lower.contains("tracking") || lower.contains("log") || lower.contains("stat") || 
+            lower.contains("analytics") || lower.contains("monitor") || lower.contains("track") || lower.contains("count") ||
+            lower.contains("report") || lower.contains("feed") || lower.contains("stream")
+        // 广告供应商或广告信号立即拦截
+        if (novelAggressiveVendorNames.contains(normalizedVendor) && hasAggressiveSignal) return true
+        if (hasAggressiveSignal && looksLikeAdDomain(normalized)) return true
         if (isProtectedNovelAppDomain(normalized)) return false
-        if (buildDomainCandidates(normalized).any(novelAggressiveExactDomains::contains)) return true
+        val matchesExactAggressiveDomain = buildDomainCandidates(normalized).any(novelAggressiveExactDomains::contains)
+        if (matchesExactAggressiveDomain) return true
+        // 增强广告域名识别
         return looksLikeAdDomain(normalized) && hasAggressiveNovelAdSignal(normalized)
     }
 

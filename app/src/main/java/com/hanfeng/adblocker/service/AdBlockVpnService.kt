@@ -372,17 +372,13 @@ class AdBlockVpnService : VpnService() {
 
             val matchedRule = RuleRepository.findMatchingRule(this, question.domain, question.qType)
             val isBlocked = RuleRepository.isBlocked(this, question.domain, question.qType)
-            val aggressiveNovelBlock = if (!isBlocked) {
-                val appName = resolveAppName(question.domain, info)
-                val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, question.domain, appName)
-                RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, vendor)
-            } else false
+            val appName = resolveAppName(question.domain, info)
+            val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, question.domain, appName)
+            val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, vendor)
+            val protectedNovelUrlBlock = RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(this, question.domain, null, appName)
 
-            if (isBlocked || aggressiveNovelBlock) {
-                val appName = resolveAppName(question.domain, info)
-                val vendor = matchedRule?.vendor ?: RuleRepository.classifyVendorFromHints(this, question.domain, appName)
-                val response = DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return
-                output.write(PacketCodec.buildUdpResponse(info, response))
+            if (isBlocked || aggressiveNovelBlock || protectedNovelUrlBlock) {
+                output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
                 StatsRepository.recordBlockedDns(this, vendor, appName, 512)
                 return
             }
