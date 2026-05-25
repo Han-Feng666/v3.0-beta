@@ -354,7 +354,7 @@ class AdBlockVpnService : VpnService() {
             val question = DnsMessageParser.parseQuestion(info.payload) ?: return
 
             // App 启动核心域名快速放行（避免冷加载开销，只针对少数关键域名）
-            if (criticalStartupDomains.contains(question.domain)) {
+            if (RuleRepository.criticalStartupDomains.contains(question.domain)) {
                 val appName = resolveAppName(question.domain, info)
                 StatsRepository.recordRequest(this, "System", appName)
                 readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
