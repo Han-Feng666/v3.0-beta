@@ -11,6 +11,14 @@ import java.util.zip.InflaterInputStream
 object HttpMitmFilter {
     private const val MAX_HTTP1_FILTER_BUFFER_BYTES = 512 * 1024
     private const val MAX_HTTP2_DATA_SAMPLE_BYTES = 8 * 1024
+    private val defaultAdQueryParams = setOf(
+        "ad", "ads", "adid", "ad_id", "adunit", "ad_unit", "adslot", "ad_slot", "adpos", "ad_pos",
+        "adscene", "ad_scene", "adposition", "ad_position", "adtag", "ad_tag", "adfrom", "ad_from",
+        "advertid", "advert_id", "promotion", "promo", "promoid", "promo_id", "materialid", "material_id",
+        "creativeid", "creative_id", "clickid", "click_id", "requestid", "request_id", "traceid", "trace_id",
+        "ecpm", "preroll", "midroll", "postroll", "insert_ad", "feed_ad", "bannerid", "banner_id",
+        "watch_ad", "watch_ad_unlock", "unlock_by_ad", "reward_amount", "coin_reward", "task_reward"
+    )
     private val requestMethods = listOf("GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ")
     private val compressibleEncodings = listOf("gzip", "br", "deflate", "zstd")
     private val responseAdKeywords = listOf(
@@ -145,19 +153,29 @@ object HttpMitmFilter {
         "/feed", "/feed_ad", "/feedad", "/feeds", "/comment/ad", "/comment/banner", "/floor/ad", "/stream/ad", "/nativead", "/native/banner", "/brand_banner", "/brand/banner", "/open_screen", "/startupad", "/launchad",
         "/welfare", "/benefit", "/task", "/task_center", "/coin", "/bonus", "/offerwall", "/excitation", "/inspire", "/unlock", "/free_read",
         "/feed/card", "/feed_card", "/feed/insert", "/feed_insert", "/feed/recommend/ad", "/comment/floor", "/comment/reply/ad", "/reply/ad", "/post/ad",
-        "/bottom_banner", "/floating_banner", "/suspend_ad", "/pause_ad", "/player/ad", "/video/ad", "/launch_ad", "/startup_ad", "/open_screen_ad"
+        "/bottom_banner", "/floating_banner", "/suspend_ad", "/pause_ad", "/player/ad", "/video/ad", "/launch_ad", "/startup_ad", "/open_screen_ad",
+        "/ad/list", "/ad/get", "/ad/fetch", "/ad/request", "/ad/dispatch", "/ad/query", "/ad/load", "/ad/cache", "/ad/resource",
+        "/feed/v1/ad", "/feed/v2/ad", "/feed/inject", "/feed_insert_ad", "/comment/list/ad", "/comment/ad_card", "/reply/list/ad",
+        "/screen_patch", "/preroll", "/midroll", "/postroll", "/video_patch", "/draw/video/ad", "/live/ad", "/pause/banner",
+        "/reader/bottom", "/reader/banner", "/reader/ad", "/chapter/ad", "/chapter/unlock", "/chapter/reward",
+        "/reading/page/ad", "/reading/reward", "/book/bonus", "/book/task", "/novel/task", "/novel/reward",
+        "/splash/list", "/startup/list", "/launch/list", "/feed/banner/list", "/comment/floor/ad", "/comment/reply/banner"
     )
     private val suspiciousHeaderKeywords = listOf(
         "advert", "banner", "splash", "reward", "promo", "promotion", "track", "tracker", "interstitial", "popup", "openad",
         "feed", "feedad", "feeds", "nativead", "brand_banner", "startupad", "launchad", "open_screen",
         "welfare", "benefit", "task", "coin", "bonus", "offerwall", "excitation", "inspire",
-        "feed_card", "information_flow", "commentad", "floorad", "bottom_banner", "floating_banner", "pause_ad"
+        "feed_card", "information_flow", "commentad", "floorad", "bottom_banner", "floating_banner", "pause_ad",
+        "ad_resource", "ad_material", "ad_dispatch", "ad_scene", "ad_position", "insert_ad", "midroll", "preroll", "postroll",
+        "reader_banner", "chapter_reward", "watch_ad_unlock", "unlock_by_ad", "bottom_banner", "startup_banner"
     )
     private val suspiciousQueryKeywords = listOf(
         "ad", "ads", "adid", "adunit", "adslot", "placement", "promo", "promotion", "splash", "reward", "preload", "tracker", "creative", "material", "template", "ecpm", "playable", "endcard", "launch", "startup", "interstitial", "popup", "openad", "bottomad",
         "feed", "feedad", "feed_ads", "commentad", "floorad", "nativead", "bannerid", "banner_id", "open_screen", "startupad", "launchad",
         "welfare", "benefit", "task", "taskid", "tasktype", "coin", "bonus", "offerwall", "excitation", "inspire", "unlock", "freeread", "chapterreward",
-        "feedcard", "feed_card", "insertad", "insert_ad", "adscene", "ad_scene", "adposition", "ad_position", "pausead", "pause_ad"
+        "feedcard", "feed_card", "insertad", "insert_ad", "adscene", "ad_scene", "adposition", "ad_position", "pausead", "pause_ad",
+        "preroll", "midroll", "postroll", "adrequest", "ad_request", "adresource", "ad_resource", "admaterial", "ad_material",
+        "readerbanner", "reader_banner", "chapterreward", "chapter_reward", "watchadunlock", "watch_ad_unlock", "unlockbyad", "unlock_by_ad"
     )
     private val adTrackingHeaderFields = listOf(
         "click_url",
@@ -244,7 +262,29 @@ object HttpMitmFilter {
         "floating_banner",
         "bottom_banner",
         "startup_ad",
-        "launch_ad"
+        "launch_ad",
+        "ad_request",
+        "ad_response",
+        "ad_resource",
+        "ad_resources",
+        "ad_material",
+        "ad_materials",
+        "ad_dispatch",
+        "ad_list",
+        "adlist",
+        "patch_ad",
+        "preroll_ad",
+        "midroll_ad",
+        "postroll_ad",
+        "insert_ad",
+        "insert_ads",
+        "reader_banner",
+        "reader_bottom_banner",
+        "reading_insert_ad",
+        "chapter_ad",
+        "chapter_ad_list",
+        "startup_banner",
+        "splash_banner"
     )
     // HTML 广告标记（增加更多）
     private val htmlAdMarkers = listOf(
@@ -271,6 +311,10 @@ object HttpMitmFilter {
         "window.tradplus",
         "window.applovin",
         "window.mintegral",
+        "window.ksad",
+        "window.mobvista",
+        "window.mbridge",
+        "window.anythink",
         // 新增广告框架标记
         "window.byted",
         "window.ttad",
@@ -317,7 +361,7 @@ object HttpMitmFilter {
         "watch-ad-unlock"
     )
     private const val HTTP2_REQUEST_BLOCK_CANDIDATE_SCORE = 5
-    private const val HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE = 3
+    private const val HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE = 2
     private const val HTTP1_RESPONSE_BLOCK_SCORE = 2
     private const val HTTP1_NOVEL_RESPONSE_BLOCK_SCORE = 1
     private const val HTTP2_NOVEL_RESPONSE_BLOCK_SCORE = 2
@@ -349,11 +393,21 @@ object HttpMitmFilter {
             ?.trim()
             ?.let(::normalizeAuthority)
             ?.ifBlank { null }
+        val referer = lines.firstOrNull { it.startsWith("Referer:", ignoreCase = true) }
+            ?.substringAfter(':', "")
+            ?.trim()
+            ?.ifBlank { null }
+        val origin = lines.firstOrNull { it.startsWith("Origin:", ignoreCase = true) }
+            ?.substringAfter(':', "")
+            ?.trim()
+            ?.ifBlank { null }
         return RequestInspection(
             method = requestLine[0],
             path = requestLine[1],
             host = hostHeader ?: session.host,
-            httpVersion = requestLine.getOrNull(2) ?: "HTTP/1.1"
+            httpVersion = requestLine.getOrNull(2) ?: "HTTP/1.1",
+            referer = referer,
+            origin = origin
         )
     }
 
@@ -366,12 +420,26 @@ object HttpMitmFilter {
         val headerEnd = text.indexOf("\r\n\r\n")
         if (headerEnd <= 0) return chunk
         if (requestMethods.none { text.startsWith(it) }) return chunk
+        val requestDomain = inspection.origin?.let(::extractRequestContextDomain)
+            ?: inspection.referer?.let(::extractRequestContextDomain)
         val directives = RuleRepository.getRequestRewriteDirectives(
             TlsMitmSessionManager.requireContext(),
             inspection.host,
             inspection.path,
-            session.appName
+            session.appName,
+            requestDomain
         )
+        val shouldStripAdParams = shouldPreferDeepInspection(
+            host = inspection.host,
+            path = inspection.path,
+            appName = session.appName,
+            requestDomain = requestDomain
+        )
+        val removeParams = if (shouldStripAdParams) {
+            directives.removeParams + defaultAdQueryParams
+        } else {
+            directives.removeParams
+        }
         val headerLines = text.substring(0, headerEnd).split("\r\n")
         if (headerLines.isEmpty()) return chunk
         var changed = false
@@ -390,7 +458,7 @@ object HttpMitmFilter {
         if (directives.cspValue != null) {
             changed = true
         }
-        val requestLine = rewriteRequestLine(rewrittenHeaders.first(), directives.removeParams)
+        val requestLine = rewriteRequestLine(rewrittenHeaders.first(), removeParams)
         if (requestLine != rewrittenHeaders.first()) changed = true
         if (!changed) return chunk
         val body = text.substring(headerEnd + 4)
@@ -406,10 +474,13 @@ object HttpMitmFilter {
         session: TlsMitmSessionManager.TlsMitmSession,
         inspection: RequestInspection
     ): Boolean {
+        val requestDomain = inspection.origin?.let(::extractRequestContextDomain)
+            ?: inspection.referer?.let(::extractRequestContextDomain)
         return shouldPreferDeepInspection(
             host = inspection.host,
             path = inspection.path,
-            appName = session.appName
+            appName = session.appName,
+            requestDomain = requestDomain
         )
     }
 
@@ -459,13 +530,26 @@ object HttpMitmFilter {
             TlsMitmSessionManager.requireContext(),
             inspection.authority,
             inspection.path.orEmpty(),
-            session.appName
+            session.appName,
+            inspection.referer?.let(::extractRequestContextDomain)
         )
-        if (directives.removeParams.isEmpty() && directives.cspValue == null) return base
+        val shouldStripAdParams = shouldPreferDeepInspection(
+            host = inspection.authority,
+            path = inspection.path,
+            appName = session.appName,
+            vendorHint = inspection.vendor,
+            requestDomain = inspection.referer?.let(::extractRequestContextDomain)
+        )
+        val removeParams = if (shouldStripAdParams) {
+            directives.removeParams + defaultAdQueryParams
+        } else {
+            directives.removeParams
+        }
+        if (removeParams.isEmpty() && directives.cspValue == null) return base
         var changed = base.changed
         val rewritten = base.headers.map { header ->
             if (header.name == ":path") {
-                val updated = rewritePathOnly(header.value, directives.removeParams)
+                val updated = rewritePathOnly(header.value, removeParams)
                 if (updated != header.value) changed = true
                 HpackDecoder.HeaderField(header.name, updated)
             } else {
@@ -998,6 +1082,16 @@ object HttpMitmFilter {
         window.applovin.init = function(){};
         window.mintegral = window.mintegral || {};
         window.mintegral.init = function(){};
+        window.mbridge = window.mbridge || {};
+        window.mbridge.init = function(){};
+        window.sigmob = window.sigmob || {};
+        window.sigmob.init = function(){};
+        window.ksad = window.ksad || {};
+        window.ksad.init = function(){};
+        window.anythink = window.anythink || {};
+        window.anythink.init = function(){};
+        window.mobvista = window.mobvista || {};
+        window.mobvista.init = function(){};
         window.unityads = window.unityads || {};
         window.unityads.init = function(){};
         window.vungle = window.vungle || {};
@@ -1010,18 +1104,18 @@ object HttpMitmFilter {
         var originalSetTimeout = window.setTimeout;
         var originalSetInterval = window.setInterval;
         window.setTimeout = function(fn, delay) {
-            if(fn.toString().match(/ad|banner|splash|reward|promo/i)) return;
+            if(fn.toString().match(/ad|banner|splash|reward|promo|preroll|midroll|postroll|offerwall|unlock/i)) return;
             return originalSetTimeout.call(this, fn, delay);
         };
         window.setInterval = function(fn, delay) {
-            if(fn.toString().match(/ad|banner|splash|reward|promo/i)) return;
+            if(fn.toString().match(/ad|banner|splash|reward|promo|preroll|midroll|postroll|offerwall|unlock/i)) return;
             return originalSetInterval.call(this, fn, delay);
         };
         // 禁用 XMLHttpRequest/ad 请求
         if(window.XMLHttpRequest) {
             var origOpen = XMLHttpRequest.prototype.open;
             XMLHttpRequest.prototype.open = function(method, url) {
-                if(typeof url === 'string' && url.match(/ad|ads|banner|splash|promo|tracking/i)) {
+                if(typeof url === 'string' && url.match(/ad|ads|banner|splash|promo|tracking|preroll|midroll|postroll|offerwall|unlock/i)) {
                     this._isAdBlock = true;
                 }
                 return origOpen.apply(this, arguments);
@@ -1036,7 +1130,7 @@ object HttpMitmFilter {
         if(window.fetch) {
             var origFetch = window.fetch;
             window.fetch = function(url, options) {
-                if(typeof url === 'string' && url.match(/ad|ads|banner|splash|promo|tracking/i)) {
+                if(typeof url === 'string' && url.match(/ad|ads|banner|splash|promo|tracking|preroll|midroll|postroll|offerwall|unlock/i)) {
                     return Promise.resolve({ ok: false, status: 403, text: ()=>Promise.resolve(''), json: ()=>Promise.resolve({}) });
                 }
                 return origFetch.apply(this, arguments);
@@ -1055,7 +1149,10 @@ object HttpMitmFilter {
 .ad-dialog, .ad-pop, .ad-tip, .ad-toast, .ad-modal, .ad-overlay, .ad-bg, .ad-back,
 .ad-splash, .ad-open, .ad-launch, .ad-interstitial, .ad-fullscreen, .ad-reward,
 .ad-native, .ad-feed, .ad-stream, .ad-preload, .ad-download, .ad-install, .ad-open-url,
-#adSlot, .ad-slot-container, .ad-slot-wrapper, .ad-slot-block, .ad-slot-area { 
+#adSlot, .ad-slot-container, .ad-slot-wrapper, .ad-slot-block, .ad-slot-area,
+.bottom-banner, .floating-banner, .reader-banner, .reader-bottom-banner, .chapter-ad,
+.insert-ad, .reading-insert-ad, .startup-banner, .pause-ad, .player-ad, .reward-pop,
+.offerwall, .unlock-by-ad, .watch-ad-unlock, .preroll-ad, .midroll-ad, .postroll-ad { 
     display: none !important; 
     visibility: hidden !important;
     opacity: 0 !important;
@@ -1118,15 +1215,17 @@ object HttpMitmFilter {
         host: String,
         path: String?,
         appName: String?,
-        vendorHint: String? = null
+        vendorHint: String? = null,
+        requestDomain: String? = null
     ): Boolean {
         val context = TlsMitmSessionManager.requireContext()
         val normalizedHost = normalizeAuthority(host)
         if (normalizedHost.isBlank()) return false
         val blockedHost = RuleRepository.isBlocked(context, normalizedHost, appName = appName)
         if (blockedHost) return true
-        if (path != null && RuleRepository.isUrlBlocked(context, normalizedHost, path.lowercase(), appName)) return true
         val lowerPath = path?.lowercase().orEmpty()
+        if (lowerPath.isNotBlank() && RuleRepository.hasAdvancedUrlRule(context, normalizedHost, lowerPath, appName, requestDomain)) return true
+        if (lowerPath.isNotBlank() && RuleRepository.isUrlBlocked(context, normalizedHost, lowerPath, appName, requestDomain)) return true
         if (lowerPath.isNotBlank() && looksLikeSuspiciousHttpPath(lowerPath)) return true
         // 游戏和社交 APP 核心服务跳过深度检查（提升性能，降低延迟）
         val lowerHost = normalizedHost.lowercase()
@@ -1142,8 +1241,12 @@ object HttpMitmFilter {
         if (RuleRepository.shouldForceNovelQuicBlock(normalizedHost, appName, vendor)) {
             return true
         }
+        if (isKnownAdVendor(vendor)) return true
         if (lowerPath.isBlank()) return false
-        return isKnownAdVendor(vendor)
+        if (lowerPath.contains("?") && (lowerPath.contains("ad") || lowerPath.contains("promo") || lowerPath.contains("reward") || lowerPath.contains("banner"))) {
+            return true
+        }
+        return lowerPath.contains("/api/") && (lowerPath.contains("feed") || lowerPath.contains("splash") || lowerPath.contains("popup") || lowerPath.contains("insert"))
     }
 
     private fun inspectAdBodySignals(lowerBody: String): BodySignalInspection {
@@ -1319,7 +1422,28 @@ object HttpMitmFilter {
             "\"reward_popup\"",
             "\"ad_resource\"",
             "\"ad_resources\"",
-            "\"ad_materials\""
+            "\"ad_materials\"",
+            "\"ad_material\"",
+            "\"ad_dispatch\"",
+            "\"ad_response\"",
+            "\"ad_list\"",
+            "\"adlist\"",
+            "\"carousel_ad\"",
+            "\"carousel_ads\"",
+            "\"waterfall_ad\"",
+            "\"waterfall_ads\"",
+            "\"grid_ad\"",
+            "\"grid_ads\"",
+            "\"card_ad\"",
+            "\"card_ads\"",
+            "\"live_ad\"",
+            "\"live_ads\"",
+            "\"draw_ad\"",
+            "\"draw_ads\"",
+            "\"patch_ads\"",
+            "\"preroll_ads\"",
+            "\"midroll_ads\"",
+            "\"postroll_ads\""
         ).filter { token -> lowerBody.contains(token) }
         val novelAdFieldHits = listOf(
             "\"book_id\"",
@@ -1360,7 +1484,18 @@ object HttpMitmFilter {
             "\"bonus_reward\"",
             "\"welfare_task\"",
             "\"task_status\"",
-            "\"task_progress\""
+            "\"task_progress\"",
+            "\"bottom_ad\"",
+            "\"bottom_banner\"",
+            "\"reader_banner\"",
+            "\"reader_bottom_banner\"",
+            "\"chapter_ad\"",
+            "\"chapter_ad_info\"",
+            "\"chapter_ad_list\"",
+            "\"reading_interstitial\"",
+            "\"reading_insert_ad\"",
+            "\"watch_ad_unlock\"",
+            "\"unlock_by_ad\""
         ).filter { token -> lowerBody.contains(token) }
         if (trackingFieldHits.isNotEmpty()) {
             score += if (trackingFieldHits.size >= 2) 3 else 2
@@ -1400,6 +1535,31 @@ object HttpMitmFilter {
         if (lowerBody.contains("\"comment") && (lowerBody.contains("\"ad_card") || lowerBody.contains("\"reply_ad") || lowerBody.contains("\"floor_ad"))) {
             score += 1
             reasons += "comment-ad-cluster"
+        }
+        if ((lowerBody.contains("\"feed") || lowerBody.contains("\"stream") || lowerBody.contains("\"timeline")) &&
+            (lowerBody.contains("\"ad_card") || lowerBody.contains("\"insert_ad") || lowerBody.contains("\"feed_ad"))) {
+            score += 1
+            reasons += "feed-ad-cluster"
+        }
+        if ((lowerBody.contains("\"banner") || lowerBody.contains("\"bottom_banner") || lowerBody.contains("\"floating_banner")) &&
+            (lowerBody.contains("\"show_url") || lowerBody.contains("\"click_url") || lowerBody.contains("\"material"))) {
+            score += 1
+            reasons += "banner-ad-cluster"
+        }
+        if ((lowerBody.contains("\"reader") || lowerBody.contains("\"chapter") || lowerBody.contains("\"reading")) &&
+            (lowerBody.contains("\"bottom_banner") || lowerBody.contains("\"insert_ad") || lowerBody.contains("\"watch_ad_unlock") || lowerBody.contains("\"unlock_by_ad"))) {
+            score += 2
+            reasons += "reader-ad-cluster"
+        }
+        if ((lowerBody.contains("pause-ad") || lowerBody.contains("player-ad") || lowerBody.contains("reward-pop") || lowerBody.contains("offerwall")) &&
+            (lowerBody.contains("click_url") || lowerBody.contains("show_url") || lowerBody.contains("material") || lowerBody.contains("landing"))) {
+            score += 2
+            reasons += "player-ad-cluster"
+        }
+        if ((lowerBody.contains("splash-ad") || lowerBody.contains("open-screen") || lowerBody.contains("startup-banner") || lowerBody.contains("launch-ad")) &&
+            (lowerBody.contains("show_url") || lowerBody.contains("click_url") || lowerBody.contains("ad_material") || lowerBody.contains("ad_dispatch"))) {
+            score += 2
+            reasons += "splash-ad-cluster"
         }
         val htmlMarkerHits = htmlAdMarkers.filter { marker -> lowerBody.contains(marker) }
         if (htmlMarkerHits.isNotEmpty()) {
@@ -1586,6 +1746,13 @@ object HttpMitmFilter {
                     reason == "json-ad-array" ||
                     reason == "json-ad-content" ||
                     reason == "novel-field-cluster" ||
+                    reason == "feed-ad-cluster" ||
+                    reason == "banner-ad-cluster" ||
+                    reason == "reader-ad-cluster" ||
+                    reason == "comment-ad-cluster" ||
+                    reason == "video-ad-cluster" ||
+                    reason == "player-ad-cluster" ||
+                    reason == "splash-ad-cluster" ||
                     reason.startsWith("header-field:") ||
                     reason == "path-strong-keyword" ||
                     reason == "location-strong-keyword" ||
@@ -1658,6 +1825,21 @@ object HttpMitmFilter {
         return rebuilt
     }
 
+    private fun extractRequestContextDomain(value: String): String? {
+        val normalized = value.trim().lowercase()
+        if (normalized.isBlank()) return null
+        val host = normalized
+            .removePrefix("https://")
+            .removePrefix("http://")
+            .substringBefore('/')
+            .substringBefore('?')
+            .substringBefore('#')
+            .substringBefore(':')
+            .trim()
+        if (host.isBlank()) return null
+        return host.takeIf { it.contains('.') }
+    }
+
     sealed interface FilterResult {
         data class PassThrough(val payload: ByteArray, val reason: String) : FilterResult
         data class Replaced(val payload: ByteArray, val reason: String, val originalBytes: Int = 0) : FilterResult
@@ -1667,7 +1849,9 @@ object HttpMitmFilter {
         val method: String,
         val path: String,
         val host: String,
-        val httpVersion: String
+        val httpVersion: String,
+        val referer: String?,
+        val origin: String?
     )
 
     data class Http2HeaderInspection(

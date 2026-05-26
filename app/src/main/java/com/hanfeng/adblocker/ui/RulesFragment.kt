@@ -645,7 +645,10 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             }
         }
         runCatching {
-            if (host.isFinishing || host.isDestroyed) error("activity-not-ready")
+            if (host.isFinishing || host.isDestroyed) {
+                LogRepository.append(host, "Skip import analysis page: activity not ready")
+                return
+            }
             host.startActivity(GuideActivity.createIntent(host, "导入结果分析", content))
         }.onFailure {
             LogRepository.append(host, "Open import analysis failed: ${it.message ?: it.javaClass.simpleName}")

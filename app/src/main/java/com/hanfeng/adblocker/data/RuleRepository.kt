@@ -23,7 +23,7 @@ object RuleRepository {
     private const val BYPASS_PROTECTION_VENDOR = "加密 DNS 反绕过 (Encrypted DNS)"
     private const val REGEX_RULE_DOMAIN = "[Regex Rule]"
     private const val COSMETIC_RULE_DOMAIN = "[Cosmetic Rule]"
-    private const val BUNDLED_RULES_VERSION = 25
+    private const val BUNDLED_RULES_VERSION = 27
     private const val SUSPICIOUS_SAMPLE_DEBOUNCE_MILLIS = 5_000L
     
     // 白名单域名 - 这些域名被拦截会导致 APP 断网
@@ -389,6 +389,17 @@ object RuleRepository {
         "gtimg.com", "gtimg.cn",
         // 支付
         "qpay.tf.qq.com", "qpay.qq.com", "tenpay.com", "paipai.com"
+    )
+
+    // 音乐/音频核心域名（确保播放、搜索、评论、账号同步正常）
+    private val mediaCoreDomains = setOf(
+        "music.qq.com", "y.qq.com", "qqmusic.qq.com", "stream.qqmusic.qq.com", "dl.stream.qqmusic.qq.com",
+        "kg.qq.com", "kgimg.com", "kugou.com", "kugoucdn.com", "kglink.cn", "staticssl.kugou.com",
+        "kuwo.cn", "kuwo.com", "kuwoapp.com", "kwimgs.com", "kuwo.cn",
+        "music.163.com", "music.126.net", "126.net", "nosdn.127.net", "vod.126.net",
+        "ximalaya.com", "ximaimg.com", "xmcdn.com", "ximaimg.cn",
+        "qingting.fm", "qtfm.cn", "qingtingcdn.com",
+        "lizhi.fm", "lizhi.io"
     )
     
     // 小说内容 API 白名单 (这些域名/子域名专门提供小说内容，不拦截)
@@ -1408,11 +1419,13 @@ object RuleRepository {
                 blockedRule.dnsTypes,
                 blockedRule.excludedDnsTypes,
                 blockedRule.isBadfilter,
+                blockedRule.pathPattern,
                 blockedRule.regexPattern,
                 blockedRule.cosmeticSelector,
                 blockedRule.removeParams,
                 blockedRule.cspValue,
-                blockedRule.keywordPattern
+                blockedRule.keywordPattern,
+                blockedRule.domainConstraints
             )
             if (!existingRuleKeys.add(ruleKey)) return@forEach
             val existing = if (blockedRule.regexPattern == null && blockedRule.cosmeticSelector == null) {
@@ -1430,13 +1443,15 @@ object RuleRepository {
                      excludedDnsTypes = normalizeDnsTypes(blockedRule.excludedDnsTypes),
                      thirdParty = blockedRule.thirdParty,
                       redirect = blockedRule.redirect,
-                      denyallow = blockedRule.denyallow,
-                      urlblock = blockedRule.urlblock,
-                      appPackages = blockedRule.appPackages,
-                      keywordPattern = blockedRule.keywordPattern,
-                      regexPattern = blockedRule.regexPattern,
-                      cosmeticSelector = blockedRule.cosmeticSelector,
-                      removeParams = blockedRule.removeParams,
+                     domainConstraints = blockedRule.domainConstraints,
+                     denyallow = blockedRule.denyallow,
+                     urlblock = blockedRule.urlblock,
+                     appPackages = blockedRule.appPackages,
+                     keywordPattern = blockedRule.keywordPattern,
+                     pathPattern = blockedRule.pathPattern,
+                     regexPattern = blockedRule.regexPattern,
+                     cosmeticSelector = blockedRule.cosmeticSelector,
+                     removeParams = blockedRule.removeParams,
                       cspValue = blockedRule.cspValue
                   )
                 current += addedRule
@@ -1475,6 +1490,8 @@ object RuleRepository {
         val bundledResources = listOf(
             R.raw.default_safe_ad_rules,
             R.raw.bundled_rules_cn_ads,
+            R.raw.bundled_rules_open_source_ads,
+            R.raw.bundled_rules_open_source_ads_2,
             R.raw.bundled_rules_1,
             R.raw.bundled_rules_2,
             R.raw.bundled_rules_3,
@@ -1530,16 +1547,19 @@ object RuleRepository {
         return false
     }
 
-    fun isUrlBlocked(context: Context, host: String, path: String, appName: String? = null): Boolean {
+    fun isUrlBlocked(context: Context, host: String, path: String, appName: String? = null, requestDomain: String? = null): Boolean {
         val normalizedHost = sanitizeDomain(host) ?: return false
         val ruleMap = getRuleMap(context)
         val fullUrl = "$host$path".lowercase()
         val matched = buildDomainCandidates(normalizedHost)
             .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
             .any { rule ->
-                if (!ruleMatches(rule, null, appName)) return@any false
+                if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain)) return@any false
                 if (rule.keywordPattern != null) {
                     return@any fullUrl.contains(rule.keywordPattern)
+                }
+                if (!rule.pathPattern.isNullOrBlank() && path.isNotBlank()) {
+                    return@any pathMatchesPattern(path, rule.pathPattern)
                 }
                 if (rule.urlblock && path.isNotBlank()) {
                     return@any looksLikeSuspiciousPath(path)
@@ -1573,6 +1593,18 @@ object RuleRepository {
     fun isSocialCoreDomain(domain: String): Boolean {
         val normalized = sanitizeDomain(domain)?.lowercase() ?: return false
         return socialCoreDomains.contains(normalized) || socialCoreDomains.any { normalized.endsWith(".$it") }
+    }
+
+    fun isMediaCoreDomain(domain: String): Boolean {
+        val normalized = sanitizeDomain(domain)?.lowercase() ?: return false
+        return mediaCoreDomains.contains(normalized) || mediaCoreDomains.any { normalized.endsWith(".$it") }
+    }
+
+    fun shouldProtectMediaTraffic(domain: String): Boolean {
+        val normalized = sanitizeDomain(domain)?.lowercase() ?: return false
+        if (!isMediaCoreDomain(normalized)) return false
+        if (looksLikeAdDomain(normalized)) return false
+        return true
     }
 
     private fun checkDomainWhitelist(lowerDomain: String): Boolean {
@@ -1620,16 +1652,35 @@ object RuleRepository {
             .firstOrNull() ?: getRegexRules(context).firstOrNull { matchesRegexRule(it, normalized) }
     }
 
-    fun getRequestRewriteDirectives(context: Context, host: String, path: String, appName: String? = null): RequestRewriteDirectives {
+    fun getRequestRewriteDirectives(context: Context, host: String, path: String, appName: String? = null, requestDomain: String? = null): RequestRewriteDirectives {
         val normalizedHost = sanitizeDomain(host) ?: return RequestRewriteDirectives()
         val matchedRules = buildDomainCandidates(normalizedHost)
             .flatMap { candidate -> getRuleMap(context)[candidate].orEmpty().asSequence() }
-            .filter { ruleMatches(it, null, appName) }
+            .filter { ruleMatches(it, null, appName, normalizedHost, requestDomain) }
         val matchedRegexRules = getRegexRules(context).filter { matchesRegexRule(it, "$normalizedHost$path") || matchesRegexRule(it, normalizedHost) }
         val allRules = (matchedRules + matchedRegexRules).distinctBy { it.id }
         val removeParams = allRules.flatMap { it.removeParams }.toSet()
         val cspValue = allRules.mapNotNull { it.cspValue }.firstOrNull()
         return RequestRewriteDirectives(removeParams = removeParams, cspValue = cspValue)
+    }
+
+    fun hasAdvancedUrlRule(context: Context, host: String, path: String, appName: String? = null, requestDomain: String? = null): Boolean {
+        val normalizedHost = sanitizeDomain(host) ?: return false
+        val normalizedPath = path.lowercase()
+        val fullUrl = "$normalizedHost$normalizedPath"
+        val matchedHostRules = buildDomainCandidates(normalizedHost)
+            .flatMap { candidate -> getRuleMap(context)[candidate].orEmpty().asSequence() }
+            .filter { ruleMatches(it, null, appName, normalizedHost, requestDomain) }
+            .any { rule ->
+                !rule.pathPattern.isNullOrBlank() ||
+                    rule.urlblock ||
+                    rule.removeParams.isNotEmpty() ||
+                    !rule.cspValue.isNullOrBlank() ||
+                    !rule.cosmeticSelector.isNullOrBlank() ||
+                    (!rule.keywordPattern.isNullOrBlank() && fullUrl.contains(rule.keywordPattern))
+            }
+        if (matchedHostRules) return true
+        return getRegexRules(context).any { matchesRegexRule(it, fullUrl) }
     }
 
     fun getCosmeticSelectors(context: Context, host: String): List<String> {
@@ -1932,12 +1983,12 @@ object RuleRepository {
         val normalized = sanitizeDomain(domain) ?: return false
         if (isWhitelistedDomain(normalized)) return false
         if (isSensitiveAuthDomain(normalized)) return false
+        if (shouldProtectMediaTraffic(normalized)) return false
         if (isProtectedNovelAppDomain(normalized) && !looksLikeAdDomain(normalized)) return false
         val normalizedVendor = normalizeVendorName(vendor)
         if (isBypassProtectionDomain(normalized)) return true
         if (looksLikeAdDomain(normalized)) return true
         if (normalizedVendor == GENERIC_AD_VENDOR) return true
-        if (normalizedVendor != DEFAULT_VENDOR && !isNovelVendor(normalizedVendor)) return true
         return suspiciousDomainConfidenceScore(
             domain = normalized,
             vendor = normalizedVendor,
@@ -2117,11 +2168,13 @@ object RuleRepository {
                             parsedRule.dnsTypes,
                             parsedRule.excludedDnsTypes,
                             parsedRule.isBadfilter,
+                            parsedRule.pathPattern,
                             parsedRule.regexPattern,
                             parsedRule.cosmeticSelector,
                             parsedRule.removeParams,
                             parsedRule.cspValue,
-                            parsedRule.keywordPattern
+                            parsedRule.keywordPattern,
+                            parsedRule.domainConstraints
                         )
                         if (parsedRule.isException) {
                             if (!seenExceptions.add(ruleKey)) {
@@ -2264,6 +2317,7 @@ object RuleRepository {
         } else {
             null
         }
+        val pathPattern = extractPathPattern(patternPart)
 
         return domains.map { domain ->
             ParsedRule(
@@ -2274,10 +2328,12 @@ object RuleRepository {
                 excludedDnsTypes = modifierInfo.excludedDnsTypes,
                 thirdParty = modifierInfo.thirdParty,
                 redirect = modifierInfo.redirect,
+                domainConstraints = modifierInfo.domainConstraints,
                 denyallow = modifierInfo.denyallow,
                 urlblock = modifierInfo.urlblock,
                 appPackages = modifierInfo.appPackages,
                 keywordPattern = keywordPattern,
+                pathPattern = pathPattern,
                 regexPattern = null,
                 cosmeticSelector = null,
                 removeParams = modifierInfo.removeParams,
@@ -2794,6 +2850,7 @@ object RuleRepository {
         var domainScoped = false
         var thirdParty = false
         var redirect = false
+        val domainConstraints = mutableSetOf<String>()
         val denyallow = mutableSetOf<String>()
         var urlblock = false
         var fromScoped = false
@@ -2820,6 +2877,11 @@ object RuleRepository {
                     "domain" -> {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
                         domainScoped = true
+                        domainConstraints.addAll(
+                            value.split('|')
+                                .map { it.trim().lowercase().removePrefix("~") }
+                                .filter { it.isNotBlank() }
+                        )
                     }
                     "dnstype" -> {
                         if (inverted || value.isBlank()) return ModifierInfo(invalid = true)
@@ -2890,6 +2952,7 @@ object RuleRepository {
             domainScoped = domainScoped,
             thirdParty = thirdParty,
             redirect = redirect,
+            domainConstraints = domainConstraints.toSet(),
             denyallow = denyallow.toSet(),
             urlblock = urlblock,
             fromScoped = fromScoped,
@@ -2906,9 +2969,28 @@ object RuleRepository {
         return trimmed.lowercase()
     }
 
+    private fun extractPathPattern(pattern: String): String? {
+        val trimmed = pattern.trim()
+        val withoutDomainAnchor = when {
+            trimmed.startsWith("||") -> trimmed.removePrefix("||")
+            trimmed.startsWith("|") -> trimmed.removePrefix("|")
+            else -> trimmed
+        }
+        val withoutScheme = withoutDomainAnchor.removePrefix("https://").removePrefix("http://")
+        val slashIndex = withoutScheme.indexOf('/')
+        if (slashIndex < 0 || slashIndex >= withoutScheme.length - 1) return null
+        val path = withoutScheme.substring(slashIndex)
+            .substringBefore('$')
+            .substringBefore('|')
+            .trim()
+        if (path.isBlank() || path == "/") return null
+        return path.lowercase()
+    }
+
     private fun canSafelyApplyModifierContext(patternPart: String, modifierInfo: ModifierInfo): Boolean {
         val hasKeyword = patternPart.contains('*')
-        if (hasKeyword) return true
+        val hasPathPattern = extractPathPattern(patternPart) != null
+        if (hasKeyword || hasPathPattern) return true
 
         val needsAdCheck = modifierInfo.appScoped ||
             modifierInfo.domainScoped ||
@@ -2982,25 +3064,30 @@ object RuleRepository {
         dnsTypes: Set<Int>?,
         excludedDnsTypes: Set<Int>?,
         badfilter: Boolean,
+        pathPattern: String? = null,
         regexPattern: String? = null,
         cosmeticSelector: String? = null,
         removeParams: Set<String> = emptySet(),
         cspValue: String? = null,
-        keywordPattern: String? = null
+        keywordPattern: String? = null,
+        domainConstraints: Set<String> = emptySet()
     ): String {
         val dnsKey = normalizeDnsTypes(dnsTypes)?.joinToString("|") ?: "*"
         val excludedDnsKey = normalizeDnsTypes(excludedDnsTypes)?.joinToString("|") ?: "-"
         val removeParamKey = removeParams.toSortedSet().joinToString("|")
+        val domainConstraintKey = domainConstraints.toSortedSet().joinToString("|")
         return listOf(
             domain,
             dnsKey,
             excludedDnsKey,
             badfilter.toString(),
+            pathPattern.orEmpty(),
             regexPattern.orEmpty(),
             cosmeticSelector.orEmpty(),
             removeParamKey,
             cspValue.orEmpty(),
-            "kw:${keywordPattern.orEmpty()}"
+            "kw:${keywordPattern.orEmpty()}",
+            "domains:$domainConstraintKey"
         ).joinToString("#")
     }
 
@@ -3186,13 +3273,39 @@ object RuleRepository {
         cachedRuleInventory = null
     }
 
-    private fun ruleMatches(rule: BlockRule, qType: Int?, appName: String? = null): Boolean {
+    private fun ruleMatches(rule: BlockRule, qType: Int?, appName: String? = null, host: String? = null, requestDomain: String? = null): Boolean {
         if (!matchesAppPackage(rule.appPackages, appName)) return false
+        if (!matchesRequestContext(rule, host, requestDomain)) return false
         if (qType == null) return true
         val dnsTypes = normalizeDnsTypes(rule.dnsTypes)
         val excludedDnsTypes = normalizeDnsTypes(rule.excludedDnsTypes)
         if (excludedDnsTypes != null && excludedDnsTypes.contains(qType)) return false
         return dnsTypes == null || dnsTypes.contains(qType)
+    }
+
+    private fun matchesRequestContext(rule: BlockRule, host: String?, requestDomain: String?): Boolean {
+        val normalizedHost = host?.let(::sanitizeDomain)
+        val normalizedRequestDomain = requestDomain?.let(::sanitizeDomain)
+        if (rule.denyallow.isNotEmpty() && normalizedRequestDomain != null) {
+            if (rule.denyallow.any { denied -> normalizedRequestDomain == denied || normalizedRequestDomain.endsWith(".$denied") }) {
+                return false
+            }
+        }
+        if (rule.domainConstraints.isNotEmpty()) {
+            if (normalizedRequestDomain == null) return false
+            val allowed = rule.domainConstraints.any { allowedDomain ->
+                normalizedRequestDomain == allowedDomain || normalizedRequestDomain.endsWith(".$allowedDomain")
+            }
+            if (!allowed) return false
+        }
+        if (rule.thirdParty) {
+            if (normalizedHost == null || normalizedRequestDomain == null) return false
+            val sameSite = normalizedHost == normalizedRequestDomain ||
+                normalizedHost.endsWith(".$normalizedRequestDomain") ||
+                normalizedRequestDomain.endsWith(".$normalizedHost")
+            if (sameSite) return false
+        }
+        return true
     }
 
     private fun matchesRegexRule(rule: BlockRule, value: String): Boolean {
@@ -3209,11 +3322,13 @@ object RuleRepository {
             dnsTypes = rule.dnsTypes,
             excludedDnsTypes = rule.excludedDnsTypes,
             badfilter = false,
+            pathPattern = rule.pathPattern,
             regexPattern = rule.regexPattern,
             cosmeticSelector = rule.cosmeticSelector,
             removeParams = rule.removeParams,
             cspValue = rule.cspValue,
-            keywordPattern = rule.keywordPattern
+            keywordPattern = rule.keywordPattern,
+            domainConstraints = rule.domainConstraints
         )
     }
 
@@ -3226,6 +3341,19 @@ object RuleRepository {
         val lowerPath = path.lowercase()
         val suspiciousKeywords = listOf("/ad", "/ads", "/advert", "/banner", "/splash", "/promo", "/tracker")
         return suspiciousKeywords.any { lowerPath.contains(it) }
+    }
+
+    private fun pathMatchesPattern(path: String, pathPattern: String): Boolean {
+        val normalizedPath = path.lowercase()
+        val normalizedPattern = pathPattern.lowercase()
+        if (normalizedPattern.isBlank()) return false
+        return when {
+            normalizedPattern.contains("*") -> {
+                val parts = normalizedPattern.split('*').filter { it.isNotBlank() }
+                if (parts.isEmpty()) true else parts.all { normalizedPath.contains(it) }
+            }
+            else -> normalizedPath.contains(normalizedPattern)
+        }
     }
 
     private fun hasAggressiveNovelAdSignal(domain: String): Boolean {
@@ -3283,10 +3411,12 @@ object RuleRepository {
             excludedDnsTypes = mergeDnsTypes(existing.excludedDnsTypes, incoming.excludedDnsTypes),
             thirdParty = existing.thirdParty || incoming.thirdParty,
             redirect = existing.redirect || incoming.redirect,
+            domainConstraints = (existing.domainConstraints + incoming.domainConstraints).toSet(),
             denyallow = mergedDenyallow,
             urlblock = existing.urlblock || incoming.urlblock,
             appPackages = mergedAppPackages,
             keywordPattern = mergedKeyword,
+            pathPattern = incoming.pathPattern ?: existing.pathPattern,
             regexPattern = incoming.regexPattern ?: existing.regexPattern,
             cosmeticSelector = incoming.cosmeticSelector ?: existing.cosmeticSelector,
             removeParams = (existing.removeParams + incoming.removeParams).toSet(),
@@ -3323,10 +3453,12 @@ object RuleRepository {
             excludedDnsTypes = mergeDnsTypes(existing.excludedDnsTypes, incoming.excludedDnsTypes),
             thirdParty = existing.thirdParty || incoming.thirdParty,
             redirect = existing.redirect || incoming.redirect,
+            domainConstraints = (existing.domainConstraints + incoming.domainConstraints).toSet(),
             denyallow = mergedDenyallow,
             urlblock = existing.urlblock || incoming.urlblock,
             appPackages = mergedAppPackages,
             keywordPattern = mergedKeyword,
+            pathPattern = incoming.pathPattern ?: existing.pathPattern,
             regexPattern = incoming.regexPattern ?: existing.regexPattern,
             cosmeticSelector = incoming.cosmeticSelector ?: existing.cosmeticSelector,
             removeParams = (existing.removeParams + incoming.removeParams).toSet(),
@@ -3409,6 +3541,7 @@ object RuleRepository {
         val domainScoped: Boolean = false,
         val thirdParty: Boolean = false,
         val redirect: Boolean = false,
+        val domainConstraints: Set<String> = emptySet(),
         val denyallow: Set<String> = emptySet(),
         val urlblock: Boolean = false,
         val fromScoped: Boolean = false,
@@ -3428,10 +3561,12 @@ object RuleRepository {
         val excludedDnsTypes: Set<Int>? = null,
         val thirdParty: Boolean = false,
         val redirect: Boolean = false,
+        val domainConstraints: Set<String> = emptySet(),
         val denyallow: Set<String> = emptySet(),
         val urlblock: Boolean = false,
         val appPackages: Set<String> = emptySet(),
         val keywordPattern: String? = null,
+        val pathPattern: String? = null,
         val regexPattern: String? = null,
         val cosmeticSelector: String? = null,
         val removeParams: Set<String> = emptySet(),

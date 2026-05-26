@@ -11,6 +11,9 @@ import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -43,6 +46,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private var pendingVpnStartAfterPermission = false
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val vpnLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (it.resultCode == RESULT_OK) {
             startVpnService()
@@ -71,16 +75,43 @@ class MainActivity : AppCompatActivity() {
         binding.pager.currentItem = 1
         requestRequiredPermissionsOnFirstLaunch()
         preloadBundledRules()
+        restoreVpnIfNeeded()
     }
 
     override fun onResume() {
         super.onResume()
         CertificateAuthorityManager.syncInstalledState(this)
+        restoreVpnIfNeeded()
+    }
+
+    private fun restoreVpnIfNeeded() {
+        if (!FeatureSettingsRepository.isAdBlockEnabled(this)) return
+        if (AdBlockVpnService.isRunning) return
+        runCatching { VpnService.prepare(this) }
+            .onSuccess { prepareIntent ->
+                if (prepareIntent != null) {
+                    LogRepository.append(this, "VPN restore pending: system permission confirmation required")
+                    return
+                }
+                mainHandler.removeCallbacksAndMessages("restore-vpn")
+                mainHandler.postAtTime(
+                    {
+                        if (!isFinishing && !isDestroyed && FeatureSettingsRepository.isAdBlockEnabled(this) && !AdBlockVpnService.isRunning) {
+                            startVpnService(silent = true)
+                        }
+                    },
+                    "restore-vpn",
+                    SystemClock.uptimeMillis() + 300
+                )
+            }
+            .onFailure {
+                LogRepository.append(this, "VPN restore check failed: ${it.message ?: it.javaClass.simpleName}")
+            }
     }
 
     fun requestToggleVpn() {
         if (AdBlockVpnService.isRunning) {
-            stopVpnAndExit()
+            stopVpnService()
             return
         }
         if (needsNotificationPermission()) {
@@ -139,7 +170,7 @@ class MainActivity : AppCompatActivity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
     }
 
-    private fun startVpnService() {
+    private fun startVpnService(silent: Boolean = false) {
         val serviceIntent = Intent(this, AdBlockVpnService::class.java)
         runCatching {
             FeatureSettingsRepository.setAdBlockEnabled(this, true)
@@ -149,7 +180,9 @@ class MainActivity : AppCompatActivity() {
                 startService(serviceIntent)
             }
         }.onSuccess {
-            Toast.makeText(this, "正在开启拦截", Toast.LENGTH_SHORT).show()
+            if (!silent) {
+                Toast.makeText(this, "正在开启拦截", Toast.LENGTH_SHORT).show()
+            }
         }.onFailure {
             FeatureSettingsRepository.setAdBlockEnabled(this, false)
             AdBlockVpnService.isRunning = false
@@ -158,13 +191,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun stopVpnAndExit() {
+    private fun stopVpnService() {
         AdBlockVpnService.isRunning = false
         startService(Intent(this, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_STOP))
-        Toast.makeText(this, "停止后将退出应用", Toast.LENGTH_SHORT).show()
-        window.decorView.postDelayed({
-            finishAffinity()
-        }, 350)
+        Toast.makeText(this, "已停止拦截", Toast.LENGTH_SHORT).show()
     }
 
     fun showGuideDialog() {
@@ -275,13 +305,22 @@ class MainActivity : AppCompatActivity() {
                 CertificateAuthorityManager.ensureCaInstalledFiles(applicationContext)
             }
             generated.onSuccess { cert ->
+                HttpsMitmRepository.saveCertificateExportPath(this@MainActivity, cert.downloadDisplayPath)
                 HttpsMitmRepository.clearRuntimeState(this@MainActivity)
                 if (AdBlockVpnService.isRunning) {
                     startService(Intent(this@MainActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
                 }
-                HttpsMitmRepository.markCertificateInstallRequested(this@MainActivity)
+                val certificateInstalled = HttpsMitmRepository.isCertificateInstalled(this@MainActivity) ||
+                    CertificateAuthorityManager.syncInstalledState(this@MainActivity)
+                if (!certificateInstalled) {
+                    HttpsMitmRepository.markCertificateInstallRequested(this@MainActivity)
+                }
                 onFinished(true)
-                showInstallCaDialog(cert)
+                if (certificateInstalled) {
+                    Toast.makeText(this@MainActivity, "MITM 模式已开启", Toast.LENGTH_SHORT).show()
+                } else {
+                    showInstallCaDialog(cert)
+                }
             }.onFailure {
                 LogRepository.append(this@MainActivity, "Prepare HTTPS MITM certificate failed: ${it.message ?: it.javaClass.simpleName}")
                 Toast.makeText(this@MainActivity, "MITM 证书准备失败", Toast.LENGTH_SHORT).show()
@@ -292,19 +331,29 @@ class MainActivity : AppCompatActivity() {
 
     private fun showInstallCaDialog(certificate: CertificateAuthorityManager.GeneratedCertificate) {
         val downloadPathText = certificate.downloadDisplayPath ?: "Download/HanFeng/HanFeng.crt"
+        if (isFinishing || isDestroyed) {
+            LogRepository.append(this, "Skip certificate install dialog: activity not ready")
+            return
+        }
         runCatching {
-            check(!isFinishing && !isDestroyed) { "activity-not-ready" }
             MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_HanFeng_Dialog)
                 .setTitle("安装 MITM 证书")
                 .setMessage(
-                    "本地 CA 证书已生成。\n\n证书文件位置：\n$downloadPathText\n\n安装步骤：\n1. 打开手机“设置”。\n2. 搜索“安装证书”或进入“安全 / 密码与隐私 / 更多安全设置”中的证书安装入口。\n3. 选择“CA 证书”或“从存储设备安装证书”。\n4. 前往 Download/HanFeng/ 目录，选择 HanFeng.crt 完成安装。\n5. 安装完成后返回应用，应用会自动检查证书状态。"
+                    buildString {
+                        append(if (certificate.newlyGenerated) "本地 CA 证书已生成。" else "已复用现有 CA 证书。")
+                        append("\n\n证书文件位置：\n")
+                        append(downloadPathText)
+                        append("\n\n安装步骤：\n1. 打开手机“设置”。\n2. 搜索“安装证书”或进入“安全 / 密码与隐私 / 更多安全设置”中的证书安装入口。\n3. 选择“CA 证书”或“从存储设备安装证书”。\n4. 前往 Download/HanFeng/ 目录，选择 HanFeng.crt 完成安装。\n5. 安装完成后返回应用，应用会自动检查证书状态。")
+                    }
                 )
                 .setPositiveButton("我知道了", null)
                 .setNegativeButton("稍后安装", null)
                 .show()
         }.onFailure {
             LogRepository.append(this, "Show certificate install dialog failed: ${it.message ?: it.javaClass.simpleName}")
-            Toast.makeText(this, "证书已导出到 Download/HanFeng/HanFeng.crt，请到系统设置手动安装", Toast.LENGTH_LONG).show()
+            if (certificate.newlyGenerated) {
+                Toast.makeText(this, "证书已导出到 Download/HanFeng/HanFeng.crt，请到系统设置手动安装", Toast.LENGTH_LONG).show()
+            }
         }
     }
 

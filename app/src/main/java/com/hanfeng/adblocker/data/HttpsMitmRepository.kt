@@ -11,6 +11,7 @@ object HttpsMitmRepository {
     private const val KEY_CERT_PASSWORD = "cert_password"
     private const val KEY_CERT_FILE = "cert_file"
     private const val KEY_CA_KEYSTORE_FILE = "ca_keystore_file"
+    private const val KEY_CERT_EXPORT_PATH = "cert_export_path"
     private const val KEY_BYPASS_UNTIL_PREFIX = "bypass_until:"
     private const val KEY_BYPASS_REASON_PREFIX = "bypass_reason:"
     private const val DEFAULT_BYPASS_COOLDOWN_MILLIS = 10 * 60 * 1000L
@@ -37,6 +38,7 @@ object HttpsMitmRepository {
         val existingPrefs = prefs(context)
         val alreadyInstalled = existingPrefs.getBoolean(KEY_CERT_INSTALLED, false)
         val installPending = existingPrefs.getBoolean(KEY_CERT_INSTALL_PENDING, false)
+        val exportPath = existingPrefs.getString(KEY_CERT_EXPORT_PATH, null)
         prefs(context).edit()
             .putBoolean(KEY_CERT_READY, true)
             .putBoolean(KEY_CERT_INSTALLED, alreadyInstalled)
@@ -45,6 +47,7 @@ object HttpsMitmRepository {
             .putString(KEY_CERT_PASSWORD, password)
             .putString(KEY_CERT_FILE, fileName)
             .putString(KEY_CA_KEYSTORE_FILE, caKeystoreFileName)
+            .putString(KEY_CERT_EXPORT_PATH, exportPath)
             .apply()
         cachedCertificateReady = true
         cachedCertificateInstalled = alreadyInstalled
@@ -148,6 +151,12 @@ object HttpsMitmRepository {
     fun getCertificateFileName(context: Context): String? = prefs(context).getString(KEY_CERT_FILE, null)
 
     fun getCaKeystoreFileName(context: Context): String? = prefs(context).getString(KEY_CA_KEYSTORE_FILE, null)
+
+    fun getCertificateExportPath(context: Context): String? = prefs(context).getString(KEY_CERT_EXPORT_PATH, null)
+
+    fun saveCertificateExportPath(context: Context, exportPath: String?) {
+        prefs(context).edit().putString(KEY_CERT_EXPORT_PATH, exportPath).apply()
+    }
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 

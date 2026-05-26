@@ -51,16 +51,22 @@ object CertificateAuthorityManager {
             val certDir = File(context.filesDir, CERT_DIR).apply { mkdirs() }
             val certFile = File(certDir, CERT_FILE_NAME)
             val publicCertFile = File(certDir, CERT_PUBLIC_FILE_NAME)
-            if (!isValidCertificateFile(certFile) || !isValidCertificateFile(publicCertFile)) {
+            val newlyGenerated = !isValidCertificateFile(certFile) || !isValidCertificateFile(publicCertFile)
+            if (newlyGenerated) {
                 val generated = generateCaCertificate()
                 storePkcs12(certFile, generated.keyPair, generated.certificate)
                 storePublicCertificate(publicCertFile, generated.certificate)
             }
             HttpsMitmRepository.saveCertificateMeta(context, CERT_ALIAS, CERT_PASSWORD, CERT_PUBLIC_FILE_NAME, CERT_FILE_NAME)
-            val downloadDisplayPath = exportCertificateToDownloads(context, publicCertFile)
+            val downloadDisplayPath = if (newlyGenerated || !HttpsMitmRepository.isCertificateReady(context)) {
+                exportCertificateToDownloads(context, publicCertFile)
+            } else {
+                HttpsMitmRepository.getCertificateExportPath(context)
+            }
             GeneratedCertificate(
                 filePath = publicCertFile.absolutePath,
-                downloadDisplayPath = downloadDisplayPath
+                downloadDisplayPath = downloadDisplayPath,
+                newlyGenerated = newlyGenerated
             )
         }
     }
@@ -295,7 +301,8 @@ object CertificateAuthorityManager {
 
     data class GeneratedCertificate(
         val filePath: String,
-        val downloadDisplayPath: String?
+        val downloadDisplayPath: String?,
+        val newlyGenerated: Boolean
     )
 
     data class GeneratedLeafCertificate(

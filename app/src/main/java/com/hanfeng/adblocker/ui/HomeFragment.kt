@@ -59,6 +59,10 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
     override fun onResume() {
         super.onResume()
         updateAllStatus()
+        if (!AdBlockVpnService.isRunning && FeatureSettingsRepository.isAdBlockEnabled(requireContext())) {
+            view?.postDelayed({ updateAllStatus() }, 600)
+            view?.postDelayed({ updateAllStatus() }, 1800)
+        }
     }
 
     private fun updateAllStatus() {
@@ -67,18 +71,25 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
     }
 
     private fun updateToggleText(toggle: Button) {
-        toggle.text = if (AdBlockVpnService.isRunning) "停止拦截" else "开启拦截"
+        val ctx = context ?: return
+        val enabled = FeatureSettingsRepository.isAdBlockEnabled(ctx)
+        toggle.text = if (AdBlockVpnService.isRunning || enabled) "停止拦截" else "开启拦截"
     }
 
     private fun updateStatusText(statusText: TextView) {
         val ctx = context ?: return
         val vpnRunning = AdBlockVpnService.isRunning
+        val adBlockEnabled = FeatureSettingsRepository.isAdBlockEnabled(ctx)
         val httpDecryptEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(ctx)
         val certificateInstalled = HttpsMitmRepository.isCertificateInstalled(ctx) ||
             CertificateAuthorityManager.syncInstalledState(ctx)
-        val workStatus = if (vpnRunning) "运行中" else "未开启"
+        val workStatus = when {
+            vpnRunning -> "运行中"
+            adBlockEnabled -> "恢复中"
+            else -> "未开启"
+        }
         val interceptMode = when {
-            !vpnRunning -> "未启用"
+            !vpnRunning && !adBlockEnabled -> "未启用"
             httpDecryptEnabled && certificateInstalled -> "MITM+DNS 拦截"
             httpDecryptEnabled -> "DNS 拦截 (待装证书)"
             else -> "DNS 拦截"
@@ -118,12 +129,12 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
                         return@onHttpDecryptSettingChanged
                     }
                     val message = if (isChecked) {
-                        "MITM 模式已开启，证书已导出，请手动安装 HanFeng.crt"
+                        null
                     } else {
                         "MITM 模式已关闭"
                     }
                     view?.findViewById<TextView>(R.id.textHomeStatus)?.let(::updateStatusText)
-                    Toast.makeText(ctx, message, Toast.LENGTH_SHORT).show()
+                    message?.let { Toast.makeText(ctx, it, Toast.LENGTH_SHORT).show() }
                 }
             }
         }

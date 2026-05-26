@@ -12,11 +12,11 @@
         android:scaleType="centerCrop"
         android:src="@drawable/bg_fallback_home" />
 
-    <androidx.constraintlayout.widget.ConstraintLayout
-        android:id="@+id/homeContent"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:padding="@dimen/page_horizontal_padding">
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:id="@+id/homeContent"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:padding="@dimen/page_horizontal_padding">
 
         <LinearLayout
             android:id="@+id/homeButtons"
@@ -30,26 +30,26 @@
 
             <Button
                 android:id="@+id/btnToggle"
-                android:layout_width="220dp"
+                android:layout_width="@dimen/home_button_max_width"
                 android:layout_height="@dimen/home_button_height"
                 android:layout_marginBottom="12dp"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
                 android:minWidth="180dp"
-                android:paddingHorizontal="32dp"
+                android:paddingHorizontal="@dimen/home_button_horizontal_padding"
                 android:text="开启拦截"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="18sp" />
 
             <LinearLayout
-                android:layout_width="220dp"
+                android:layout_width="@dimen/home_button_max_width"
                 android:layout_height="@dimen/home_button_height"
                 android:layout_marginBottom="12dp"
                 android:background="@drawable/bg_panel"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
-                android:paddingHorizontal="32dp">
+                android:paddingHorizontal="@dimen/home_button_horizontal_padding">
 
                 <TextView
                     android:layout_width="0dp"
@@ -72,13 +72,13 @@
 
             <Button
                 android:id="@+id/btnGuide"
-                android:layout_width="220dp"
+                android:layout_width="@dimen/home_button_max_width"
                 android:layout_height="@dimen/home_button_height"
                 android:layout_marginBottom="12dp"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
                 android:minWidth="180dp"
-                android:paddingHorizontal="32dp"
+                android:paddingHorizontal="@dimen/home_button_horizontal_padding"
                 android:text="使用说明"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
@@ -86,13 +86,13 @@
 
             <Button
                 android:id="@+id/btnWhitelist"
-                android:layout_width="220dp"
+                android:layout_width="@dimen/home_button_max_width"
                 android:layout_height="@dimen/home_button_height"
                 android:layout_marginBottom="12dp"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
                 android:minWidth="180dp"
-                android:paddingHorizontal="32dp"
+                android:paddingHorizontal="@dimen/home_button_horizontal_padding"
                 android:text="黑白名单"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
@@ -100,7 +100,7 @@
 
             <LinearLayout
                 android:id="@+id/homeStatusCard"
-                android:layout_width="220dp"
+                android:layout_width="@dimen/home_button_max_width"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:background="@drawable/bg_panel"

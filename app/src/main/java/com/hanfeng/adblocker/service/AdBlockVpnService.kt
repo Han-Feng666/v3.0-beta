@@ -31,6 +31,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.FileInputStream
@@ -48,6 +49,7 @@ class AdBlockVpnService : VpnService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var vpnInterface: ParcelFileDescriptor? = null
     private var packetJob: Job? = null
+    private var restartJob: Job? = null
     private val appNameCache = ConcurrentHashMap<String, String>(256)
     private val domainAppCache = ConcurrentHashMap<String, String>(256)
     private val sourcePortAppCache = ConcurrentHashMap<String, String>(256)
@@ -211,8 +213,8 @@ class AdBlockVpnService : VpnService() {
             runCatching { runPacketLoop() }
                 .onFailure { error ->
                     LogRepository.append(this@AdBlockVpnService, "VPN loop crashed: ${error.message ?: error.javaClass.simpleName}")
-                    FeatureSettingsRepository.setAdBlockEnabled(this@AdBlockVpnService, false)
-                    stopVpn()
+                    stopVpn(stopService = false)
+                    scheduleSelfRecovery("vpn-loop-crashed")
                 }
         }
         HttpsMitmController.onVpnStarted(this)
@@ -228,6 +230,8 @@ class AdBlockVpnService : VpnService() {
 
     private fun stopVpn(stopService: Boolean = true) {
         isRunning = false
+        restartJob?.cancel()
+        restartJob = null
         packetJob?.cancel()
         packetJob = null
         vpnInterface?.close()
@@ -236,6 +240,34 @@ class AdBlockVpnService : VpnService() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         if (stopService) stopSelf()
         LogRepository.append(this, "VPN stopped")
+    }
+
+    private fun scheduleSelfRecovery(reason: String) {
+        if (!FeatureSettingsRepository.isAdBlockEnabled(this)) {
+            LogRepository.append(this, "Skip VPN recovery: ad block disabled by user, reason=$reason")
+            return
+        }
+        if (restartJob?.isActive == true) {
+            LogRepository.append(this, "Skip VPN recovery: recovery already scheduled, reason=$reason")
+            return
+        }
+        restartJob = scope.launch {
+            LogRepository.append(this@AdBlockVpnService, "Schedule VPN recovery, reason=$reason")
+            delay(1500)
+            if (!FeatureSettingsRepository.isAdBlockEnabled(this@AdBlockVpnService) || isRunning) {
+                return@launch
+            }
+            val restartIntent = Intent(this@AdBlockVpnService, AdBlockVpnService::class.java)
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(restartIntent)
+                } else {
+                    startService(restartIntent)
+                }
+            }.onFailure { error ->
+                LogRepository.append(this@AdBlockVpnService, "VPN recovery start failed: ${error.message ?: error.javaClass.simpleName}")
+            }
+        }
     }
 
     private fun clearRuntimeState() {
@@ -1366,6 +1398,7 @@ class AdBlockVpnService : VpnService() {
         vendor: String
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
+        if (RuleRepository.shouldProtectMediaTraffic(question.domain)) return
         val matchedRule = RuleRepository.findMatchingRule(this, question.domain, question.qType)
         val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, vendor)
         val generalAdTraffic = RuleRepository.shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)
@@ -1446,6 +1479,7 @@ class AdBlockVpnService : VpnService() {
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
         val matchedAliases = aliasTargets.filter { aliasTarget ->
+            if (RuleRepository.shouldProtectMediaTraffic(aliasTarget)) return@filter false
             val aliasVendor = RuleRepository.classifyVendorFromHints(this, aliasTarget, appName)
             RuleRepository.findMatchingRule(this, aliasTarget, question.qType) != null ||
                 RuleRepository.shouldAggressivelyBlockForNovelApp(
@@ -1512,6 +1546,7 @@ class AdBlockVpnService : VpnService() {
         vendor: String
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
+        if (RuleRepository.shouldProtectMediaTraffic(question.domain)) return
         if (!shouldTrackHttpsMitmTarget(question.domain, question.qType, appName, vendor)) return
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
@@ -1632,6 +1667,7 @@ class AdBlockVpnService : VpnService() {
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
         val matchedAliases = aliasTargets.filter { aliasTarget ->
+            if (RuleRepository.shouldProtectMediaTraffic(aliasTarget)) return@filter false
             val aliasVendor = RuleRepository.classifyVendorFromHints(this, aliasTarget, appName)
             shouldTrackHttpsMitmTarget(aliasTarget, question.qType, appName, aliasVendor)
         }.distinct()
@@ -1690,6 +1726,7 @@ class AdBlockVpnService : VpnService() {
         appName: String,
         vendor: String
     ): Boolean {
+        if (RuleRepository.shouldProtectMediaTraffic(domain) && RuleRepository.findMatchingRule(this, domain, qType) == null) return false
         if (RuleRepository.findMatchingRule(this, domain, qType) != null) return true
         if (RuleRepository.isBypassProtectionDomain(domain)) return true
         if (RuleRepository.shouldTreatAsGeneralAdTraffic(domain, vendor, appName)) return true
@@ -1908,8 +1945,9 @@ class AdBlockVpnService : VpnService() {
 
     private fun requestHttpDecryptRouteReload() {
         if (!isRunning) return
+        if (!httpDecryptEnabled) return
         val now = System.currentTimeMillis()
-        if (now - lastHttpRouteReloadAt < 3_000L) return
+        if (now - lastHttpRouteReloadAt < 60_000L) return
         lastHttpRouteReloadAt = now
         startService(Intent(this, AdBlockVpnService::class.java).setAction(ACTION_RELOAD))
         logDecisionOnce(
