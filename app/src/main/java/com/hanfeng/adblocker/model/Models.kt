@@ -11,7 +11,7 @@ data class BlockRule(
     val excludedDnsTypes: Set<Int>? = null,
     val thirdParty: Boolean = false,
     val redirect: Boolean = false,
-    val domainConstraints: Set<String> = emptySet(),
+    val domainConstraints: Set<String>? = null,
     val denyallow: Set<String> = emptySet(),
     val urlblock: Boolean = false,
     val appPackages: Set<String> = emptySet(),

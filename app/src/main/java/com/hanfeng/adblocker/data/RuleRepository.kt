@@ -3070,12 +3070,12 @@ object RuleRepository {
         removeParams: Set<String> = emptySet(),
         cspValue: String? = null,
         keywordPattern: String? = null,
-        domainConstraints: Set<String> = emptySet()
+        domainConstraints: Set<String>? = emptySet()
     ): String {
         val dnsKey = normalizeDnsTypes(dnsTypes)?.joinToString("|") ?: "*"
         val excludedDnsKey = normalizeDnsTypes(excludedDnsTypes)?.joinToString("|") ?: "-"
         val removeParamKey = removeParams.toSortedSet().joinToString("|")
-        val domainConstraintKey = domainConstraints.toSortedSet().joinToString("|")
+        val domainConstraintKey = (domainConstraints ?: emptySet()).toSortedSet().joinToString("|")
         return listOf(
             domain,
             dnsKey,
@@ -3291,7 +3291,7 @@ object RuleRepository {
                 return false
             }
         }
-        if (rule.domainConstraints.isNotEmpty()) {
+        if (rule.domainConstraints?.isNotEmpty() == true) {
             if (normalizedRequestDomain == null) return false
             val allowed = rule.domainConstraints.any { allowedDomain ->
                 normalizedRequestDomain == allowedDomain || normalizedRequestDomain.endsWith(".$allowedDomain")
@@ -3328,7 +3328,7 @@ object RuleRepository {
             removeParams = rule.removeParams,
             cspValue = rule.cspValue,
             keywordPattern = rule.keywordPattern,
-            domainConstraints = rule.domainConstraints
+            domainConstraints = rule.domainConstraints.orEmpty()
         )
     }
 
@@ -3411,7 +3411,7 @@ object RuleRepository {
             excludedDnsTypes = mergeDnsTypes(existing.excludedDnsTypes, incoming.excludedDnsTypes),
             thirdParty = existing.thirdParty || incoming.thirdParty,
             redirect = existing.redirect || incoming.redirect,
-            domainConstraints = (existing.domainConstraints + incoming.domainConstraints).toSet(),
+            domainConstraints = (existing.domainConstraints.orEmpty() + incoming.domainConstraints).toSet(),
             denyallow = mergedDenyallow,
             urlblock = existing.urlblock || incoming.urlblock,
             appPackages = mergedAppPackages,
