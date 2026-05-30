@@ -15,12 +15,17 @@ data class BlockRule(
     val denyallow: Set<String> = emptySet(),
     val urlblock: Boolean = false,
     val appPackages: Set<String> = emptySet(),
+    val destinationPorts: Set<Int> = emptySet(),
+    val sourcePorts: Set<Int> = emptySet(),
     val keywordPattern: String? = null,
     val pathPattern: String? = null,
+    val ipCidr: String? = null,
     val regexPattern: String? = null,
     val cosmeticSelector: String? = null,
+    val cosmeticException: Boolean = false,
     val removeParams: Set<String> = emptySet(),
-    val cspValue: String? = null
+    val cspValue: String? = null,
+    val remoteSourceId: String? = null
 )
 
 enum class RuleSource(val label: String) {
@@ -29,6 +34,17 @@ enum class RuleSource(val label: String) {
     REFERENCE("参考"),
     UNSUPPORTED("暂不支持")
 }
+
+data class RemoteRuleSourceConfig(
+    val id: String,
+    val name: String,
+    val url: String,
+    val authorId: String? = null,
+    val enabled: Boolean = true,
+    val lastUpdatedAt: Long = 0L,
+    val lastRuleCount: Int = 0,
+    val lastError: String? = null
+)
 
 data class DashboardStats(
     val todayBlocked: Int,
@@ -67,7 +83,28 @@ data class InstalledApp(
     val label: String,
     val packageName: String,
     val icon: Drawable,
-    val whitelisted: Boolean
+    val whitelisted: Boolean,
+    val coexistSelected: Boolean = false,
+    val coexistRecommended: Boolean = false
+)
+
+data class LocalProxyCoexistConfig(
+    val enabled: Boolean = false,
+    val host: String = "127.0.0.1",
+    val port: Int? = null,
+    val controllerPackageName: String? = null,
+    val remarks: String? = null,
+    val detectedAppLabel: String? = null,
+    val detectedPackageName: String? = null,
+    val detectionSource: String? = null
+)
+
+data class LocalProxySuggestion(
+    val appLabel: String,
+    val packageName: String,
+    val host: String,
+    val port: Int,
+    val reason: String
 )
 
 data class DnsQuestion(

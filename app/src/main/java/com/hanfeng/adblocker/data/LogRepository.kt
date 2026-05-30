@@ -2,10 +2,12 @@ package com.HanFeng.data
 
 import android.content.Context
 import androidx.core.content.FileProvider
+import com.HanFeng.security.CertificateAuthorityManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
@@ -25,6 +27,7 @@ object LogRepository {
     private val logChannel = Channel<String>(capacity = LOG_CHANNEL_CAPACITY)
     private var writerJob: Job? = null
     private var currentContext: Context? = null
+    private var snapshotExportJob: Job? = null
     private val droppedLogCount = AtomicInteger(0)
     private val noisyLogPrefixes = listOf(
         "HTTP/2 frame ",
@@ -52,6 +55,7 @@ object LogRepository {
             droppedLogCount.incrementAndGet()
         }
         ensureWriterRunning()
+        ensureSnapshotExport(context.applicationContext)
     }
 
     private fun shouldDropNoisyLog(message: String): Boolean {
@@ -113,6 +117,32 @@ object LogRepository {
             zip.closeEntry()
         }
         return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zipFile)
+    }
+
+    private fun ensureSnapshotExport(context: Context) {
+        if (snapshotExportJob?.isActive == true) return
+        snapshotExportJob = scope.launch {
+            delay(180_000L)
+            runCatching {
+                append(context, "Auto log snapshot triggered after 180 seconds, overwrite previous file")
+                delay(300L)
+                val snapshot = buildLogSnapshot(context)
+                CertificateAuthorityManager.exportTextFileToDownloads(context, "日志文件.txt", snapshot)
+            }
+        }
+    }
+
+    private fun buildLogSnapshot(context: Context): String {
+        val logText = runCatching {
+            logFile(context).takeIf { it.exists() }?.readText().orEmpty()
+        }.getOrDefault("")
+        val header = buildString {
+            append("寒枫运行日志快照\n")
+            append("生成时间: ")
+            append(System.currentTimeMillis())
+            append("\n\n")
+        }
+        return header + logText
     }
 
     private fun logFile(context: Context): File = File(File(context.filesDir, LOG_DIR), LOG_FILE)

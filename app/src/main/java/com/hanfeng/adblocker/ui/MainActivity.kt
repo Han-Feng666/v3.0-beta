@@ -11,25 +11,26 @@ import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
+import android.content.res.Configuration
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import com.HanFeng.R
+import com.HanFeng.data.AppSettingsRepository
 import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.HttpDecryptRouteRepository
 import com.HanFeng.data.HttpsDecryptRouteRepository
 import com.HanFeng.data.HttpsMitmRepository
 import com.HanFeng.data.LogRepository
+import com.HanFeng.data.RemoteRuleSourceRepository
 import com.HanFeng.data.RuleRepository
-import com.HanFeng.data.WhitelistRepository
+import com.HanFeng.data.ShizukuRepository
+import com.HanFeng.data.ShizukuAdControlRepository
+import com.HanFeng.data.ShizukuConnectionOwnerRepository
 import com.HanFeng.databinding.ActivityMainBinding
 import com.HanFeng.security.CertificateAuthorityManager
 import com.HanFeng.service.AdBlockVpnService
@@ -37,21 +38,36 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import rikka.shizuku.Shizuku
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : BaseActivity() {
     companion object {
         private const val PERMISSION_PREFS = "permission_flow"
         private const val KEY_FIRST_LAUNCH_CHECK_DONE = "first_launch_check_done"
+        private const val KEY_LAST_SUSPICIOUS_PROMPT_AT = "last_suspicious_prompt_at"
+        const val EXTRA_AUTO_REMOVE_FROM_RECENTS = "extra_auto_remove_from_recents"
     }
 
     private lateinit var binding: ActivityMainBinding
     private var pendingVpnStartAfterPermission = false
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private var suspiciousPromptShown = false
+    private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+        if (requestCode != ShizukuRepository.REQUEST_CODE) return@OnRequestPermissionResultListener
+        val granted = grantResult == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            warmShizukuServices()
+        }
+        val message = if (granted) "Shizuku 授权成功" else "Shizuku 授权失败"
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        refreshHomeStatus()
+    }
     private val vpnLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (it.resultCode == RESULT_OK) {
-            startVpnService()
+            startVpnService(userInitiated = true)
         } else {
             pendingVpnStartAfterPermission = false
+            FeatureSettingsRepository.setAdBlockEnabled(this, false)
+            AdBlockVpnService.isRunning = false
             Toast.makeText(this, "未授予 VPN 权限，无法开启拦截", Toast.LENGTH_SHORT).show()
         }
     }
@@ -67,46 +83,41 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        binding.pager.adapter = MainPagerAdapter(this)
-        binding.pager.offscreenPageLimit = 1
-        binding.pager.currentItem = 1
-        requestRequiredPermissionsOnFirstLaunch()
-        preloadBundledRules()
-        restoreVpnIfNeeded()
+        setupMainContent(savedInstanceState)
+        scheduleRemoteRuleSync()
+        scheduleSuspiciousDomainPrompt()
     }
 
-    override fun onResume() {
-        super.onResume()
-        CertificateAuthorityManager.syncInstalledState(this)
-        restoreVpnIfNeeded()
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
     }
 
-    private fun restoreVpnIfNeeded() {
-        if (!FeatureSettingsRepository.isAdBlockEnabled(this)) return
-        if (AdBlockVpnService.isRunning) return
-        runCatching { VpnService.prepare(this) }
-            .onSuccess { prepareIntent ->
-                if (prepareIntent != null) {
-                    LogRepository.append(this, "VPN restore pending: system permission confirmation required")
-                    return
-                }
-                mainHandler.removeCallbacksAndMessages("restore-vpn")
-                mainHandler.postAtTime(
-                    {
-                        if (!isFinishing && !isDestroyed && FeatureSettingsRepository.isAdBlockEnabled(this) && !AdBlockVpnService.isRunning) {
-                            startVpnService(silent = true)
-                        }
-                    },
-                    "restore-vpn",
-                    SystemClock.uptimeMillis() + 300
-                )
-            }
-            .onFailure {
-                LogRepository.append(this, "VPN restore check failed: ${it.message ?: it.javaClass.simpleName}")
-            }
+    override fun onDestroy() {
+        Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
+        super.onDestroy()
+    }
+
+    private fun setupMainContent(savedInstanceState: Bundle?) {
+        val isTabletLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+            resources.configuration.smallestScreenWidthDp >= 600
+        val pager = binding.root.findViewById<androidx.viewpager2.widget.ViewPager2?>(R.id.pager)
+        if (!isTabletLandscape) {
+            pager?.adapter = MainPagerAdapter(this)
+            pager?.offscreenPageLimit = 1
+            pager?.currentItem = 0
+            return
+        }
+        if (savedInstanceState != null) return
+        supportFragmentManager.beginTransaction()
+            .replace(R.id.rulesContainer, RulesFragment())
+            .replace(R.id.homeContainer, HomeFragment())
+            .replace(R.id.statsContainer, StatsFragment())
+            .commitNowAllowingStateLoss()
     }
 
     fun requestToggleVpn() {
@@ -122,47 +133,21 @@ class MainActivity : AppCompatActivity() {
         continueVpnStartFlow()
     }
 
-    private fun requestRequiredPermissionsOnFirstLaunch() {
-        val prefs = getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE)
-        if (prefs.getBoolean(KEY_FIRST_LAUNCH_CHECK_DONE, false)) return
-        prefs.edit().putBoolean(KEY_FIRST_LAUNCH_CHECK_DONE, true).apply()
-
-        lifecycleScope.launch {
-            val hasAppListAccess = withContext(Dispatchers.Default) {
-                WhitelistRepository.hasAppListAccess(applicationContext)
-            }
-            if (!hasAppListAccess) {
-                showAppListPermissionDialog()
-            }
-            if (needsNotificationPermission()) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-    }
-
-    private fun preloadBundledRules() {
-        lifecycleScope.launch {
-            withContext(Dispatchers.Default) {
-                RuleRepository.ensureBundledReferenceRules(applicationContext)
-                RuleRepository.prewarmCaches(applicationContext)
-            }
-            LogRepository.append(this@MainActivity, "Rules prewarmed")
-        }
-    }
-
     private fun continueVpnStartFlow() {
         runCatching {
             VpnService.prepare(this)
         }.onSuccess { prepareIntent ->
-            if (prepareIntent != null) {
-                vpnLauncher.launch(prepareIntent)
-            } else {
-                startVpnService()
+                if (prepareIntent != null) {
+                    vpnLauncher.launch(prepareIntent)
+                } else {
+                    startVpnService(userInitiated = true)
+                }
+            }.onFailure {
+                LogRepository.append(this, "VPN prepare failed: ${it.message ?: it.javaClass.simpleName}")
+                FeatureSettingsRepository.setAdBlockEnabled(this, false)
+                AdBlockVpnService.isRunning = false
+                Toast.makeText(this, "无法申请 VPN 权限", Toast.LENGTH_SHORT).show()
             }
-        }.onFailure {
-            LogRepository.append(this, "VPN prepare failed: ${it.message ?: it.javaClass.simpleName}")
-            Toast.makeText(this, "无法申请 VPN 权限", Toast.LENGTH_SHORT).show()
-        }
     }
 
     private fun needsNotificationPermission(): Boolean {
@@ -170,10 +155,133 @@ class MainActivity : AppCompatActivity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
     }
 
-    private fun startVpnService(silent: Boolean = false) {
-        val serviceIntent = Intent(this, AdBlockVpnService::class.java)
+    private fun requestNotificationPermissionIfNeeded() {
+        val prefs = getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_FIRST_LAUNCH_CHECK_DONE, false)) return
+        prefs.edit().putBoolean(KEY_FIRST_LAUNCH_CHECK_DONE, true).apply()
+        if (needsNotificationPermission()) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun scheduleRemoteRuleSync() {
+        binding.root.post {
+            lifecycleScope.launch {
+                if (!RemoteRuleSourceRepository.shouldSyncOnAppLaunch(applicationContext)) {
+                    return@launch
+                }
+                runCatching {
+                    RemoteRuleSourceRepository.syncEnabledSources(applicationContext)
+                }.onSuccess { results ->
+                    val successCount = results.count { it.success }
+                    val enabledCount = results.size
+                    LogRepository.append(
+                        this@MainActivity,
+                        "Remote rule sync checked on app launch: success=$successCount/$enabledCount lastSyncAt=${RemoteRuleSourceRepository.getLastSyncAt(applicationContext)}"
+                    )
+                }.onFailure {
+                    LogRepository.append(this@MainActivity, "Remote rule sync failed on app launch: ${it.message ?: it.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+
+    private fun scheduleSuspiciousDomainPrompt() {
+        binding.root.post {
+            lifecycleScope.launch {
+                val pendingDomains = withContext(Dispatchers.Default) {
+                    RuleRepository.getPendingSuspiciousDomainsForPrompt(applicationContext)
+                }
+                if (pendingDomains.isEmpty()) return@launch
+                val latestSeenAt = pendingDomains.maxOfOrNull { it.lastSeenAt } ?: 0L
+                val prefs = getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE)
+                val lastPromptAt = prefs.getLong(KEY_LAST_SUSPICIOUS_PROMPT_AT, 0L)
+                if (latestSeenAt <= lastPromptAt) return@launch
+                if (isFinishing || isDestroyed || suspiciousPromptShown) return@launch
+                suspiciousPromptShown = true
+                showSuspiciousDomainPrompt(pendingDomains)
+            }
+        }
+    }
+
+    private fun showSuspiciousDomainPrompt(pendingDomains: List<RuleRepository.SuspiciousDomainSample>) {
+        val count = pendingDomains.size
+        val sampleText = pendingDomains.take(5).joinToString("\n") { sample ->
+            "- ${sample.domain}"
+        }
+        val latestSeenAt = pendingDomains.maxOfOrNull { it.lastSeenAt } ?: System.currentTimeMillis()
+        runCatching {
+            val dialog = MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_HanFeng_Dialog)
+                .setTitle("发现疑似广告域名")
+                .setMessage(
+                    buildString {
+                        append("上次运行期间抓到了 ")
+                        append(count)
+                        append(" 条高置信度疑似广告域名。是否直接加入拦截？")
+                        if (sampleText.isNotBlank()) {
+                            append("\n\n示例：\n")
+                            append(sampleText)
+                        }
+                    }
+                )
+                .setPositiveButton("加入拦截", null)
+                .setNeutralButton("稍后处理") { _, _ ->
+                    rememberSuspiciousPrompt(latestSeenAt)
+                    suspiciousPromptShown = false
+                }
+                .setNegativeButton("查看列表") { _, _ ->
+                    rememberSuspiciousPrompt(latestSeenAt)
+                    suspiciousPromptShown = false
+                    startActivity(SuspiciousDomainsActivity.createIntent(this))
+                }
+                .create()
+            dialog.setOnShowListener {
+                dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                    lifecycleScope.launch {
+                        val addedCount = withContext(Dispatchers.Default) {
+                            RuleRepository.addRules(
+                                this@MainActivity,
+                                pendingDomains.map { it.domain },
+                                com.HanFeng.model.RuleSource.MANUAL
+                            ).size
+                        }
+                        rememberSuspiciousPrompt(latestSeenAt)
+                        suspiciousPromptShown = false
+                        dialog.dismiss()
+                        if (addedCount > 0) {
+                            if (AdBlockVpnService.isRunning) {
+                                startService(Intent(this@MainActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+                            }
+                            Toast.makeText(this@MainActivity, "已加入 $addedCount 条疑似广告域名到拦截规则", Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(this@MainActivity, "这些疑似广告域名已经在规则里了", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+            dialog.show()
+        }.onFailure {
+            suspiciousPromptShown = false
+            LogRepository.append(this, "Show suspicious domain prompt failed: ${it.message ?: it.javaClass.simpleName}")
+        }
+    }
+
+    private fun rememberSuspiciousPrompt(timestamp: Long) {
+        getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LAST_SUSPICIOUS_PROMPT_AT, timestamp)
+            .apply()
+    }
+
+    private fun startVpnService(silent: Boolean = false, userInitiated: Boolean = false) {
+        val serviceIntent = Intent(this, AdBlockVpnService::class.java).apply {
+            action = AdBlockVpnService.ACTION_START
+            putExtra(AdBlockVpnService.EXTRA_USER_INITIATED, userInitiated)
+        }
         runCatching {
             FeatureSettingsRepository.setAdBlockEnabled(this, true)
+            FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
+            requestNotificationPermissionIfNeeded()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ContextCompat.startForegroundService(this, serviceIntent)
             } else {
@@ -181,7 +289,7 @@ class MainActivity : AppCompatActivity() {
             }
         }.onSuccess {
             if (!silent) {
-                Toast.makeText(this, "正在开启拦截", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "已请求开启拦截", Toast.LENGTH_SHORT).show()
             }
         }.onFailure {
             FeatureSettingsRepository.setAdBlockEnabled(this, false)
@@ -193,6 +301,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopVpnService() {
         AdBlockVpnService.isRunning = false
+        FeatureSettingsRepository.setAdBlockEnabled(this, false)
+        FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
         startService(Intent(this, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_STOP))
         Toast.makeText(this, "已停止拦截", Toast.LENGTH_SHORT).show()
     }
@@ -214,6 +324,88 @@ class MainActivity : AppCompatActivity() {
 
     fun openWhitelist() {
         startActivity(Intent(this, WhitelistActivity::class.java))
+    }
+
+    fun openCoexistApps() {
+        startActivity(
+            Intent(this, WhitelistActivity::class.java).putExtra(
+                WhitelistActivity.EXTRA_MODE,
+                WhitelistActivity.MODE_COEXIST
+            )
+        )
+    }
+
+    fun openSettings() {
+        startActivity(Intent(this, SettingsActivity::class.java))
+    }
+
+    fun requestShizukuAccess() {
+        if (!AppSettingsRepository.isShizukuEnabled(this)) {
+            Toast.makeText(this, "Shizuku 增强已在设置中关闭", Toast.LENGTH_SHORT).show()
+            refreshHomeStatus()
+            return
+        }
+        val status = ShizukuRepository.getStatus(this)
+        when {
+            !status.installed -> {
+                showShizukuGuideDialog(
+                    title = "需要先安装 Shizuku",
+                    message = "Shizuku 增强模式需要先安装并启动 Shizuku。安装完成后，再回到寒枫进行授权。",
+                    positiveLabel = "前往下载"
+                ) {
+                    ShizukuRepository.openDownloadPage(this)
+                }
+            }
+            !status.binderAlive -> {
+                showShizukuGuideDialog(
+                    title = "需要先启动 Shizuku",
+                    message = "请先在 Shizuku App 中启动服务。Android 11 及以上通常可通过无线调试启动，已 Root 设备也可以直接启动。",
+                    positiveLabel = "我知道了"
+                ) {
+                    refreshHomeStatus()
+                }
+            }
+            status.permissionGranted -> {
+                warmShizukuServices()
+                Toast.makeText(this, "Shizuku 已可用，后续会用于增强拦截能力", Toast.LENGTH_SHORT).show()
+                refreshHomeStatus()
+            }
+            ShizukuRepository.requestPermission() -> {
+                Toast.makeText(this, "正在请求 Shizuku 授权", Toast.LENGTH_SHORT).show()
+            }
+            else -> {
+                showShizukuGuideDialog(
+                    title = "Shizuku 需要手动授权",
+                    message = "请确认 Shizuku 已运行，并在弹出的授权界面中允许寒枫访问。如果之前拒绝过，需要先在 Shizuku 中清理授权状态。",
+                    positiveLabel = "我知道了"
+                ) {
+                    refreshHomeStatus()
+                }
+            }
+        }
+    }
+
+    private fun showShizukuGuideDialog(title: String, message: String, positiveLabel: String, action: () -> Unit) {
+        MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_HanFeng_Dialog)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton(positiveLabel) { _, _ -> action() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun warmShizukuServices() {
+        runCatching { ShizukuConnectionOwnerRepository.ensureBound(this) }
+        runCatching { ShizukuAdControlRepository.ensureBound(this) }
+        runCatching { ShizukuAdControlRepository.checkServiceHealth(this) }
+    }
+
+    private fun refreshHomeStatus() {
+        supportFragmentManager.fragments.forEach { fragment ->
+            if (fragment is HomeFragment && fragment.isAdded) {
+                fragment.refreshStatusFromHost()
+            }
+        }
     }
 
     fun openTrafficCardPage() {
@@ -265,15 +457,6 @@ class MainActivity : AppCompatActivity() {
         MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_HanFeng_Dialog)
             .setTitle("通知权限未开启")
             .setMessage("前台服务通知需要通知权限才能更稳定显示。若已拒绝，请到系统设置中手动允许该权限。")
-            .setPositiveButton("去设置") { _: DialogInterface, _: Int -> openAppDetailsSettings() }
-            .setNegativeButton("稍后再说", null)
-            .show()
-    }
-
-    private fun showAppListPermissionDialog() {
-        MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_HanFeng_Dialog)
-            .setTitle("需要应用列表权限")
-            .setMessage("当前手机可能限制了应用列表读取，黑白名单与应用识别可能不完整。请到系统设置中手动允许“获取应用列表”或类似权限。")
             .setPositiveButton("去设置") { _: DialogInterface, _: Int -> openAppDetailsSettings() }
             .setNegativeButton("稍后再说", null)
             .show()

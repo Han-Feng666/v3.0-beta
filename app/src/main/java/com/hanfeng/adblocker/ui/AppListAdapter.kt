@@ -11,6 +11,7 @@ import com.HanFeng.model.InstalledApp
 import com.bumptech.glide.Glide
 
 class AppListAdapter(
+    private val checkedSelector: (InstalledApp) -> Boolean = { it.whitelisted },
     private val onToggle: (InstalledApp, Boolean) -> Unit
 ) : ListAdapter<InstalledApp, AppListAdapter.AppHolder>(DIFF_CALLBACK) {
 
@@ -35,7 +36,7 @@ class AppListAdapter(
             binding.appName.text = item.label
             binding.packageName.text = item.packageName
             binding.whitelistBox.setOnCheckedChangeListener(null)
-            binding.whitelistBox.isChecked = item.whitelisted
+            binding.whitelistBox.isChecked = checkedSelector(item)
             binding.whitelistBox.setOnCheckedChangeListener { _, checked -> onToggle(item, checked) }
         }
     }

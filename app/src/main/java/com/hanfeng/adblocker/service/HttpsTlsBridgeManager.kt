@@ -154,7 +154,7 @@ object HttpsTlsBridgeManager {
     ) {
         try {
             clientSocket.use { localTls ->
-                configureLocalTls(localTls, session.offeredAlpnProtocols)
+                configureLocalTls(localTls, session.offeredAlpnProtocols, session.clientHelloSupportedTlsVersions)
                 localTls.startHandshake()
                 val rawUpstreamSocket = Socket()
                 rawUpstreamSocket.tcpNoDelay = true
@@ -167,7 +167,7 @@ object HttpsTlsBridgeManager {
                 upstreamTls.use { remoteTls ->
                     localTls.tcpNoDelay = true
                     remoteTls.tcpNoDelay = true
-                    configureUpstreamTls(remoteTls, session.offeredAlpnProtocols)
+                    configureUpstreamTls(remoteTls, session.offeredAlpnProtocols, session.clientHelloSupportedTlsVersions)
                     remoteTls.startHandshake()
                     val negotiatedAlpn = readApplicationProtocol(remoteTls)
                     val negotiatedTls = remoteTls.session?.protocol
@@ -544,26 +544,56 @@ object HttpsTlsBridgeManager {
         return prefix + tailBytes
     }
 
-    private fun configureUpstreamTls(socket: SSLSocket, offeredAlpnProtocols: List<String>) {
+    private fun configureUpstreamTls(socket: SSLSocket, offeredAlpnProtocols: List<String>, clientSupportedTlsVersions: List<String>) {
         socket.useClientMode = true
+        val filteredProtocols = filterSupportedTlsProtocols(socket.supportedProtocols.orEmpty().toList(), clientSupportedTlsVersions)
+        if (filteredProtocols.isNotEmpty()) {
+            runCatching {
+                socket.enabledProtocols = filteredProtocols.toTypedArray()
+            }
+        }
         if (offeredAlpnProtocols.isNotEmpty()) {
             runCatching {
                 val parameters = socket.sslParameters ?: SSLParameters()
-                parameters.applicationProtocols = offeredAlpnProtocols.toTypedArray()
+                parameters.applicationProtocols = offeredAlpnProtocols.distinct().toTypedArray()
                 socket.sslParameters = parameters
             }
         }
     }
 
-    private fun configureLocalTls(socket: SSLSocket, offeredAlpnProtocols: List<String>) {
+    private fun configureLocalTls(socket: SSLSocket, offeredAlpnProtocols: List<String>, clientSupportedTlsVersions: List<String>) {
         socket.useClientMode = false
+        val filteredProtocols = filterSupportedTlsProtocols(socket.supportedProtocols.orEmpty().toList(), clientSupportedTlsVersions)
+        if (filteredProtocols.isNotEmpty()) {
+            runCatching {
+                socket.enabledProtocols = filteredProtocols.toTypedArray()
+            }
+        }
         if (offeredAlpnProtocols.isNotEmpty()) {
             runCatching {
                 val parameters = socket.sslParameters ?: SSLParameters()
-                parameters.applicationProtocols = offeredAlpnProtocols.toTypedArray()
+                parameters.applicationProtocols = offeredAlpnProtocols.distinct().toTypedArray()
                 socket.sslParameters = parameters
             }
         }
+    }
+
+    private fun filterSupportedTlsProtocols(socketProtocols: List<String>, clientSupportedTlsVersions: List<String>): List<String> {
+        if (socketProtocols.isEmpty()) return emptyList()
+        if (clientSupportedTlsVersions.isEmpty()) return socketProtocols
+        val normalizedClient = clientSupportedTlsVersions
+            .map { normalizeTlsProtocolName(it) }
+            .filter { it.isNotBlank() }
+            .toSet()
+        if (normalizedClient.isEmpty()) return socketProtocols
+        val filtered = socketProtocols.filter { normalizeTlsProtocolName(it) in normalizedClient }
+        return if (filtered.isNotEmpty()) filtered else socketProtocols
+    }
+
+    private fun normalizeTlsProtocolName(value: String): String {
+        return value.trim().uppercase()
+            .replace("TLSV", "TLS")
+            .replace("TLS ", "TLS")
     }
 
     private fun readApplicationProtocol(socket: SSLSocket): String? {
@@ -618,6 +648,20 @@ object HttpsTlsBridgeManager {
                             "HTTP/2 frame host=${session.host} flow=${session.flowKey} direction=$direction index=$index type=${event.typeName} length=${event.length} flags=0x${event.flags.toString(16)} flagNames=${event.flagNames.joinToString("|").ifBlank { "none" }} stream=${event.streamId} endStream=${event.endStream} endHeaders=${event.endHeaders} ack=${event.ack}"
                         )
                     }
+                    if (event.goAway) {
+                        http2FlowControls.computeIfAbsent(session.flowKey) { Http2FlowControl() }.goAwaySeen = true
+                        cleanupTerminalHttp2Streams(context, session, direction, reason = "goaway-observed")
+                        LogRepository.append(
+                            context,
+                            "HTTP/2 GOAWAY observed host=${session.host} flow=${session.flowKey} direction=$direction index=$index"
+                        )
+                    }
+                    if (event.closedStreamFrame) {
+                        LogRepository.append(
+                            context,
+                            "HTTP/2 frame on closed stream host=${session.host} flow=${session.flowKey} direction=$direction index=$index stream=${event.streamId} type=${event.typeName}"
+                        )
+                    }
                     if (state.frameCount % HTTP2_SUMMARY_FRAME_INTERVAL == 0) {
                         flushHttp2Summary(context, session.flowKey, direction, finalFlush = false, session = session)
                     }
@@ -630,12 +674,36 @@ object HttpsTlsBridgeManager {
                     streamState.lastStage = event.stage
 
                     if (event.headerBlock) {
-                        if (event.opensHeaderBlock && !streamState.headerBlockOpen) {
+                        if (event.unexpectedContinuation) {
+                            streamState.headerBlockAbandoned = true
+                            streamState.lastDecodedHeaderError = "unexpected-continuation"
+                            LogRepository.append(
+                                context,
+                                "HTTP/2 continuation without open header block host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId}"
+                            )
+                        }
+                        if (event.replacedOpenHeaderBlock) {
+                            streamState.headerBlockAbandoned = true
+                            streamState.lastDecodedHeaderError = "interleaved-header-block"
+                            LogRepository.append(
+                                context,
+                                "HTTP/2 header block replaced before close host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} previousBytes=${streamState.currentHeaderBlockBytes}"
+                            )
+                        }
+                        if (event.opensHeaderBlock && !event.headerBlockOpenBeforeFrame) {
                             streamState.headerBlockOpen = true
                             streamState.headerBlockAbandoned = false
                             streamState.headerBlockCount += 1
                             streamState.currentHeaderBlockBytes = 0
                             streamState.currentHeaderBlock = ByteArray(0)
+                            streamState.headersClosed = false
+                        }
+                        if (event.opensHeaderBlock && event.headerBlockOpenBeforeFrame && streamState.currentHeaderBlockBytes > 0L) {
+                            streamState.headerBlockCount += 1
+                            streamState.currentHeaderBlockBytes = 0
+                            streamState.currentHeaderBlock = ByteArray(0)
+                            streamState.headersClosed = false
+                            streamState.headerBlockAbandoned = false
                         }
                         streamState.headerFrames += 1
                         streamState.headerBytes += event.payloadLength.toLong()
@@ -650,6 +718,7 @@ object HttpsTlsBridgeManager {
                         if (streamState.currentHeaderBlockBytes >= HTTP2_HEADER_BLOCK_LARGE_THRESHOLD) {
                             streamState.largeHeaderBlockSeen = true
                         }
+                        streamState.headerBlockOpen = event.headerBlockOpenAfterFrame
                     }
 
                     if (event.dataPayload) {
@@ -725,6 +794,14 @@ object HttpsTlsBridgeManager {
 
                     if (event.endHeaders) {
                         streamState.headersClosed = true
+                        if (event.closesHeaderBlock && !streamState.headerBlockOpen) {
+                            streamState.headerBlockAbandoned = true
+                            streamState.lastDecodedHeaderError = "end-headers-without-open-block"
+                            LogRepository.append(
+                                context,
+                                "HTTP/2 END_HEADERS without open header block host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId}"
+                            )
+                        }
                         if (event.closesHeaderBlock && streamState.headerBlockOpen) {
                             streamState.headerBlockOpen = false
                             val decoded = HpackDecoder.decode(
@@ -748,10 +825,22 @@ object HttpsTlsBridgeManager {
                                 context,
                                 "HTTP/2 headers complete host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} blockIndex=${streamState.headerBlockCount} blockBytes=${streamState.currentHeaderBlockBytes} largeHeaderBlock=${streamState.currentHeaderBlockBytes >= HTTP2_HEADER_BLOCK_LARGE_THRESHOLD} totalHeaderBytes=${streamState.headerBytes}"
                             )
+                            if (streamState.currentHeaderBlockBytes == 0L) {
+                                LogRepository.append(
+                                    context,
+                                    "HTTP/2 empty header block host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} blockIndex=${streamState.headerBlockCount}"
+                                )
+                            }
                             if (streamState.lastDecodedHeaders.isNotEmpty() || streamState.lastDecodedHeaderError != null) {
                                 LogRepository.append(
                                     context,
                                     "HTTP/2 headers decoded host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} decoded=${streamState.lastDecodedHeaders.size} huffmanStrings=${decoded.huffmanEncodedStrings} truncated=${decoded.truncated} error=${decoded.error ?: "none"} preview=${streamState.lastDecodedHeaderPreview.ifBlank { "none" }}"
+                                )
+                            }
+                            if (streamState.lastDecodedHeaderError != null) {
+                                LogRepository.append(
+                                    context,
+                                    "HTTP/2 header decode failure host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} error=${streamState.lastDecodedHeaderError} blockBytes=${streamState.currentHeaderBlockBytes} truncated=${streamState.lastDecodedHeaderTruncated}"
                                 )
                             }
                             streamState.lastHeaderInspection?.let { inspection ->
@@ -859,6 +948,12 @@ object HttpsTlsBridgeManager {
     ): ByteArray {
         val flowKey = session.flowKey
         val control = http2FlowControls[flowKey] ?: return originalPayload
+        if (control.goAwaySeen) {
+            cleanupTerminalHttp2Streams(context, session, direction, reason = "goaway-filter-pass")
+        }
+        if (control.goAwaySeen && parsedFrames.none { it.streamId > 0 && control.blockedStreams.contains(it.streamId) }) {
+            return originalPayload
+        }
         if (control.blockedStreams.isEmpty() || parsedFrames.isEmpty()) return originalPayload
         val parsedBytes = parsedFrames.sumOf { it.rawBytes.size }
         val droppedFrames = parsedFrames.filter { frame ->
@@ -882,9 +977,13 @@ object HttpsTlsBridgeManager {
             val streamState = directionState?.streams?.get(streamId) ?: return@forEach
             if (streamState.headerBlockOpen) {
                 markBlockedHeaderBlockAbandoned(context, session, direction, streamState, reason = "blocked-frame-filtered")
+                streamState.terminalBlocked = true
+                streamState.streamClosed = true
+                streamState.lastDataSample = ByteArray(0)
             }
             if (streamState.reset || streamState.terminalBlocked) {
                 streamState.streamClosed = true
+                streamState.lastDataSample = ByteArray(0)
             }
         }
         if (terminalStreams.isNotEmpty()) {
@@ -904,17 +1003,7 @@ object HttpsTlsBridgeManager {
                 }
             }
         }
-        val completedStreams = directionState?.streams
-            ?.filterValues { it.streamClosed && (it.terminalBlocked || it.reset) }
-            ?.keys
-            .orEmpty()
-        if (completedStreams.isNotEmpty()) {
-            control.blockedStreams.removeAll(completedStreams)
-            control.resetSentStreams.removeAll(completedStreams)
-            control.syntheticRespondedStreams.removeAll(completedStreams)
-            control.terminalStatsRecorded.removeAll(completedStreams)
-            control.terminalBlockedStreams.removeAll(completedStreams)
-        }
+        cleanupTerminalHttp2Streams(context, session, direction, reason = "blocked-frame-filtered")
         val filteredPrefix = keptFrames.fold(ByteArray(0)) { acc, frame -> acc + frame.rawBytes }
         val tailBytes = if (parsedBytes >= originalPayload.size) ByteArray(0) else originalPayload.copyOfRange(parsedBytes, originalPayload.size)
         LogRepository.append(
@@ -957,6 +1046,36 @@ object HttpsTlsBridgeManager {
         LogRepository.append(
             context,
             "HTTP/2 blocked header block abandoned host=${session.host} flow=${session.flowKey} direction=$direction stream=${streamState.streamId} reason=$reason headerBlocks=${streamState.headerBlockCount} totalHeaderBytes=${streamState.headerBytes}"
+        )
+    }
+
+    private fun cleanupTerminalHttp2Streams(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        reason: String
+    ) {
+        val flowKey = session.flowKey
+        val control = http2FlowControls[flowKey] ?: return
+        val directionState = http2LogStates[http2LogKey(flowKey, direction)]
+        val completedStreams = directionState?.streams
+            ?.filterValues { it.streamClosed && (it.terminalBlocked || it.reset) }
+            ?.keys
+            .orEmpty()
+        if (completedStreams.isEmpty()) return
+        control.blockedStreams.removeAll(completedStreams)
+        control.resetSentStreams.removeAll(completedStreams)
+        control.syntheticRespondedStreams.removeAll(completedStreams)
+        control.terminalStatsRecorded.removeAll(completedStreams)
+        control.terminalBlockedStreams.removeAll(completedStreams)
+        directionState?.let { state ->
+            completedStreams.forEach { streamId ->
+                state.streams.remove(streamId)
+            }
+        }
+        LogRepository.append(
+            context,
+            "HTTP/2 terminal stream cleanup host=${session.host} flow=$flowKey direction=$direction reason=$reason streams=${completedStreams.joinToString(",").ifBlank { "none" }}"
         )
     }
 
@@ -1059,7 +1178,8 @@ object HttpsTlsBridgeManager {
         val resetSentStreams: MutableSet<Int> = linkedSetOf(),
         val syntheticRespondedStreams: MutableSet<Int> = linkedSetOf(),
         val terminalBlockedStreams: MutableSet<Int> = linkedSetOf(),
-        val terminalStatsRecorded: MutableSet<Int> = linkedSetOf()
+        val terminalStatsRecorded: MutableSet<Int> = linkedSetOf(),
+        var goAwaySeen: Boolean = false
     )
 
     private data class Http2StreamDirective(

@@ -1123,7 +1123,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             append("- 空行/注释：${report.blankOrCommentLines}\n")
             append("- 无法识别：${report.invalidRules}")
             append("\n\n说明：\n")
-            append("1. 当前稳定支持：纯域名、Hosts、dnsmasq/SmartDNS/OpenWrt 域名规则、AdGuard/ABP 域名型规则、IP-CIDR、IP-CIDR6、携带 dst-port/src-port 的 IP 规则、域名加端口规则、*:41826$network 这类端口专用规则。\n")
+            append("1. 当前稳定支持：纯域名、Hosts、dnsmasq/SmartDNS/OpenWrt 域名规则、AdGuard/ABP 域名型规则、IP-CIDR、IP-CIDR6、携带 dst-port/src-port 的 IP 规则、域名加端口规则、*:41826\$network 这类端口专用规则。\n")
             append("2. 当前增强支持：URL-KEYWORD、URL-REGEX、path=、部分 regex、部分请求上下文规则、部分应用上下文规则、部分 cosmetic 规则。此类规则通常依赖 MITM 增强过滤。\n")
             append("3. 当前会跳过或部分跳过：复杂脚本、完整浏览器语义规则、远程脚本、复杂逻辑组合和无法安全降级的高级代理规则。")
             if (report.vendorSummary.isNotEmpty()) {

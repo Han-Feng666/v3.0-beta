@@ -52,7 +52,9 @@ object Http2FrameLogger {
                 flagNames = flagNames,
                 endStream = flagNames.contains("END_STREAM"),
                 endHeaders = flagNames.contains("END_HEADERS"),
-                ack = flagNames.contains("ACK")
+                ack = flagNames.contains("ACK"),
+                goAway = frameType == 7,
+                closedStreamFrame = streamId > 0 && nextState.closedStreams.contains(streamId)
             )
             parsedFrames += ParsedFrame(
                 streamId = streamId,
@@ -66,7 +68,7 @@ object Http2FrameLogger {
                 payloadFragment = extractDataPayloadFragment(frameType, flagNames, payload),
                 rawBytes = frameBytes
             )
-            buildStreamEvent(frameType, length, streamId, flagNames, payload)?.let { parsedEvents += it }
+            buildStreamEvent(nextState, frameType, length, streamId, flagNames, payload)?.let { parsedEvents += it }
             nextState = nextState.recordFrame(frameType, streamId, flagNames)
             offset += totalLength
         }
@@ -126,6 +128,7 @@ object Http2FrameLogger {
     }
 
     private fun buildStreamEvent(
+        state: StreamState,
         frameType: Int,
         length: Int,
         streamId: Int,
@@ -141,6 +144,16 @@ object Http2FrameLogger {
             9 -> "CONTINUATION"
             else -> return null
         }
+        val opensHeaderBlock = frameType == 1 || frameType == 5
+        val closesHeaderBlock = frameType == 1 || frameType == 5 || frameType == 9
+        val headerBlockOpenBeforeFrame = state.openHeaderStreams.contains(streamId)
+        val unexpectedContinuation = frameType == 9 && !headerBlockOpenBeforeFrame
+        val replacedOpenHeaderBlock = opensHeaderBlock && headerBlockOpenBeforeFrame
+        val headerBlockOpenAfterFrame = when {
+            !closesHeaderBlock -> headerBlockOpenBeforeFrame
+            flagNames.contains("END_HEADERS") -> false
+            else -> true
+        }
         return FrameEvent.StreamProgress(
             streamId = streamId,
             stage = stage,
@@ -150,8 +163,12 @@ object Http2FrameLogger {
             reset = frameType == 3,
             endStream = flagNames.contains("END_STREAM"),
             endHeaders = flagNames.contains("END_HEADERS"),
-            opensHeaderBlock = frameType == 1 || frameType == 5,
-            closesHeaderBlock = frameType == 1 || frameType == 5 || frameType == 9,
+            opensHeaderBlock = opensHeaderBlock,
+            closesHeaderBlock = closesHeaderBlock,
+            headerBlockOpenBeforeFrame = headerBlockOpenBeforeFrame,
+            headerBlockOpenAfterFrame = headerBlockOpenAfterFrame,
+            unexpectedContinuation = unexpectedContinuation,
+            replacedOpenHeaderBlock = replacedOpenHeaderBlock,
             headerBlockFragment = extractHeaderBlockFragment(frameType, flagNames, payload),
             dataFragment = extractDataPayloadFragment(frameType, flagNames, payload)
         )
@@ -216,17 +233,34 @@ object Http2FrameLogger {
         val ackFrames: Int = 0,
         val activeStreams: Set<Int> = emptySet(),
         val closedStreams: Set<Int> = emptySet(),
+        val openHeaderStreams: Set<Int> = emptySet(),
         val lastStreamId: Int? = null
     ) {
         fun recordFrame(frameType: Int, streamId: Int, flagNames: Set<String>): StreamState {
             var nextActive = activeStreams
             var nextClosed = closedStreams
+            var nextOpenHeaderStreams = openHeaderStreams
             if (streamId > 0) {
                 if (!flagNames.contains("END_STREAM")) {
                     nextActive = activeStreams + streamId
                 } else {
                     nextActive = activeStreams - streamId
                     nextClosed = closedStreams + streamId
+                }
+                when (frameType) {
+                    1, 5, 9 -> {
+                        nextOpenHeaderStreams = if (flagNames.contains("END_HEADERS")) {
+                            nextOpenHeaderStreams - streamId
+                        } else {
+                            nextOpenHeaderStreams + streamId
+                        }
+                    }
+                    3 -> {
+                        nextOpenHeaderStreams = nextOpenHeaderStreams - streamId
+                    }
+                }
+                if (flagNames.contains("END_STREAM")) {
+                    nextOpenHeaderStreams = nextOpenHeaderStreams - streamId
                 }
             }
             return copy(
@@ -241,6 +275,7 @@ object Http2FrameLogger {
                 ackFrames = ackFrames + if (flagNames.contains("ACK")) 1 else 0,
                 activeStreams = nextActive,
                 closedStreams = nextClosed,
+                openHeaderStreams = nextOpenHeaderStreams,
                 lastStreamId = if (streamId > 0) streamId else lastStreamId
             )
         }
@@ -282,7 +317,9 @@ object Http2FrameLogger {
             val flagNames: Set<String>,
             val endStream: Boolean,
             val endHeaders: Boolean,
-            val ack: Boolean
+            val ack: Boolean,
+            val goAway: Boolean,
+            val closedStreamFrame: Boolean
         ) : FrameEvent
 
         data class StreamProgress(
@@ -296,6 +333,10 @@ object Http2FrameLogger {
             val endHeaders: Boolean,
             val opensHeaderBlock: Boolean,
             val closesHeaderBlock: Boolean,
+            val headerBlockOpenBeforeFrame: Boolean,
+            val headerBlockOpenAfterFrame: Boolean,
+            val unexpectedContinuation: Boolean,
+            val replacedOpenHeaderBlock: Boolean,
             val headerBlockFragment: ByteArray = ByteArray(0),
             val dataFragment: ByteArray = ByteArray(0)
         ) : FrameEvent

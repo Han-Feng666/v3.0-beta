@@ -178,11 +178,28 @@
 
             <Button
                 android:id="@+id/btnFilter"
-                android:layout_width="match_parent"
+                android:layout_width="0dp"
                 android:layout_height="48dp"
+                android:layout_weight="1"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
                 android:text="清理重复规则"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="16sp" />
+
+            <Space
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnRuleSources"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_panel"
+                android:backgroundTint="@null"
+                android:text="规则源"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="16sp" />

@@ -76,10 +76,11 @@ object PacketCodec {
 
     private fun parseIpv6(packet: ByteArray, length: Int): PacketInfo? {
         if (length < 40) return null
-        val nextHeader = packet[6].toInt() and 0xFF
         val src = packet.copyOfRange(8, 24)
         val dst = packet.copyOfRange(24, 40)
-        val transport = packet.copyOfRange(40, length)
+        val transportInfo = parseIpv6Transport(packet, length) ?: return null
+        val nextHeader = transportInfo.nextHeader
+        val transport = transportInfo.payload
         return when (nextHeader) {
             17 -> {
                 if (transport.size < 8) return null
@@ -104,6 +105,43 @@ object PacketCodec {
                 )
             }
             else -> PacketInfo(6, src, dst, nextHeader, 0, 0, ByteArray(0))
+        }
+    }
+
+    private fun parseIpv6Transport(packet: ByteArray, length: Int): Ipv6TransportInfo? {
+        var nextHeader = packet[6].toInt() and 0xFF
+        var offset = 40
+        while (true) {
+            when (nextHeader) {
+                0, 43, 60 -> {
+                    if (offset + 2 > length) return null
+                    val headerLength = ((packet[offset + 1].toInt() and 0xFF) + 1) * 8
+                    if (offset + headerLength > length) return null
+                    nextHeader = packet[offset].toInt() and 0xFF
+                    offset += headerLength
+                }
+                44 -> {
+                    if (offset + 8 > length) return null
+                    val fragmentOffset = ((packet[offset + 2].toInt() and 0xFF) shl 5) or ((packet[offset + 3].toInt() and 0xF8) ushr 3)
+                    if (fragmentOffset != 0) return null
+                    nextHeader = packet[offset].toInt() and 0xFF
+                    offset += 8
+                }
+                51 -> {
+                    if (offset + 2 > length) return null
+                    val headerLength = ((packet[offset + 1].toInt() and 0xFF) + 2) * 4
+                    if (offset + headerLength > length) return null
+                    nextHeader = packet[offset].toInt() and 0xFF
+                    offset += headerLength
+                }
+                50 -> {
+                    return null
+                }
+                else -> {
+                    if (offset > length) return null
+                    return Ipv6TransportInfo(nextHeader = nextHeader, payload = packet.copyOfRange(offset, length))
+                }
+            }
         }
     }
 
@@ -298,4 +336,9 @@ object PacketCodec {
         buffer[offset + 2] = ((value ushr 8) and 0xFF).toByte()
         buffer[offset + 3] = (value and 0xFF).toByte()
     }
+
+    private data class Ipv6TransportInfo(
+        val nextHeader: Int,
+        val payload: ByteArray
+    )
 }

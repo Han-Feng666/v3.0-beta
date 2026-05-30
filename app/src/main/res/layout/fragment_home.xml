@@ -35,7 +35,7 @@
                 android:layout_marginBottom="12dp"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
-                android:minWidth="180dp"
+                android:minWidth="120dp"
                 android:paddingHorizontal="@dimen/home_button_horizontal_padding"
                 android:text="开启拦截"
                 android:textAllCaps="false"
@@ -77,7 +77,7 @@
                 android:layout_marginBottom="12dp"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
-                android:minWidth="180dp"
+                android:minWidth="120dp"
                 android:paddingHorizontal="@dimen/home_button_horizontal_padding"
                 android:text="使用说明"
                 android:textAllCaps="false"
@@ -91,18 +91,32 @@
                 android:layout_marginBottom="12dp"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
-                android:minWidth="180dp"
+                android:minWidth="120dp"
                 android:paddingHorizontal="@dimen/home_button_horizontal_padding"
                 android:text="黑白名单"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="18sp" />
 
-            <LinearLayout
-                android:id="@+id/homeStatusCard"
+            <Button
+                android:id="@+id/btnCoexist"
                 android:layout_width="@dimen/home_button_max_width"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
+                android:layout_height="@dimen/home_button_height"
+                android:layout_marginBottom="12dp"
+                android:background="@drawable/bg_panel"
+                android:backgroundTint="@null"
+                android:minWidth="120dp"
+                android:paddingHorizontal="@dimen/home_button_horizontal_padding"
+                android:text="加速器共存"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="18sp" />
+
+        <LinearLayout
+            android:id="@+id/homeStatusCard"
+            android:layout_width="@dimen/home_button_max_width"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
                 android:background="@drawable/bg_panel"
                 android:orientation="vertical"
                 android:paddingHorizontal="16dp"
@@ -127,9 +141,17 @@
                         android:id="@+id/textVersion"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="v3.1-beta"
+                        android:text="v5.0-beta"
                         android:textColor="@color/hf_text_secondary"
                         android:textSize="14sp" />
+
+                    <ImageView
+                        android:id="@+id/btnSettings"
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:layout_marginStart="10dp"
+                        android:contentDescription="设置"
+                        android:src="@drawable/ic_settings_24" />
                 </LinearLayout>
 
                 <TextView
@@ -140,6 +162,7 @@
                     android:text="工作状态：未开启\n拦截模式：未启用\n证书状态：未安装"
                     android:textColor="@color/hf_text_primary"
                     android:textSize="14sp" />
+
             </LinearLayout>
         </LinearLayout>
     </androidx.constraintlayout.widget.ConstraintLayout>

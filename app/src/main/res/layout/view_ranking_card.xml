@@ -26,11 +26,13 @@
         android:id="@+id/toggleMore"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:minHeight="18dp"
         android:layout_marginTop="2dp"
         android:gravity="center"
         android:paddingTop="1dp"
         android:paddingBottom="1dp"
         android:text="查看完整榜单 ▼"
         android:textColor="@color/hf_text_secondary"
-        android:textSize="11sp" />
+        android:textSize="11sp"
+        android:visibility="invisible" />
 </LinearLayout>

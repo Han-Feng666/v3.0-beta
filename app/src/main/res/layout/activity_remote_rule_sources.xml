@@ -16,7 +16,7 @@
         android:background="@drawable/bg_main" />
 
     <LinearLayout
-        android:id="@+id/whitelistRoot"
+        android:id="@+id/remoteRuleSourcesRoot"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
@@ -26,7 +26,7 @@
             android:id="@+id/titleText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="应用白名单"
+            android:text="规则源管理"
             android:textColor="@color/hf_text_primary"
             android:textSize="24sp"
             android:textStyle="bold" />
@@ -36,7 +36,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="默认所有第三方应用都会参与拦截，加入白名单的应用将完全放行。"
+            android:text="这里会显示所有已添加的 Git 规则源。可以搜索、启用、停用、立即更新，也可以新增规则源。"
             android:textColor="@color/hf_text_secondary"
             android:textSize="14sp" />
 
@@ -46,7 +46,7 @@
             android:layout_height="48dp"
             android:layout_marginTop="12dp"
             android:background="@drawable/bg_panel"
-            android:hint="搜索应用名或包名"
+            android:hint="搜索规则源名称或地址"
             android:padding="12dp"
             android:textColor="@color/hf_text_primary"
             android:textColorHint="@color/hf_text_secondary"
@@ -59,13 +59,12 @@
             android:orientation="horizontal">
 
             <Button
-                android:id="@+id/btnSelectVisible"
+                android:id="@+id/btnAddSource"
                 android:layout_width="0dp"
-                android:layout_height="40dp"
+                android:layout_height="44dp"
                 android:layout_weight="1"
-                android:background="@drawable/bg_button"
-                android:backgroundTint="@null"
-                android:text="全选可见"
+                android:background="@drawable/bg_panel"
+                android:text="添加规则源"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="14sp" />
@@ -75,29 +74,16 @@
                 android:layout_height="1dp" />
 
             <Button
-                android:id="@+id/btnInvertVisible"
+                android:id="@+id/btnSyncAll"
                 android:layout_width="0dp"
-                android:layout_height="40dp"
+                android:layout_height="44dp"
                 android:layout_weight="1"
-                android:background="@drawable/bg_button"
-                android:backgroundTint="@null"
-                android:text="反选可见"
+                android:background="@drawable/bg_panel"
+                android:text="立即更新全部"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="14sp" />
         </LinearLayout>
-
-        <Button
-            android:id="@+id/btnLocalProxyCoexist"
-            android:layout_width="match_parent"
-            android:layout_height="44dp"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_panel"
-            android:text="配置信息"
-            android:textAllCaps="false"
-            android:textColor="@color/hf_text_primary"
-            android:textSize="14sp"
-            android:visibility="gone" />
 
         <FrameLayout
             android:layout_width="match_parent"
@@ -108,9 +94,19 @@
             android:padding="8dp">
 
             <androidx.recyclerview.widget.RecyclerView
-                android:id="@+id/appList"
+                android:id="@+id/sourceList"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent" />
+
+            <TextView
+                android:id="@+id/emptyText"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:text="当前还没有规则源，可以先添加一个 Git 规则源。"
+                android:textColor="@color/hf_text_secondary"
+                android:textSize="14sp"
+                android:visibility="gone" />
 
             <LinearLayout
                 android:id="@+id/loadingOverlay"
@@ -129,7 +125,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
-                    android:text="正在加载应用列表..."
+                    android:text="正在同步规则源..."
                     android:textColor="@color/hf_text_primary"
                     android:textSize="14sp" />
             </LinearLayout>

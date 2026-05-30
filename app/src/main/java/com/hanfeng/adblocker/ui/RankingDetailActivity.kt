@@ -11,7 +11,7 @@ import com.HanFeng.data.StatsRepository
 import com.HanFeng.databinding.ActivityGuideBinding
 import com.HanFeng.model.RankingType
 
-class RankingDetailActivity : AppCompatActivity() {
+class RankingDetailActivity : BaseActivity() {
     private lateinit var binding: ActivityGuideBinding
     private var rankingType: RankingType? = null
 

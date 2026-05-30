@@ -78,8 +78,7 @@ class RuleListAdapter(
             binding.domainText.text = item.rule.domain
             binding.sourceTag.text = item.rule.source.label
             binding.sourceTag.visibility = android.view.View.VISIBLE
-            val color = if (item.rule.source == RuleSource.REFERENCE) R.color.hf_text_secondary else R.color.hf_text_primary
-            binding.domainText.setTextColor(ContextCompat.getColor(binding.root.context, color))
+            binding.domainText.setTextColor(ContextCompat.getColor(binding.root.context, R.color.hf_text_primary))
             binding.selectBox.visibility = if (item.selectionMode) android.view.View.VISIBLE else android.view.View.GONE
             binding.root.alpha = if (item.selected) 0.78f else 1f
             binding.root.setOnClickListener {

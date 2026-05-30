@@ -5,6 +5,8 @@ object TlsClientHelloParser {
     private const val CLIENT_HELLO = 1
     private const val EXT_SERVER_NAME = 0
     private const val EXT_ALPN = 16
+    private const val EXT_SUPPORTED_VERSIONS = 43
+    private const val EXT_ENCRYPTED_CLIENT_HELLO = 0xFE0D
     private const val NAME_TYPE_HOST_NAME = 0
 
     fun extractClientHelloInfo(payload: ByteArray): ClientHelloInfo? {
@@ -47,6 +49,8 @@ object TlsClientHelloParser {
         if (extensionsEnd > payload.size) return null
         var sniHost: String? = null
         val alpnProtocols = mutableListOf<String>()
+        val supportedTlsVersions = mutableListOf<String>()
+        var echOffered = false
         while (offset + 4 <= extensionsEnd) {
             val extensionType = readShort(payload, offset)
             val extensionLength = readShort(payload, offset + 2)
@@ -55,13 +59,17 @@ object TlsClientHelloParser {
             when (extensionType) {
                 EXT_SERVER_NAME -> sniHost = parseServerNameExtension(payload, offset, extensionLength)
                 EXT_ALPN -> alpnProtocols += parseAlpnExtension(payload, offset, extensionLength)
+                EXT_SUPPORTED_VERSIONS -> supportedTlsVersions += parseSupportedVersionsExtension(payload, offset, extensionLength)
+                EXT_ENCRYPTED_CLIENT_HELLO -> echOffered = true
             }
             offset += extensionLength
         }
         return ClientHelloInfo(
             sniHost = sniHost,
             offeredAlpnProtocols = alpnProtocols.distinct(),
-            handshakeVersion = handshakeVersion
+            handshakeVersion = handshakeVersion,
+            supportedTlsVersions = supportedTlsVersions.distinct(),
+            encryptedClientHelloOffered = echOffered
         )
     }
 
@@ -114,6 +122,20 @@ object TlsClientHelloParser {
         return result
     }
 
+    private fun parseSupportedVersionsExtension(payload: ByteArray, offset: Int, extensionLength: Int): List<String> {
+        if (extensionLength < 3 || offset + extensionLength > payload.size) return emptyList()
+        val versionsLength = payload[offset].toInt() and 0xFF
+        var cursor = offset + 1
+        val end = cursor + versionsLength
+        if (end > offset + extensionLength) return emptyList()
+        val result = mutableListOf<String>()
+        while (cursor + 1 < end) {
+            result += formatTlsVersion(readShort(payload, cursor))
+            cursor += 2
+        }
+        return result
+    }
+
     private fun formatTlsVersion(rawVersion: Int): String {
         return when (rawVersion) {
             0x0301 -> "TLSv1.0"
@@ -137,6 +159,8 @@ object TlsClientHelloParser {
     data class ClientHelloInfo(
         val sniHost: String?,
         val offeredAlpnProtocols: List<String>,
-        val handshakeVersion: String?
+        val handshakeVersion: String?,
+        val supportedTlsVersions: List<String>,
+        val encryptedClientHelloOffered: Boolean
     )
 }

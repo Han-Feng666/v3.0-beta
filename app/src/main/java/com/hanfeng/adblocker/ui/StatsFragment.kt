@@ -24,7 +24,6 @@ import com.HanFeng.model.RankingType
 
 class StatsFragment : Fragment(R.layout.fragment_stats) {
     private var _binding: FragmentStatsBinding? = null
-    private val binding get() = _binding!!
     private var lastDashboard: DashboardStats? = null
     private var lastRankings: RankingBundle? = null
     private var pendingRender = false
@@ -34,6 +33,7 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         _binding = FragmentStatsBinding.bind(view)
+        val binding = _binding ?: return
         view.findViewById<ImageView>(R.id.statsBackground).applyCustomAssetBackground("custom/stats_background")
         val initialTopPadding = binding.statsScroll.paddingTop
         val initialBottomPadding = binding.statsScroll.paddingBottom
@@ -58,6 +58,7 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
     }
 
     override fun onDestroyView() {
+        pendingRender = false
         super.onDestroyView()
         _binding = null
     }
@@ -73,8 +74,10 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
     }
 
     private fun render(force: Boolean) {
-        val dashboard = StatsRepository.getDashboard(requireContext())
-        val rankings = StatsRepository.getRankings(requireContext())
+        val binding = _binding ?: return
+        val ctx = context ?: return
+        val dashboard = StatsRepository.getDashboard(ctx)
+        val rankings = StatsRepository.getRankings(ctx)
         if (!force && dashboard == lastDashboard && rankings == lastRankings) {
             return
         }
@@ -108,6 +111,7 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
     }
 
     private fun addStatCard(title: String, value: String) {
+        val binding = _binding ?: return
         val card = ItemStatCardBinding.inflate(layoutInflater, binding.statGrid, false)
         card.statTitle.text = title
         card.statValue.text = value
@@ -115,6 +119,7 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
     }
 
     private fun addRankingCard(container: LinearLayout, title: String, type: RankingType, data: List<RankingEntry>) {
+        val ctx = context ?: return
         val card = ViewRankingCardBinding.inflate(layoutInflater, container, false)
         card.cardTitle.text = title
 
@@ -146,7 +151,7 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
                 card.cardList.addView(row.root)
             }
             repeat((previewCount - visible.size).coerceAtLeast(0)) {
-                val filler = TextView(requireContext()).apply {
+                val filler = TextView(ctx).apply {
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         resources.getDimensionPixelSize(R.dimen.rank_row_height)
@@ -154,7 +159,7 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
                 }
                 card.cardList.addView(filler)
             }
-            card.toggleMore.isVisible = data.size > previewCount
+            card.toggleMore.visibility = if (data.size > previewCount) View.VISIBLE else View.INVISIBLE
             card.toggleMore.text = "查看完整榜单 ▼"
         }
 
@@ -184,10 +189,11 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
     }
 
     private fun getMedalDrawable(index: Int): Drawable? {
+        val ctx = context ?: return null
         return when (index) {
-            0 -> medalGold ?: loadCustomAssetDrawable(requireContext(), "custom/medal_gold")?.also { medalGold = it }
-            1 -> medalSilver ?: loadCustomAssetDrawable(requireContext(), "custom/medal_silver")?.also { medalSilver = it }
-            2 -> medalBronze ?: loadCustomAssetDrawable(requireContext(), "custom/medal_bronze")?.also { medalBronze = it }
+            0 -> medalGold ?: loadCustomAssetDrawable(ctx, "custom/medal_gold")?.also { medalGold = it }
+            1 -> medalSilver ?: loadCustomAssetDrawable(ctx, "custom/medal_silver")?.also { medalSilver = it }
+            2 -> medalBronze ?: loadCustomAssetDrawable(ctx, "custom/medal_bronze")?.also { medalBronze = it }
             else -> null
         }
     }

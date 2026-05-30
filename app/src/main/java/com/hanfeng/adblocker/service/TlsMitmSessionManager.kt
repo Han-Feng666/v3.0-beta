@@ -21,7 +21,9 @@ object TlsMitmSessionManager {
         targetPort: Int,
         certificatePath: String,
         offeredAlpnProtocols: List<String> = emptyList(),
-        clientHelloTlsVersion: String? = null
+        clientHelloTlsVersion: String? = null,
+        clientHelloSupportedTlsVersions: List<String> = emptyList(),
+        encryptedClientHelloOffered: Boolean = false
     ) {
         appContext = context.applicationContext
         synchronized(sessions) {
@@ -37,7 +39,9 @@ object TlsMitmSessionManager {
                 state = "ready_for_tls_bridge",
                 offeredAlpnProtocols = offeredAlpnProtocols,
                 prefersHttp2 = offeredAlpnProtocols.any { it.equals("h2", ignoreCase = true) },
-                clientHelloTlsVersion = clientHelloTlsVersion
+                clientHelloTlsVersion = clientHelloTlsVersion,
+                clientHelloSupportedTlsVersions = clientHelloSupportedTlsVersions,
+                encryptedClientHelloOffered = encryptedClientHelloOffered
             )
             while (sessions.size > MAX_SESSIONS) {
                 val firstKey = sessions.entries.firstOrNull()?.key ?: break
@@ -46,7 +50,7 @@ object TlsMitmSessionManager {
         }
         LogRepository.append(
             context,
-            "Registered TLS MITM session host=$host app=$appName source=$source target=$targetIp:$targetPort cert=$certificatePath alpn=${offeredAlpnProtocols.joinToString(",").ifBlank { "none" }} prefersHttp2=${offeredAlpnProtocols.any { it.equals("h2", ignoreCase = true) }} tls=${clientHelloTlsVersion ?: "unknown"}"
+            "Registered TLS MITM session host=$host app=$appName source=$source target=$targetIp:$targetPort cert=$certificatePath alpn=${offeredAlpnProtocols.joinToString(",").ifBlank { "none" }} prefersHttp2=${offeredAlpnProtocols.any { it.equals("h2", ignoreCase = true) }} tls=${clientHelloTlsVersion ?: "unknown"} supportedTls=${clientHelloSupportedTlsVersions.joinToString(",").ifBlank { "none" }} ech=$encryptedClientHelloOffered"
         )
     }
 
@@ -90,7 +94,7 @@ object TlsMitmSessionManager {
         }
         LogRepository.append(
             context,
-            "Prepared TLS MITM bridge host=${prepared.host} source=${prepared.source} target=${prepared.targetIp}:${prepared.targetPort} protocol=${prepared.tlsProtocol} local=${prepared.localBridgeHost}:${prepared.localBridgePort}"
+            "Prepared TLS MITM bridge host=${prepared.host} source=${prepared.source} target=${prepared.targetIp}:${prepared.targetPort} protocol=${prepared.tlsProtocol} local=${prepared.localBridgeHost}:${prepared.localBridgePort} clientTls=${prepared.clientHelloTlsVersion ?: "unknown"} supportedTls=${prepared.clientHelloSupportedTlsVersions.joinToString(",").ifBlank { "none" }} ech=${prepared.encryptedClientHelloOffered}"
         )
         return prepared
     }
@@ -262,6 +266,8 @@ object TlsMitmSessionManager {
         val offeredAlpnProtocols: List<String> = emptyList(),
         val prefersHttp2: Boolean = false,
         val clientHelloTlsVersion: String? = null,
+        val clientHelloSupportedTlsVersions: List<String> = emptyList(),
+        val encryptedClientHelloOffered: Boolean = false,
         val negotiatedAlpnProtocol: String? = null,
         val negotiatedHttp2: Boolean = false,
         val upstreamTlsVersion: String? = null,

@@ -1,6 +1,7 @@
 package com.HanFeng.security
 
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -258,31 +259,74 @@ object CertificateAuthorityManager {
 
     private fun exportCertificateToDownloads(context: Context, sourceFile: File): String? {
         return runCatching {
-            val bytes = sourceFile.readBytes()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values = android.content.ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, "HanFeng.crt")
-                    put(MediaStore.Downloads.MIME_TYPE, "application/x-x509-ca-cert")
-                    put(MediaStore.Downloads.RELATIVE_PATH, "Download/$DOWNLOAD_SUBDIR")
-                }
-                val resolver = context.contentResolver
-                val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
-                val itemUri = resolver.insert(collection, values)
-                    ?: return@runCatching "下载/$DOWNLOAD_SUBDIR/HanFeng.crt"
-                resolver.openOutputStream(itemUri, "w")?.use { output ->
-                    output.write(bytes)
-                }
-                "下载/$DOWNLOAD_SUBDIR/HanFeng.crt"
-            } else {
-                val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val targetDir = File(downloadDir, DOWNLOAD_SUBDIR).apply { mkdirs() }
-                val targetFile = File(targetDir, "HanFeng.crt")
-                FileOutputStream(targetFile).use { output: java.io.OutputStream ->
-                    output.write(bytes)
-                }
-                targetFile.absolutePath
-            }
+            writeToDownloadSubdir(
+                context = context,
+                fileName = "HanFeng.crt",
+                mimeType = "application/x-x509-ca-cert",
+                bytes = sourceFile.readBytes()
+            )
         }.getOrNull()
+    }
+
+    fun exportTextFileToDownloads(context: Context, fileName: String, content: String): String? {
+        return runCatching {
+            writeToDownloadSubdir(
+                context = context,
+                fileName = fileName,
+                mimeType = "text/plain",
+                bytes = content.toByteArray()
+            )
+        }.getOrNull()
+    }
+
+    private fun writeToDownloadSubdir(context: Context, fileName: String, mimeType: String, bytes: ByteArray): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = context.contentResolver
+            val relativePath = "Download/$DOWNLOAD_SUBDIR"
+            val targetUri = findExistingDownloadUri(context, fileName, relativePath)
+                ?: resolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    android.content.ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                        put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                        put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
+                    }
+                )
+                ?: return "下载/$DOWNLOAD_SUBDIR/$fileName"
+            resolver.openOutputStream(targetUri, "wt")?.use { output ->
+                output.write(bytes)
+            }
+            "下载/$DOWNLOAD_SUBDIR/$fileName"
+        } else {
+            val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            val targetDir = File(downloadDir, DOWNLOAD_SUBDIR).apply { mkdirs() }
+            val targetFile = File(targetDir, fileName)
+            FileOutputStream(targetFile).use { output: OutputStream ->
+                output.write(bytes)
+            }
+            targetFile.absolutePath
+        }
+    }
+
+    private fun findExistingDownloadUri(context: Context, fileName: String, relativePath: String): Uri? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        val resolver = context.contentResolver
+        val projection = arrayOf(MediaStore.Downloads._ID)
+        val selection = "${MediaStore.Downloads.DISPLAY_NAME}=? AND ${MediaStore.Downloads.RELATIVE_PATH}=?"
+        val selectionArgs = arrayOf(fileName, relativePath)
+        resolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            selectionArgs,
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val id = cursor.getLong(0)
+                return Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id.toString())
+            }
+        }
+        return null
     }
 
     private fun buildLeafAlias(hostName: String): String = "leaf_${hostName.replace(Regex("[^a-z0-9._-]"), "_")}"

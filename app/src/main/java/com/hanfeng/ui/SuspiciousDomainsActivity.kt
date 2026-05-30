@@ -36,7 +36,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class SuspiciousDomainsActivity : AppCompatActivity() {
+class LegacySuspiciousDomainsActivity : AppCompatActivity() {
     private val timeFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
     private lateinit var binding: ActivitySuspiciousDomainsBinding
     private val allSamples = mutableListOf<SuspiciousDomainItem>()
@@ -121,7 +121,7 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
         binding.emptyText.text = "正在加载可疑域名..."
         lifecycleScope.launch {
             val samples = withContext(Dispatchers.Default) {
-                RuleRepository.getSuspiciousDomainSamples(this@SuspiciousDomainsActivity).map { sample ->
+                RuleRepository.getSuspiciousDomainSamples(this@LegacySuspiciousDomainsActivity).map { sample ->
                     val confidenceScore = RuleRepository.suspiciousDomainConfidenceScore(
                         domain = sample.domain,
                         vendor = sample.lastVendor,
@@ -133,7 +133,7 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
                         domain = sample.domain,
                         count = sample.count,
                         lastSeenAt = sample.lastSeenAt,
-                        alreadyAdded = RuleRepository.hasMatchingRule(this@SuspiciousDomainsActivity, sample.domain),
+                        alreadyAdded = RuleRepository.hasMatchingRule(this@LegacySuspiciousDomainsActivity, sample.domain),
                         lastAppName = sample.lastAppName,
                         vendor = sample.lastVendor,
                         novelHits = sample.novelHits,
@@ -237,13 +237,13 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
         binding.emptyText.text = "正在添加拦截规则..."
         lifecycleScope.launch {
             val added = withContext(Dispatchers.Default) {
-                RuleRepository.addRules(this@SuspiciousDomainsActivity, domains, RuleSource.MANUAL)
+                RuleRepository.addRules(this@LegacySuspiciousDomainsActivity, domains, RuleSource.MANUAL)
             }
             batchAdding = false
             val addedCount = added.size
             if (addedCount <= 0) {
                 binding.emptyText.visibility = if (visibleSamples.isEmpty()) View.VISIBLE else View.GONE
-                Toast.makeText(this@SuspiciousDomainsActivity, "这些域名已经添加过了", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@LegacySuspiciousDomainsActivity, "这些域名已经添加过了", Toast.LENGTH_SHORT).show()
                 updateSelectionSummary()
                 return@launch
             }
@@ -251,9 +251,9 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
             markDomainsAsAdded(added.map { it.domain })
             selectedDomains.clear()
             adapter.setSelection(selectedDomains)
-            startService(Intent(this@SuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
-            LogRepository.append(this@SuspiciousDomainsActivity, "Batch added $addedCount suspicious domain rules")
-            Toast.makeText(this@SuspiciousDomainsActivity, successMessageTemplate.format(addedCount), Toast.LENGTH_SHORT).show()
+            startService(Intent(this@LegacySuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+            LogRepository.append(this@LegacySuspiciousDomainsActivity, "Batch added $addedCount suspicious domain rules")
+            Toast.makeText(this@LegacySuspiciousDomainsActivity, successMessageTemplate.format(addedCount), Toast.LENGTH_SHORT).show()
             finish()
         }
     }
@@ -297,26 +297,26 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
     private fun addSingleRule(domain: String) {
         lifecycleScope.launch {
             val added = withContext(Dispatchers.Default) {
-                RuleRepository.addRule(this@SuspiciousDomainsActivity, domain, RuleSource.MANUAL)
+                RuleRepository.addRule(this@LegacySuspiciousDomainsActivity, domain, RuleSource.MANUAL)
             }
             if (added == null) {
-                Toast.makeText(this@SuspiciousDomainsActivity, "规则无效或已存在", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@LegacySuspiciousDomainsActivity, "规则无效或已存在", Toast.LENGTH_SHORT).show()
                 return@launch
             }
             hasChanges = true
             markDomainsAsAdded(setOf(domain))
-            startService(Intent(this@SuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
-            Toast.makeText(this@SuspiciousDomainsActivity, "已添加拦截规则并刷新拦截服务", Toast.LENGTH_SHORT).show()
+            startService(Intent(this@LegacySuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+            Toast.makeText(this@LegacySuspiciousDomainsActivity, "已添加拦截规则并刷新拦截服务", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun showVendorDialog(domain: String) {
         val input = EditText(this).apply {
             hint = "例如：QXM (QXM Ads)"
-            setText(RuleRepository.classifyVendor(this@SuspiciousDomainsActivity, domain))
-            background = ContextCompat.getDrawable(this@SuspiciousDomainsActivity, R.drawable.bg_panel)
-            setTextColor(ContextCompat.getColor(this@SuspiciousDomainsActivity, R.color.hf_text_primary))
-            setHintTextColor(ContextCompat.getColor(this@SuspiciousDomainsActivity, R.color.hf_text_secondary))
+            setText(RuleRepository.classifyVendor(this@LegacySuspiciousDomainsActivity, domain))
+            background = ContextCompat.getDrawable(this@LegacySuspiciousDomainsActivity, R.drawable.bg_panel)
+            setTextColor(ContextCompat.getColor(this@LegacySuspiciousDomainsActivity, R.color.hf_text_primary))
+            setHintTextColor(ContextCompat.getColor(this@LegacySuspiciousDomainsActivity, R.color.hf_text_secondary))
             setPadding(24, 20, 24, 20)
         }
         val dialog = MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_HanFeng_Dialog)
@@ -334,20 +334,20 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
                 }
                 lifecycleScope.launch {
                     val targetRule = withContext(Dispatchers.Default) {
-                        val added = RuleRepository.addRule(this@SuspiciousDomainsActivity, domain, RuleSource.MANUAL)
-                        added ?: RuleRepository.findMatchingRule(this@SuspiciousDomainsActivity, domain)
+                        val added = RuleRepository.addRule(this@LegacySuspiciousDomainsActivity, domain, RuleSource.MANUAL)
+                        added ?: RuleRepository.findMatchingRule(this@LegacySuspiciousDomainsActivity, domain)
                     }
                     if (targetRule == null) {
-                        Toast.makeText(this@SuspiciousDomainsActivity, "规则无效", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@LegacySuspiciousDomainsActivity, "规则无效", Toast.LENGTH_SHORT).show()
                         return@launch
                     }
                     withContext(Dispatchers.Default) {
-                        RuleRepository.updateRuleVendor(this@SuspiciousDomainsActivity, targetRule.id, vendor)
+                        RuleRepository.updateRuleVendor(this@LegacySuspiciousDomainsActivity, targetRule.id, vendor)
                     }
                     hasChanges = true
                     markDomainsAsAdded(setOf(domain))
-                    startService(Intent(this@SuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
-                    Toast.makeText(this@SuspiciousDomainsActivity, "已添加并分类，拦截服务已刷新", Toast.LENGTH_SHORT).show()
+                    startService(Intent(this@LegacySuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+                    Toast.makeText(this@LegacySuspiciousDomainsActivity, "已添加并分类，拦截服务已刷新", Toast.LENGTH_SHORT).show()
                     dialog.dismiss()
                 }
             }
@@ -380,7 +380,7 @@ class SuspiciousDomainsActivity : AppCompatActivity() {
     }
 
     companion object {
-        fun createIntent(context: Context): Intent = Intent(context, SuspiciousDomainsActivity::class.java)
+        fun createIntent(context: Context): Intent = Intent(context, LegacySuspiciousDomainsActivity::class.java)
     }
 }
 
