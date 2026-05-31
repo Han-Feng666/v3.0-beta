@@ -199,7 +199,7 @@
                 android:layout_weight="1"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
-                android:text="规则源"
+                android:text="影响正常网络"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="16sp" />
@@ -234,7 +234,7 @@
                 android:layout_weight="1"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
-                android:text="加入群聊"
+                android:text="规则源管理"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="16sp" />

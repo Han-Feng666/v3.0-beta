@@ -97,6 +97,11 @@ class MainActivity : BaseActivity() {
         setIntent(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        refreshHomeStatus()
+    }
+
     override fun onDestroy() {
         Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
         super.onDestroy()
@@ -175,6 +180,9 @@ class MainActivity : BaseActivity() {
                 }.onSuccess { results ->
                     val successCount = results.count { it.success }
                     val enabledCount = results.size
+                    if (successCount > 0 && AdBlockVpnService.isRunning) {
+                        startService(Intent(this@MainActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+                    }
                     LogRepository.append(
                         this@MainActivity,
                         "Remote rule sync checked on app launch: success=$successCount/$enabledCount lastSyncAt=${RemoteRuleSourceRepository.getLastSyncAt(applicationContext)}"
@@ -281,6 +289,7 @@ class MainActivity : BaseActivity() {
         runCatching {
             FeatureSettingsRepository.setAdBlockEnabled(this, true)
             FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
+            refreshHomeStatus()
             requestNotificationPermissionIfNeeded()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ContextCompat.startForegroundService(this, serviceIntent)
@@ -294,6 +303,7 @@ class MainActivity : BaseActivity() {
         }.onFailure {
             FeatureSettingsRepository.setAdBlockEnabled(this, false)
             AdBlockVpnService.isRunning = false
+            refreshHomeStatus()
             LogRepository.append(this, "Start VPN service failed: ${it.message ?: it.javaClass.simpleName}")
             Toast.makeText(this, "开启拦截失败", Toast.LENGTH_SHORT).show()
         }
@@ -303,6 +313,7 @@ class MainActivity : BaseActivity() {
         AdBlockVpnService.isRunning = false
         FeatureSettingsRepository.setAdBlockEnabled(this, false)
         FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
+        refreshHomeStatus()
         startService(Intent(this, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_STOP))
         Toast.makeText(this, "已停止拦截", Toast.LENGTH_SHORT).show()
     }
@@ -346,6 +357,15 @@ class MainActivity : BaseActivity() {
             return
         }
         val status = ShizukuRepository.getStatus(this)
+        val serviceHealthy = if (status.installed && status.binderAlive) {
+            runCatching {
+                ShizukuConnectionOwnerRepository.ensureBound(this)
+                ShizukuAdControlRepository.ensureBound(this)
+                ShizukuAdControlRepository.checkServiceHealth(this)
+            }.getOrDefault(false)
+        } else {
+            false
+        }
         when {
             !status.installed -> {
                 showShizukuGuideDialog(
@@ -360,6 +380,19 @@ class MainActivity : BaseActivity() {
                 showShizukuGuideDialog(
                     title = "需要先启动 Shizuku",
                     message = "请先在 Shizuku App 中启动服务。Android 11 及以上通常可通过无线调试启动，已 Root 设备也可以直接启动。",
+                    positiveLabel = "我知道了"
+                ) {
+                    refreshHomeStatus()
+                }
+            }
+            serviceHealthy && !status.permissionGranted -> {
+                Toast.makeText(this, "Shizuku 已可用，当前按兼容模式接入增强能力", Toast.LENGTH_SHORT).show()
+                refreshHomeStatus()
+            }
+            !status.permissionStateKnown -> {
+                showShizukuGuideDialog(
+                    title = "Shizuku 权限状态异常",
+                    message = "当前 Shizuku Binder 可以连通，但权限状态读取异常。请重新进入 Shizuku 后再返回寒枫，必要时更换兼容性更好的版本。",
                     positiveLabel = "我知道了"
                 ) {
                     refreshHomeStatus()

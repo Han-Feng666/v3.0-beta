@@ -12,6 +12,24 @@ import java.util.zip.InflaterInputStream
 object HttpMitmFilter {
     private const val MAX_HTTP1_FILTER_BUFFER_BYTES = 512 * 1024
     private const val MAX_HTTP2_DATA_SAMPLE_BYTES = 8 * 1024
+    private val http2ImmediateBlockReasons = setOf(
+        "blocked-host", "blocked-url", "general-ad-traffic", "novel-app-aggressive", "novel-protected-path",
+        "domestic-sdk-signal", "reward-unlock-path", "doh-request", "json-ad-field", "json-ad-array",
+        "json-ad-content", "novel-field-cluster", "media-field-cluster", "feed-ad-cluster", "banner-ad-cluster",
+        "reader-ad-cluster", "comment-ad-path", "comment-ad-cluster", "comment-ad-extended", "comment-ad-float-extended",
+        "comment-ad-flow-extended", "comment-ad-insert-extended", "coolapk-comment-ad-extended", "comment-ad-material-extended",
+        "comment-ad-popup-extended", "push-recommend-material-extended", "message-center-card-ad-extended", "gdt-sdk-ad-extended",
+        "ali-sdk-ad-extended", "shortvideo-sdk-ad-extended", "video-ad-cluster", "feed-ad-extended",
+        "push-recommend-ad-extended", "message-center-ad-material-extended", "sign-task-benefit-ad-extended",
+        "reader-sign-benefit-ad-extended", "reader-page-ad-extended", "reader-page-ad-material-extended",
+        "reader-page-popup-extended", "reader-page-tail-extended", "reader-ad-material-extended", "qimao-reader-ad-extended",
+        "drama-ad-cluster", "live-ad-cluster", "comic-ad-cluster", "player-ad-cluster", "player-ad-extended",
+        "splash-ad-cluster", "startup-ad-extended", "startup-ad-cache-extended", "startup-ad-preload-extended",
+        "startup-ad-material-extended", "reward-ad-extended", "neutralized-body-reward-unlock", "path-strong-suspicious",
+        "location-strong-header", "set-cookie-strong-header", "path-strong-keyword", "location-strong-keyword",
+        "set-cookie-strong-keyword"
+    )
+    private val http2KeywordBlockReasons = setOf("path-keyword", "location-keyword", "set-cookie-keyword")
     private val pathInspectionCache = object : LinkedHashMap<String, PathInspection>(256, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PathInspection>?): Boolean = size > 512
     }
@@ -1140,10 +1158,10 @@ object HttpMitmFilter {
         val requestDomain = extractRequestDomain(requestInspection)
         val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         val pathInspection = inspectSuspiciousHttpPath(lowerPath)
+        fun containsAny(value: String, vararg tokens: String): Boolean = tokens.any(value::contains)
         val destinationPort = when {
             session.targetPort > 0 -> session.targetPort
-            session.isHttps -> 443
-            else -> 80
+            else -> 443
         }
         if (RuleRepository.isBlocked(context, host, appName = session.appName, destinationPort = destinationPort)) return "neutralized-blocked-host"
         if (RuleRepository.isUrlBlocked(context, host, lowerPath, session.appName, requestDomain, destinationPort = destinationPort)) return "neutralized-blocked-url"
@@ -1151,24 +1169,27 @@ object HttpMitmFilter {
             return "neutralized-novel-protected-path"
         }
         val vendor = RuleRepository.classifyVendorFromHints(context, host, session.appName)
-        val locationStrongHeader = strongHeaderKeywords.any { location.contains(it) }
-        val cookieStrongHeader = strongHeaderKeywords.any { setCookie.contains(it) }
-        val locationStrongKeyword = strongResponseAdKeywords.any { location.contains(it) }
-        val cookieStrongKeyword = strongResponseAdKeywords.any { setCookie.contains(it) }
+        val locationStrongHeader = strongHeaderKeywords.any(location::contains)
+        val cookieStrongHeader = strongHeaderKeywords.any(setCookie::contains)
+        val locationStrongKeyword = strongResponseAdKeywords.any(location::contains)
+        val cookieStrongKeyword = strongResponseAdKeywords.any(setCookie::contains)
+        val locationRecommendCardHit = containsAny(location, "recommend_card", "promo_card", "ad_card")
+        val locationMaterialHit = containsAny(location, "material_url", "landing_url")
+        val cookieMaterialHit = containsAny(setCookie, "ad_material", "material_url")
+        val headerMaterialHit = locationMaterialHit || cookieMaterialHit
+        val strongHeaderOrKeywordHit = locationStrongKeyword || cookieStrongKeyword
         val aggressiveAdApp = RuleRepository.isAggressiveAdAppHint(session.appName)
         if (RuleRepository.shouldAggressivelyBlockForNovelApp(context, host, session.appName, vendor)) {
             return "neutralized-novel-app-aggressive"
         }
         if (RuleRepository.shouldForcePushRecommendInspection(host, session.appName, vendor) &&
-            (location.contains("recommend_card") ||
-                location.contains("promo_card") ||
-                location.contains("ad_card") ||
-                location.contains("material_url") ||
-                location.contains("landing_url") ||
-                setCookie.contains("ad_material") ||
-                setCookie.contains("material_url")) &&
-            (locationStrongKeyword || cookieStrongKeyword || isKnownAdVendor(vendor))) {
+            (locationRecommendCardHit || headerMaterialHit) &&
+            (strongHeaderOrKeywordHit || isKnownAdVendor(vendor))) {
             return "neutralized-push-recommend-header"
+        }
+        if (looksLikeCommentAdPath(lowerPath) &&
+            (locationRecommendCardHit || headerMaterialHit || strongHeaderOrKeywordHit)) {
+            return "neutralized-comment-ad-header"
         }
         if (pathInspection.strongSuspicious) {
             return "neutralized-strong-suspicious-path"
@@ -1199,7 +1220,7 @@ object HttpMitmFilter {
             return "neutralized-setcookie-strong-header"
         }
         if (aggressiveAdApp &&
-            (location.contains("recommend_card") || location.contains("promo_card") || location.contains("sponsor")) &&
+            (containsAny(location, "sponsor") || locationRecommendCardHit) &&
             (locationStrongKeyword || isKnownAdVendor(vendor))) {
             return "neutralized-aggressive-app-recommend-header"
         }
@@ -1223,9 +1244,7 @@ object HttpMitmFilter {
         contentType: String
     ): String? {
         if (contentType.isBlank()) return null
-        val targetedContentType = contentType.contains("text/html") ||
-            contentType.contains("json") ||
-            contentType.contains("javascript")
+        val targetedContentType = containsAnyContentType(contentType, "text/html", "json", "javascript")
         if (!targetedContentType) return null
         val host = normalizeAuthority(requestInspection?.host ?: session.host)
         val shouldInspect = shouldPreferDeepInspection(
@@ -1248,7 +1267,6 @@ object HttpMitmFilter {
         val context = TlsMitmSessionManager.requireContext()
         val host = normalizeAuthority(requestInspection?.host ?: session.host)
         if (RuleRepository.isSocialCoreDomain(host)) return null
-        if (RuleRepository.isCommunityAppHint(session.appName)) return null
         if (RuleRepository.isWhitelistedDomain(host)) return null
         if (RuleRepository.isSensitiveAuthDomain(host)) return null
         if (RuleRepository.shouldProtectMediaTraffic(host)) return null
@@ -1259,17 +1277,20 @@ object HttpMitmFilter {
         val protectedNovelTarget = RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(context, host, requestInspection?.path, session.appName)
         val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         val mitmAggressive = isMitmAggressiveMode()
-        if (contentType.contains("html") && cosmeticSelectors.isNotEmpty()) {
+        val htmlContent = contentType.contains("html")
+        val scriptOrJsonContent = containsAnyContentType(contentType, "json", "javascript")
+        val targetedBodyContent = htmlContent || scriptOrJsonContent
+        if (htmlContent && cosmeticSelectors.isNotEmpty()) {
             return "neutralized-cosmetic-rule"
         }
-        if (contentType.contains("text/html") || contentType.contains("json") || contentType.contains("javascript")) {
+        if (targetedBodyContent) {
             val lowerBody = body.lowercase()
             val bodySignals = inspectAdBodySignals(lowerBody)
             val bodyReasons = bodySignals.reasons.toSet()
-            val jsonNovelFieldHits = if (contentType.contains("json") || contentType.contains("javascript")) {
+            val jsonNovelFieldHits = if (scriptOrJsonContent) {
                 jsonNovelFieldTokens.count(lowerBody::contains)
             } else 0
-            val htmlNovelMarkerHits = if (contentType.contains("html")) {
+            val htmlNovelMarkerHits = if (htmlContent) {
                 htmlNovelMarkerTokens.count(lowerBody::contains)
             } else 0
             // 降低拦截阈值：普通应用 2 分拦截，小说 APP 1 分拦截
@@ -1373,6 +1394,25 @@ object HttpMitmFilter {
             }
         }
         return null
+    }
+
+    private fun containsAnyContentType(contentType: String, vararg tokens: String): Boolean {
+        return tokens.any(contentType::contains)
+    }
+
+    private fun looksLikeCommentAdPath(path: String): Boolean {
+        if (path.isBlank()) return false
+        val commentScene = path.contains("comment") || path.contains("reply") || path.contains("floor") || path.contains("post")
+        if (!commentScene) return false
+        return path.contains("ad") ||
+            path.contains("promo") ||
+            path.contains("banner") ||
+            path.contains("insert") ||
+            path.contains("material") ||
+            path.contains("landing") ||
+            path.contains("recommend") ||
+            path.contains("flow") ||
+            path.contains("card")
     }
 
     private fun buildCosmeticHtml(selectors: List<String>): String {
@@ -1651,8 +1691,11 @@ object HttpMitmFilter {
         val context = TlsMitmSessionManager.requireContext()
         val normalizedHost = normalizeAuthority(host)
         if (normalizedHost.isBlank()) return false
-        val lowerPath = path?.lowercase().orEmpty()
-        val cacheKey = "$normalizedHost|$lowerPath|${appName.orEmpty()}|${vendorHint.orEmpty()}|${requestDomain.orEmpty()}"
+        val lowerPath = path?.trim()?.lowercase().orEmpty()
+        val normalizedAppName = appName?.trim()?.lowercase().orEmpty()
+        val normalizedVendorHint = vendorHint?.trim()?.lowercase().orEmpty()
+        val normalizedRequestDomain = requestDomain?.trim()?.lowercase().orEmpty()
+        val cacheKey = "$normalizedHost|$lowerPath|$normalizedAppName|$normalizedVendorHint|$normalizedRequestDomain"
         synchronized(deepInspectionDecisionCacheLock) {
             deepInspectionDecisionCache[cacheKey]?.let { return it }
         }
@@ -1666,48 +1709,30 @@ object HttpMitmFilter {
         if (lowerPath.isNotBlank() && RuleRepository.hasAdvancedUrlRule(context, normalizedHost, lowerPath, appName, requestDomain, destinationPort = destinationPort)) return cacheDeepInspectionDecision(cacheKey, true)
         if (lowerPath.isNotBlank() && RuleRepository.isUrlBlocked(context, normalizedHost, lowerPath, appName, requestDomain, destinationPort = destinationPort)) return cacheDeepInspectionDecision(cacheKey, true)
         if (pathInspection.strongSuspicious) return cacheDeepInspectionDecision(cacheKey, true)
+        if (looksLikeCommentAdPath(lowerPath)) return cacheDeepInspectionDecision(cacheKey, true)
         // 游戏和社交 APP 核心服务跳过深度检查（提升性能，降低延迟）
         val lowerHost = normalizedHost.lowercase()
         if (RuleRepository.isGameCoreDomain(lowerHost)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.isSocialCoreDomain(lowerHost)) return cacheDeepInspectionDecision(cacheKey, false)
-        if (RuleRepository.isCommunityAppHint(appName)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.isWhitelistedDomain(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.shouldProtectMediaTraffic(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.shouldProtectBusinessTraffic(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.isBypassProtectionDomain(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, true)
-        val vendor = vendorHint?.takeIf { it.isNotBlank() }
+        val vendor = vendorHint?.trim()?.takeIf { it.isNotBlank() }
             ?: RuleRepository.classifyVendorFromHints(context, normalizedHost, appName)
+        fun containsAny(value: String, vararg tokens: String): Boolean = tokens.any(value::contains)
+        val pathMaterialHit = containsAny(lowerPath, "material", "landing", "show_url", "click_url")
+        val pushRecommendCardPathHit = containsAny(lowerPath, "ad_card", "promo_card", "recommend_card")
+        val pushRecommendPathHit = pathMaterialHit || pushRecommendCardPathHit
+        val messageScenePathHit = containsAny(lowerPath, "message", "notice", "inbox", "notify", "bulletin", "discover", "guess_like", "sign", "benefit", "welfare", "mission")
+        val messageAdPathHit = containsAny(lowerPath, "ad", "promo", "recommend", "popup", "task", "reward") || pathMaterialHit
+        val apiFeedPathHit = containsAny(lowerPath, "feed", "splash", "popup", "insert")
         if (RuleRepository.shouldForcePushRecommendInspection(normalizedHost, appName, vendor) &&
-            (lowerPath.contains("material") ||
-                lowerPath.contains("landing") ||
-                lowerPath.contains("ad_card") ||
-                lowerPath.contains("promo_card") ||
-                lowerPath.contains("recommend_card") ||
-                lowerPath.contains("show_url") ||
-                lowerPath.contains("click_url"))) {
+            pushRecommendPathHit) {
             return cacheDeepInspectionDecision(cacheKey, true)
         }
-        if (lowerPath.contains("message") ||
-            lowerPath.contains("notice") ||
-            lowerPath.contains("inbox") ||
-            lowerPath.contains("notify") ||
-            lowerPath.contains("bulletin") ||
-            lowerPath.contains("discover") ||
-            lowerPath.contains("guess_like") ||
-            lowerPath.contains("sign") ||
-            lowerPath.contains("benefit") ||
-            lowerPath.contains("welfare") ||
-            lowerPath.contains("mission")) {
-            if (lowerPath.contains("ad") ||
-                lowerPath.contains("promo") ||
-                lowerPath.contains("recommend") ||
-                lowerPath.contains("material") ||
-                lowerPath.contains("landing") ||
-                lowerPath.contains("popup") ||
-                lowerPath.contains("task") ||
-                lowerPath.contains("reward")) {
-                return cacheDeepInspectionDecision(cacheKey, true)
-            }
+        if (messageScenePathHit && messageAdPathHit) {
+            return cacheDeepInspectionDecision(cacheKey, true)
         }
         if (RuleRepository.shouldAggressivelyBlockForNovelApp(context, normalizedHost, appName, vendor) && pathInspection.suspicious) {
             return cacheDeepInspectionDecision(cacheKey, true)
@@ -1732,7 +1757,7 @@ object HttpMitmFilter {
         return cacheDeepInspectionDecision(
             cacheKey,
             lowerPath.contains("/api/") &&
-                (lowerPath.contains("feed") || lowerPath.contains("splash") || lowerPath.contains("popup") || lowerPath.contains("insert")) &&
+                apiFeedPathHit &&
                 pathInspection.suspicious
         )
     }
@@ -1883,540 +1908,398 @@ object HttpMitmFilter {
             score += 1
             reasons += weakMatches.take(2).map { "data-keyword:$it" }
         }
-        if (lowerBody.contains("\"task_") && lowerBody.contains("\"reward")) {
+        val taskRewardSceneHit = lowerBody.contains("\"task_")
+        val rewardTokenHit = lowerBody.contains("\"reward")
+        val coinTokenHit = lowerBody.contains("\"coin")
+        val bonusTokenHit = lowerBody.contains("\"bonus")
+        val videoTokenHit = lowerBody.contains("\"video")
+        val adTokenHit = lowerBody.contains("\"ad")
+        val prerollTokenHit = lowerBody.contains("\"preroll")
+        val midrollTokenHit = lowerBody.contains("\"midroll")
+        if (taskRewardSceneHit && rewardTokenHit) {
             score += 1
             reasons += "novel-task-reward"
         }
-        if (lowerBody.contains("\"coin") && (lowerBody.contains("\"bonus") || lowerBody.contains("\"reward"))) {
+        if (coinTokenHit && (bonusTokenHit || rewardTokenHit)) {
             score += 1
             reasons += "novel-coin-reward"
         }
-        if (lowerBody.contains("\"video") && (lowerBody.contains("\"ad") || lowerBody.contains("\"preroll") || lowerBody.contains("\"midroll"))) {
+        if (videoTokenHit && (adTokenHit || prerollTokenHit || midrollTokenHit)) {
             score += 1
             reasons += "video-ad-cluster"
         }
-        if (lowerBody.contains("\"comment") && (lowerBody.contains("\"ad_card") || lowerBody.contains("\"reply_ad") || lowerBody.contains("\"floor_ad"))) {
+        fun containsAny(vararg tokens: String): Boolean = tokens.any(lowerBody::contains)
+        val commentSceneHit = containsAny("\"comment", "\"reply", "\"floor")
+        val postSceneHit = lowerBody.contains("\"post\"")
+        val commentOrPostSceneHit = commentSceneHit || postSceneHit
+        val feedSceneHit = containsAny("\"feed", "\"stream", "\"timeline")
+        val recommendFeedSceneHit = feedSceneHit || lowerBody.contains("\"recommend")
+        val pushSceneHit = containsAny("\"push", "\"notification", "\"notify", "\"message", "\"inbox")
+        val messageCenterSceneHit = containsAny("\"message_center", "\"inbox_list", "\"notify_list", "\"bulletin_list")
+        val directMessageSceneHit = containsAny("\"push_message", "\"notification_message", "\"system_message", "\"operation_message")
+        val adMaterialHit = containsAny("\"ad_material", "\"material_url", "\"landing_url", "\"click_url", "\"show_url")
+        val deepLinkMaterialHit = containsAny("\"deep_link", "\"download_url", "\"landing_url", "\"ad_material")
+        val recommendCardHit = containsAny("\"recommend_card", "\"promotion_card", "\"discover_card", "\"ad_card")
+        val commentAdPlacementHit = containsAny("\"ad_card", "\"reply_ad", "\"floor_ad")
+        val commentSceneExtendedHit = containsAny(
+            "\"comment_banner", "\"comment_ad_card", "\"comment_insert_ad", "\"reply_banner",
+            "\"reply_ad_card", "\"floor_banner", "\"floor_promote", "\"comment_sponsor", "\"reply_sponsor"
+        )
+        val commentMaterialSceneHit = containsAny(
+            "\"comment_material", "\"reply_material", "\"floor_material", "\"comment_landing_url",
+            "\"reply_landing_url", "\"comment_click_url", "\"reply_click_url", "\"comment_deep_link"
+        )
+        val commentPopupSceneHit = containsAny(
+            "\"comment_popup_ad", "\"reply_popup_ad", "\"floor_popup_ad", "\"comment_dialog_ad",
+            "\"reply_dialog_ad", "\"comment_insert_popup"
+        )
+        val commentFloatSceneHit = containsAny(
+            "\"comment_float_layer", "\"comment_float_card", "\"reply_float_card",
+            "\"floor_float_card", "\"comment_overlay_ad", "\"reply_overlay_ad"
+        )
+        val commentFlowSceneHit = containsAny("\"comment_feed_ad", "\"comment_flow_ad", "\"reply_flow_ad", "\"floor_flow_ad")
+        val feedExtendedSceneHit = containsAny(
+            "\"stream_card_ad", "\"timeline_ad", "\"timeline_insert_ad", "\"recommend_ad", "\"recommend_card_ad",
+            "\"feed_banner", "\"feed_card", "\"feed_insert_ad", "\"information_flow_ad", "\"stream_insert_ad", "\"information_flow"
+        )
+        val pushRecommendSceneHit = containsAny("\"recommend_ad", "\"recommend_card_ad", "\"promotion", "\"promo")
+        val pushMaterialSceneHit = containsAny(
+            "\"push_recommend_card", "\"push_material", "\"push_landing_url", "\"notification_ad_card",
+            "\"system_push_ad", "\"operation_push_ad"
+        )
+        val directMessageAdSceneHit = containsAny("\"ad_card", "\"promo_card", "\"recommend_card")
+        val messageCenterCardSceneHit = containsAny(
+            "\"message_center_card_ad", "\"inbox_card_ad", "\"notify_card_ad", "\"notice_card_ad",
+            "\"bulletin_card_ad", "\"operation_message_ad"
+        )
+        val discoverSceneHit = containsAny("\"discover", "\"recommend", "\"guess_like", "\"you_may_like")
+        val discoverAdSceneHit = containsAny(
+            "\"promotion_card", "\"sponsor_card", "\"ad_card", "\"landing_url", "\"material_url", "\"show_url"
+        )
+        val messageCenterMaterialSceneHit = containsAny(
+            "\"message_center", "\"inbox", "\"notify", "\"bulletin", "\"notice"
+        )
+        val messageCenterAdSceneHit = containsAny(
+            "\"message_center_ad\"", "\"message_center_banner\"", "\"inbox_ad\"", "\"notify_ad\"",
+            "\"promotion_card\"", "\"promo_card\"", "\"operation_banner\"", "\"operation_card\""
+        )
+        val materialUrlSceneHit = containsAny(
+            "\"click_url\"", "\"show_url\"", "\"material_url\"", "\"landing_url\""
+        )
+        val clickOrMaterialSceneHit = materialUrlSceneHit || lowerBody.contains("\"download_url\"")
+        if (lowerBody.contains("\"comment") && commentAdPlacementHit) {
             score += 1
             reasons += "comment-ad-cluster"
         }
-        if ((lowerBody.contains("\"comment") || lowerBody.contains("\"reply") || lowerBody.contains("\"floor")) &&
-            (lowerBody.contains("\"comment_banner") ||
-                lowerBody.contains("\"comment_ad_card") ||
-                lowerBody.contains("\"comment_insert_ad") ||
-                lowerBody.contains("\"reply_banner") ||
-                lowerBody.contains("\"reply_ad_card") ||
-                lowerBody.contains("\"floor_banner") ||
-                lowerBody.contains("\"floor_promote") ||
-                lowerBody.contains("\"comment_sponsor") ||
-                lowerBody.contains("\"reply_sponsor"))) {
+        if (commentSceneHit && commentSceneExtendedHit) {
             score += 2
             reasons += "comment-ad-extended"
         }
-        if ((lowerBody.contains("\"comment") || lowerBody.contains("\"reply") || lowerBody.contains("\"floor") || lowerBody.contains("\"post\"")) &&
-            (lowerBody.contains("\"comment_float_layer\"") ||
-                lowerBody.contains("\"comment_float_card\"") ||
-                lowerBody.contains("\"reply_float_card\"") ||
-                lowerBody.contains("\"floor_float_card\"") ||
-                lowerBody.contains("\"comment_overlay_ad\"") ||
-                lowerBody.contains("\"reply_overlay_ad\""))) {
-            score += 2
-            reasons += "comment-ad-float-extended"
-        }
-        if ((lowerBody.contains("\"comment") || lowerBody.contains("\"reply") || lowerBody.contains("\"floor") || lowerBody.contains("\"post\"")) &&
-            (lowerBody.contains("\"comment_feed_ad\"") ||
-                lowerBody.contains("\"comment_flow_ad\"") ||
-                lowerBody.contains("\"reply_flow_ad\"") ||
-                lowerBody.contains("\"floor_flow_ad\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 3
-            reasons += "comment-ad-flow-extended"
-        }
-        if ((lowerBody.contains("\"feed") || lowerBody.contains("\"stream") || lowerBody.contains("\"timeline")) &&
-            (lowerBody.contains("\"ad_card") || lowerBody.contains("\"insert_ad") || lowerBody.contains("\"feed_ad"))) {
-            score += 1
-            reasons += "feed-ad-cluster"
-        }
-        if ((lowerBody.contains("\"feed") || lowerBody.contains("\"stream") || lowerBody.contains("\"timeline") || lowerBody.contains("\"recommend")) &&
-            (lowerBody.contains("\"stream_card_ad") ||
-                lowerBody.contains("\"timeline_ad") ||
-                lowerBody.contains("\"timeline_insert_ad") ||
-                lowerBody.contains("\"recommend_ad") ||
-                lowerBody.contains("\"recommend_card_ad") ||
-                lowerBody.contains("\"feed_banner") ||
-                lowerBody.contains("\"feed_card") ||
-                lowerBody.contains("\"feed_insert_ad") ||
-                lowerBody.contains("\"information_flow_ad") ||
-                lowerBody.contains("\"stream_insert_ad") ||
-                lowerBody.contains("\"information_flow"))) {
-            score += 2
-            reasons += "feed-ad-extended"
-        }
-        if ((lowerBody.contains("\"push") ||
-                lowerBody.contains("\"notification") ||
-                lowerBody.contains("\"notify") ||
-                lowerBody.contains("\"message") ||
-                lowerBody.contains("\"inbox")) &&
-            (lowerBody.contains("\"recommend_ad") ||
-                lowerBody.contains("\"recommend_card_ad") ||
-                lowerBody.contains("\"promotion") ||
-                lowerBody.contains("\"promo") ||
-                lowerBody.contains("\"ad_material") ||
-                lowerBody.contains("\"material_url") ||
-                lowerBody.contains("\"landing_url") ||
-                lowerBody.contains("\"click_url"))) {
-            score += 3
-            reasons += "push-recommend-ad-extended"
-        }
-        if ((lowerBody.contains("\"push_message") ||
-                lowerBody.contains("\"notification_message") ||
-                lowerBody.contains("\"system_message") ||
-                lowerBody.contains("\"operation_message")) &&
-            (lowerBody.contains("\"ad_card") ||
-                lowerBody.contains("\"promo_card") ||
-                lowerBody.contains("\"recommend_card") ||
-                lowerBody.contains("\"show_url") ||
-                lowerBody.contains("\"click_url") ||
-                lowerBody.contains("\"material_url")) &&
-            (lowerBody.contains("\"ad_material" ) ||
-                lowerBody.contains("\"landing_url") ||
-                lowerBody.contains("\"deep_link") ||
-                lowerBody.contains("\"download_url"))) {
-            score += 4
-            reasons += "push-message-ad-card-extended"
-        }
-        if ((lowerBody.contains("\"message_center") ||
-                lowerBody.contains("\"inbox_list") ||
-                lowerBody.contains("\"notify_list") ||
-                lowerBody.contains("\"bulletin_list")) &&
-            (lowerBody.contains("\"recommend_card") ||
-                lowerBody.contains("\"promotion_card") ||
-                lowerBody.contains("\"discover_card") ||
-                lowerBody.contains("\"ad_card") ||
-                lowerBody.contains("\"material_url") ||
-                lowerBody.contains("\"click_url")) &&
-            (lowerBody.contains("\"show_url") ||
-                lowerBody.contains("\"landing_url") ||
-                lowerBody.contains("\"deep_link") ||
-                lowerBody.contains("\"download_url"))) {
-            score += 4
-            reasons += "message-center-recommend-ad-extended"
-        }
-        if ((lowerBody.contains("\"discover") ||
-                lowerBody.contains("\"recommend") ||
-                lowerBody.contains("\"guess_like") ||
-                lowerBody.contains("\"you_may_like")) &&
-            (lowerBody.contains("\"promotion_card") ||
-                lowerBody.contains("\"sponsor_card") ||
-                lowerBody.contains("\"ad_card") ||
-                lowerBody.contains("\"landing_url") ||
-                lowerBody.contains("\"material_url") ||
-                lowerBody.contains("\"show_url")) &&
-            (lowerBody.contains("\"click_url") ||
-                lowerBody.contains("\"deep_link") ||
-                lowerBody.contains("\"download_url") ||
-                lowerBody.contains("\"ad_material"))) {
-            score += 4
-            reasons += "discover-recommend-ad-extended"
-        }
-        if ((lowerBody.contains("\"message_center") ||
-                lowerBody.contains("\"inbox") ||
-                lowerBody.contains("\"notify") ||
-                lowerBody.contains("\"bulletin") ||
-                lowerBody.contains("\"notice")) &&
-            (lowerBody.contains("\"message_center_ad\"") ||
-                lowerBody.contains("\"message_center_banner\"") ||
-                lowerBody.contains("\"inbox_ad\"") ||
-                lowerBody.contains("\"notify_ad\"") ||
-                lowerBody.contains("\"promotion_card\"") ||
-                lowerBody.contains("\"promo_card\"") ||
-                lowerBody.contains("\"operation_banner\"") ||
-                lowerBody.contains("\"operation_card\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\"") ||
-                lowerBody.contains("\"download_url\""))) {
-            score += 4
-            reasons += "message-center-ad-material-extended"
-        }
-        if ((lowerBody.contains("\"sign") ||
-                lowerBody.contains("\"daily") ||
-                lowerBody.contains("\"mission") ||
-                lowerBody.contains("\"task") ||
-                lowerBody.contains("\"benefit") ||
-                lowerBody.contains("\"welfare")) &&
-            (lowerBody.contains("\"sign_popup_ad\"") ||
-                lowerBody.contains("\"daily_popup_ad\"") ||
-                lowerBody.contains("\"mission_popup_ad\"") ||
-                lowerBody.contains("\"task_popup_ad\"") ||
-                lowerBody.contains("\"benefit_popup_ad\"") ||
-                lowerBody.contains("\"welfare_popup_ad\"") ||
-                lowerBody.contains("\"watch_ad_task\"") ||
-                lowerBody.contains("\"coin_bonus\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 4
-            reasons += "sign-task-benefit-ad-extended"
-        }
-        if ((lowerBody.contains("\"reader") ||
-                lowerBody.contains("\"chapter") ||
-                lowerBody.contains("\"reading") ||
-                lowerBody.contains("\"book")) &&
-            (lowerBody.contains("\"reader_sign_reward\"") ||
-                lowerBody.contains("\"novel_sign_task\"") ||
-                lowerBody.contains("\"sign_popup_ad\"") ||
-                lowerBody.contains("\"benefit_popup_ad\"") ||
-                lowerBody.contains("\"welfare_popup_ad\"") ||
-                lowerBody.contains("\"mission_popup_ad\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 4
-            reasons += "reader-sign-benefit-ad-extended"
-        }
-        val startupSceneHit = lowerBody.contains("\"startup") ||
-            lowerBody.contains("\"launch") ||
-            lowerBody.contains("\"splash") ||
-            lowerBody.contains("\"popup") ||
-            lowerBody.contains("\"interstitial")
-        val startupConfigHit = lowerBody.contains("\"startup_config") ||
-            lowerBody.contains("\"launch_config") ||
-            lowerBody.contains("\"splash_config") ||
-            lowerBody.contains("\"popup_config") ||
-            lowerBody.contains("\"interstitial_config") ||
-            lowerBody.contains("\"open_screen") ||
-            lowerBody.contains("\"open_screen_ad") ||
-            lowerBody.contains("\"launch_ad") ||
-            lowerBody.contains("\"startup_ad") ||
-            lowerBody.contains("\"interstitial_ad") ||
-            lowerBody.contains("\"open_screen_cache") ||
-            lowerBody.contains("\"splash_cache") ||
-            lowerBody.contains("\"startup_cache") ||
-            lowerBody.contains("\"launch_cache") ||
-            lowerBody.contains("\"startup_banner")
-        val adMaterialHit = lowerBody.contains("\"show_url") ||
-            lowerBody.contains("\"click_url") ||
-            lowerBody.contains("\"landing_url") ||
-            lowerBody.contains("\"download_url") ||
-            lowerBody.contains("\"ad_material") ||
-            lowerBody.contains("\"material_url") ||
-            lowerBody.contains("\"ad_dispatch")
-        if (startupSceneHit && startupConfigHit && adMaterialHit) {
-            score += 2
-            reasons += "startup-ad-extended"
-        }
-        if ((lowerBody.contains("\"startup") || lowerBody.contains("\"launch") || lowerBody.contains("\"splash") || lowerBody.contains("\"open_screen")) &&
-            (lowerBody.contains("\"startup_page_ad\"") ||
-                lowerBody.contains("\"launch_screen_ad\"") ||
-                lowerBody.contains("\"open_screen_material\"") ||
-                lowerBody.contains("\"splash_material\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 3
-            reasons += "startup-ad-material-extended"
-        }
-        if ((lowerBody.contains("\"startup") || lowerBody.contains("\"launch") || lowerBody.contains("\"splash") || lowerBody.contains("\"open_screen\"")) &&
-            (lowerBody.contains("\"open_screen_cache\"") ||
-                lowerBody.contains("\"startup_cache_material\"") ||
-                lowerBody.contains("\"launch_cache_material\"") ||
-                lowerBody.contains("\"splash_cache_material\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 3
-            reasons += "startup-ad-cache-extended"
-        }
-        if ((lowerBody.contains("\"startup") || lowerBody.contains("\"launch") || lowerBody.contains("\"splash") || lowerBody.contains("\"open_screen\"")) &&
-            (lowerBody.contains("\"startup_preload_ad\"") ||
-                lowerBody.contains("\"launch_preload_ad\"") ||
-                lowerBody.contains("\"splash_template_ad\"") ||
-                lowerBody.contains("\"open_screen_dispatch\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 3
-            reasons += "startup-ad-preload-extended"
-        }
-        if ((lowerBody.contains("\"qimao\"") || lowerBody.contains("\"kmxs\"") || lowerBody.contains("\"wtzw\"") || lowerBody.contains("\"reader\"")) &&
-            (lowerBody.contains("\"chapter_unlock\"") ||
-                lowerBody.contains("\"watch_ad_unlock\"") ||
-                lowerBody.contains("\"free_read_popup\"") ||
-                lowerBody.contains("\"reader_reward_popup\"") ||
-                lowerBody.contains("\"novel_welfare_center\"") ||
-                lowerBody.contains("\"novel_task_center\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 4
-            reasons += "qimao-reader-ad-extended"
-        }
-        if ((lowerBody.contains("\"banner") || lowerBody.contains("\"bottom_banner") || lowerBody.contains("\"floating_banner")) &&
-            (lowerBody.contains("\"show_url") || lowerBody.contains("\"click_url") || lowerBody.contains("\"material"))) {
-            score += 1
-            reasons += "banner-ad-cluster"
-        }
-        if ((lowerBody.contains("\"reader") || lowerBody.contains("\"chapter") || lowerBody.contains("\"reading")) &&
-            (lowerBody.contains("\"bottom_banner") || lowerBody.contains("\"insert_ad") || lowerBody.contains("\"watch_ad_unlock") || lowerBody.contains("\"unlock_by_ad"))) {
-            score += 2
-            reasons += "reader-ad-cluster"
-        }
-        if ((lowerBody.contains("\"reader") || lowerBody.contains("\"chapter") || lowerBody.contains("\"page") || lowerBody.contains("\"reading")) &&
-            (lowerBody.contains("\"reader_bottom_ad") ||
-                lowerBody.contains("\"reader_bottom_banner") ||
-                lowerBody.contains("\"page_turn_ad") ||
-                lowerBody.contains("\"turn_page_ad") ||
-                lowerBody.contains("\"flip_page_ad") ||
-                lowerBody.contains("\"page_insert_ad") ||
-                lowerBody.contains("\"chapter_next_ad") ||
-                lowerBody.contains("\"reading_interstitial"))) {
-            score += 2
-            reasons += "reader-page-ad-extended"
-        }
-        if ((lowerBody.contains("\"reader") || lowerBody.contains("\"chapter") || lowerBody.contains("\"page") || lowerBody.contains("\"reading") || lowerBody.contains("\"book\"")) &&
-            (lowerBody.contains("\"page_footer_ad\"") ||
-                lowerBody.contains("\"chapter_footer_ad\"") ||
-                lowerBody.contains("\"reader_footer_ad\"") ||
-                lowerBody.contains("\"bottom_float_ad\"") ||
-                lowerBody.contains("\"page_swipe_ad\"") ||
-                lowerBody.contains("\"swipe_page_ad\"") ||
-                lowerBody.contains("\"next_page_ad\"") ||
-                lowerBody.contains("\"turn_page_banner\"") ||
-                lowerBody.contains("\"page_corner_ad\"") ||
-                lowerBody.contains("\"chapter_end_ad\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 3
-            reasons += "reader-page-ad-material-extended"
-        }
-        if ((lowerBody.contains("\"reader") || lowerBody.contains("\"chapter") || lowerBody.contains("\"page") || lowerBody.contains("\"reading") || lowerBody.contains("\"book\"")) &&
-            (lowerBody.contains("\"page_end_popup\"") ||
-                lowerBody.contains("\"reader_page_popup\"") ||
-                lowerBody.contains("\"chapter_page_popup\"") ||
-                lowerBody.contains("\"page_tail_ad\"") ||
-                lowerBody.contains("\"chapter_tail_ad\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 3
-            reasons += "reader-page-popup-extended"
-        }
-        if ((lowerBody.contains("\"reader") || lowerBody.contains("\"chapter") || lowerBody.contains("\"page") || lowerBody.contains("\"reading") || lowerBody.contains("\"book\"")) &&
-            (lowerBody.contains("\"page_tail_popup\"") ||
-                lowerBody.contains("\"chapter_tail_popup\"") ||
-                lowerBody.contains("\"reader_tail_popup\"") ||
-                lowerBody.contains("\"page_end_card\"") ||
-                lowerBody.contains("\"chapter_end_card\"") ||
-                lowerBody.contains("\"swipe_reward_ad\"") ||
-                lowerBody.contains("\"page_flip_reward\"") ||
-                lowerBody.contains("\"reader_next_popup\"") ||
-                lowerBody.contains("\"chapter_next_popup\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 3
-            reasons += "reader-page-tail-extended"
-        }
-        if ((lowerBody.contains("\"coolapk\"") || lowerBody.contains("\"comment\"") || lowerBody.contains("\"reply\"") || lowerBody.contains("\"post\"")) &&
-            (lowerBody.contains("\"comment_feed_ad\"") ||
-                lowerBody.contains("\"comment_flow_ad\"") ||
-                lowerBody.contains("\"reply_flow_ad\"") ||
-                lowerBody.contains("\"comment_overlay_ad\"") ||
-                lowerBody.contains("\"comment_float_card\"") ||
-                lowerBody.contains("\"reply_float_card\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 3
-            reasons += "coolapk-comment-ad-extended"
-        }
-        if ((lowerBody.contains("\"gdt\"") || lowerBody.contains("\"youlianghui\"") || lowerBody.contains("\"guangdiantong\"") || lowerBody.contains("\"adqq\"")) &&
-            (lowerBody.contains("\"waterfall\"") ||
-                lowerBody.contains("\"mediation\"") ||
-                lowerBody.contains("\"bidding_token\"") ||
-                lowerBody.contains("\"auction_id\"") ||
-                lowerBody.contains("\"ad_material\"") ||
-                lowerBody.contains("\"placement_id\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 4
-            reasons += "gdt-sdk-ad-extended"
-        }
-        if ((lowerBody.contains("\"alipay\"") || lowerBody.contains("\"alimama\"") || lowerBody.contains("\"tanx\"") || lowerBody.contains("\"adash\"")) &&
-            (lowerBody.contains("\"ad_material\"") ||
-                lowerBody.contains("\"ad_strategy\"") ||
-                lowerBody.contains("\"waterfall\"") ||
-                lowerBody.contains("\"placement_id\"") ||
-                lowerBody.contains("\"template_id\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 4
-            reasons += "ali-sdk-ad-extended"
-        }
-        if ((lowerBody.contains("\"pangolin\"") || lowerBody.contains("\"pangle\"") || lowerBody.contains("\"gromore\"") || lowerBody.contains("\"snssdk\"")) &&
-            (lowerBody.contains("\"waterfall\"") ||
-                lowerBody.contains("\"mediation\"") ||
-                lowerBody.contains("\"preload_ad\"") ||
-                lowerBody.contains("\"ad_material\"") ||
-                lowerBody.contains("\"ad_slot\"") ||
-                lowerBody.contains("\"rit\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 4
-            reasons += "shortvideo-sdk-ad-extended"
-        }
-        if ((lowerBody.contains("\"drama") || lowerBody.contains("\"episode") || lowerBody.contains("\"short_video") || lowerBody.contains("\"short_drama")) &&
-            (lowerBody.contains("\"reward_popup") || lowerBody.contains("\"patch_ad") || lowerBody.contains("\"insert_ad") || lowerBody.contains("\"ad_material"))) {
-            score += 2
-            reasons += "drama-ad-cluster"
-        }
-        if ((lowerBody.contains("\"live") || lowerBody.contains("\"stream") || lowerBody.contains("\"anchor")) &&
-            (lowerBody.contains("\"live_ad") || lowerBody.contains("\"floating_banner") || lowerBody.contains("\"show_url") || lowerBody.contains("\"material"))) {
-            score += 2
-            reasons += "live-ad-cluster"
-        }
-        if ((lowerBody.contains("\"comic") || lowerBody.contains("\"manga") || lowerBody.contains("\"chapter")) &&
-            (lowerBody.contains("\"unlock_by_ad") || lowerBody.contains("\"chapter_unlock_ad") || lowerBody.contains("\"reward_popup"))) {
-            score += 2
-            reasons += "comic-ad-cluster"
-        }
-        val rewardSceneHit = lowerBody.contains("\"reward") ||
-            lowerBody.contains("\"unlock") ||
-            lowerBody.contains("\"bonus") ||
-            lowerBody.contains("\"task")
-        val rewardPlacementHit = lowerBody.contains("\"reward_popup") ||
-            lowerBody.contains("\"watch_ad_unlock") ||
-            lowerBody.contains("\"unlock_by_ad") ||
-            lowerBody.contains("\"chapter_unlock_ad") ||
-            lowerBody.contains("\"free_read_card") ||
-            lowerBody.contains("\"task_reward")
-        if (rewardSceneHit && rewardPlacementHit && (adMaterialHit || lowerBody.contains("\"reader") || lowerBody.contains("\"chapter") || lowerBody.contains("\"comic"))) {
-            score += 2
-            reasons += "reward-ad-extended"
-        }
-        if ((lowerBody.contains("\"task") || lowerBody.contains("\"benefit") || lowerBody.contains("\"welfare") || lowerBody.contains("\"coin")) &&
-            (lowerBody.contains("\"task_center\"") ||
-                lowerBody.contains("\"benefit_center\"") ||
-                lowerBody.contains("\"welfare_center\"") ||
-                lowerBody.contains("\"watch_ad_task\"") ||
-                lowerBody.contains("\"daily_reward\"") ||
-                lowerBody.contains("\"coin_bonus\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 3
-            reasons += "task-benefit-ad-extended"
-        }
-        if ((lowerBody.contains("\"waterfall\"") || lowerBody.contains("\"mediation\"") || lowerBody.contains("\"bidding\"") || lowerBody.contains("\"auction\"")) &&
-            (lowerBody.contains("\"placement_id\"") ||
-                lowerBody.contains("\"slot_id\"") ||
-                lowerBody.contains("\"template_id\"") ||
-                lowerBody.contains("\"ad_strategy\"") ||
-                lowerBody.contains("\"ad_dispatch\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
-            score += 3
-            reasons += "mediation-ad-extended"
-        }
-        if ((lowerBody.contains("\"comment") || lowerBody.contains("\"reply") || lowerBody.contains("\"floor")) &&
-            (lowerBody.contains("\"comment_guide_ad") ||
-                lowerBody.contains("\"comment_hot_ad") ||
-                lowerBody.contains("\"comment_float_ad") ||
-                lowerBody.contains("\"comment_promote_card") ||
-                lowerBody.contains("\"comment_stream_ad") ||
-                lowerBody.contains("\"reply_promote_card") ||
-                lowerBody.contains("\"floor_insert_ad") ||
-                lowerBody.contains("\"comment_promote"))) {
-            score += 2
-            reasons += "comment-ad-insert-extended"
-        }
-        if ((lowerBody.contains("\"comment") || lowerBody.contains("\"reply") || lowerBody.contains("\"floor") || lowerBody.contains("\"post")) &&
-            (lowerBody.contains("\"comment_promote\"") ||
-                lowerBody.contains("\"reply_promote\"") ||
-                lowerBody.contains("\"floor_promote\"") ||
-                lowerBody.contains("\"comment_material\"") ||
-                lowerBody.contains("\"reply_material\"") ||
-                lowerBody.contains("\"floor_material\"") ||
-                lowerBody.contains("\"comment_landing_url\"") ||
-                lowerBody.contains("\"reply_landing_url\"") ||
-                lowerBody.contains("\"post_landing_url\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
+        if (commentOrPostSceneHit && commentMaterialSceneHit &&
+            (adMaterialHit || deepLinkMaterialHit || recommendCardHit)) {
             score += 3
             reasons += "comment-ad-material-extended"
         }
-        if ((lowerBody.contains("\"comment") || lowerBody.contains("\"reply") || lowerBody.contains("\"floor") || lowerBody.contains("\"post\"")) &&
-            (lowerBody.contains("\"comment_popup_ad\"") ||
-                lowerBody.contains("\"comment_bottom_ad\"") ||
-                lowerBody.contains("\"reply_bottom_ad\"") ||
-                lowerBody.contains("\"floor_bottom_ad\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
+        if (commentOrPostSceneHit && commentPopupSceneHit &&
+            (adMaterialHit || deepLinkMaterialHit)) {
             score += 3
             reasons += "comment-ad-popup-extended"
         }
-        if ((lowerBody.contains("pause-ad") || lowerBody.contains("player-ad") || lowerBody.contains("reward-pop") || lowerBody.contains("offerwall")) &&
-            (lowerBody.contains("click_url") || lowerBody.contains("show_url") || lowerBody.contains("material") || lowerBody.contains("landing"))) {
+        if (commentOrPostSceneHit && commentFloatSceneHit) {
+            score += 2
+            reasons += "comment-ad-float-extended"
+        }
+        if (commentOrPostSceneHit && commentFlowSceneHit &&
+            adMaterialHit) {
+            score += 3
+            reasons += "comment-ad-flow-extended"
+        }
+        if (feedSceneHit &&
+            containsAny("\"ad_card", "\"insert_ad", "\"feed_ad")) {
+            score += 1
+            reasons += "feed-ad-cluster"
+        }
+        if (recommendFeedSceneHit && feedExtendedSceneHit) {
+            score += 2
+            reasons += "feed-ad-extended"
+        }
+        if (pushSceneHit && (pushRecommendSceneHit || adMaterialHit)) {
+            score += 3
+            reasons += "push-recommend-ad-extended"
+        }
+        if (pushSceneHit && pushMaterialSceneHit &&
+            (adMaterialHit || deepLinkMaterialHit || recommendCardHit)) {
+            score += 4
+            reasons += "push-recommend-material-extended"
+        }
+        if (directMessageSceneHit &&
+            (directMessageAdSceneHit || adMaterialHit) &&
+            deepLinkMaterialHit) {
+            score += 4
+            reasons += "push-message-ad-card-extended"
+        }
+        if (messageCenterSceneHit &&
+            (recommendCardHit || adMaterialHit) &&
+            (adMaterialHit || deepLinkMaterialHit)) {
+            score += 4
+            reasons += "message-center-recommend-ad-extended"
+        }
+        if (messageCenterSceneHit && messageCenterCardSceneHit &&
+            (adMaterialHit || deepLinkMaterialHit || recommendCardHit)) {
+            score += 4
+            reasons += "message-center-card-ad-extended"
+        }
+        if (discoverSceneHit && discoverAdSceneHit &&
+            (deepLinkMaterialHit || materialUrlSceneHit)) {
+            score += 4
+            reasons += "discover-recommend-ad-extended"
+        }
+        if (messageCenterMaterialSceneHit && messageCenterAdSceneHit && clickOrMaterialSceneHit) {
+            score += 4
+            reasons += "message-center-ad-material-extended"
+        }
+        val signTaskBenefitSceneHit = containsAny(
+            "\"sign", "\"daily", "\"mission", "\"task", "\"benefit", "\"welfare"
+        )
+        val signTaskBenefitPlacementHit = containsAny(
+            "\"sign_popup_ad\"", "\"daily_popup_ad\"", "\"mission_popup_ad\"", "\"task_popup_ad\"",
+            "\"benefit_popup_ad\"", "\"welfare_popup_ad\"", "\"watch_ad_task\"", "\"coin_bonus\""
+        )
+        val readerSignBenefitPlacementHit = containsAny(
+            "\"reader_sign_reward\"", "\"novel_sign_task\"", "\"sign_popup_ad\"", "\"benefit_popup_ad\"",
+            "\"welfare_popup_ad\"", "\"mission_popup_ad\""
+        )
+        val readerSceneHit = containsAny("\"reader", "\"chapter", "\"reading", "\"book")
+        if (signTaskBenefitSceneHit && signTaskBenefitPlacementHit && materialUrlSceneHit) {
+            score += 4
+            reasons += "sign-task-benefit-ad-extended"
+        }
+        if (readerSceneHit && readerSignBenefitPlacementHit && materialUrlSceneHit) {
+            score += 4
+            reasons += "reader-sign-benefit-ad-extended"
+        }
+        val startupSceneHit = containsAny("\"startup", "\"launch", "\"splash", "\"popup", "\"interstitial")
+        val openScreenSceneHit = lowerBody.contains("\"open_screen")
+        val startupOpenScreenSceneHit = startupSceneHit || openScreenSceneHit
+        val startupConfigHit = containsAny(
+            "\"startup_config", "\"launch_config", "\"splash_config", "\"popup_config", "\"interstitial_config",
+            "\"open_screen", "\"open_screen_ad", "\"launch_ad", "\"startup_ad", "\"interstitial_ad",
+            "\"open_screen_cache", "\"splash_cache", "\"startup_cache", "\"launch_cache", "\"startup_banner"
+        )
+        val adDispatchHit = lowerBody.contains("\"ad_dispatch")
+        val downloadUrlHit = lowerBody.contains("\"download_url")
+        val startupAdMaterialHit = adMaterialHit || adDispatchHit || downloadUrlHit
+        val pageSceneHit = lowerBody.contains("\"page")
+        val readerPageSceneHit = readerSceneHit || pageSceneHit
+        if (startupSceneHit && startupConfigHit && startupAdMaterialHit) {
+            score += 2
+            reasons += "startup-ad-extended"
+        }
+        val startupMaterialPlacementHit = containsAny(
+            "\"startup_page_ad\"", "\"launch_screen_ad\"", "\"open_screen_material\"", "\"splash_material\""
+        )
+        val startupCachePlacementHit = containsAny(
+            "\"open_screen_cache\"", "\"startup_cache_material\"", "\"launch_cache_material\"", "\"splash_cache_material\""
+        )
+        val startupPreloadPlacementHit = containsAny(
+            "\"startup_preload_ad\"", "\"launch_preload_ad\"", "\"splash_template_ad\"", "\"open_screen_dispatch\""
+        )
+        if (startupOpenScreenSceneHit && startupMaterialPlacementHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "startup-ad-material-extended"
+        }
+        if (startupOpenScreenSceneHit && startupCachePlacementHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "startup-ad-cache-extended"
+        }
+        if (startupOpenScreenSceneHit && startupPreloadPlacementHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "startup-ad-preload-extended"
+        }
+        val qimaoReaderSceneHit = containsAny("\"qimao\"", "\"kmxs\"", "\"wtzw\"") || readerSceneHit
+        val qimaoReaderPlacementHit = containsAny(
+            "\"chapter_unlock\"", "\"watch_ad_unlock\"", "\"free_read_popup\"", "\"reader_reward_popup\"",
+            "\"novel_welfare_center\"", "\"novel_task_center\""
+        )
+        if (qimaoReaderSceneHit && qimaoReaderPlacementHit && materialUrlSceneHit) {
+            score += 4
+            reasons += "qimao-reader-ad-extended"
+        }
+        val bannerSceneHit = containsAny("\"banner", "\"bottom_banner", "\"floating_banner")
+        val bannerMaterialPlacementHit = containsAny("\"show_url", "\"click_url", "\"material")
+        if (bannerSceneHit && bannerMaterialPlacementHit) {
+            score += 1
+            reasons += "banner-ad-cluster"
+        }
+        val readerAdPlacementClusterHit = containsAny("\"bottom_banner", "\"insert_ad", "\"watch_ad_unlock", "\"unlock_by_ad")
+        if (readerSceneHit && readerAdPlacementClusterHit) {
+            score += 2
+            reasons += "reader-ad-cluster"
+        }
+        val readerPageAdPlacementHit = containsAny(
+            "\"reader_bottom_ad\"", "\"reader_bottom_banner\"", "\"page_turn_ad\"", "\"turn_page_ad\"",
+            "\"flip_page_ad\"", "\"page_insert_ad\"", "\"chapter_next_ad\"", "\"reading_interstitial\""
+        )
+        val readerPageMaterialPlacementHit = containsAny(
+            "\"page_footer_ad\"", "\"chapter_footer_ad\"", "\"reader_footer_ad\"", "\"bottom_float_ad\"",
+            "\"page_swipe_ad\"", "\"swipe_page_ad\"", "\"next_page_ad\"", "\"turn_page_banner\"",
+            "\"page_corner_ad\"", "\"chapter_end_ad\""
+        )
+        val readerPagePopupPlacementHit = containsAny(
+            "\"page_end_popup\"", "\"reader_page_popup\"", "\"chapter_page_popup\"", "\"page_tail_ad\"", "\"chapter_tail_ad\""
+        )
+        val readerPageTailPlacementHit = containsAny(
+            "\"page_tail_popup\"", "\"chapter_tail_popup\"", "\"reader_tail_popup\"", "\"page_end_card\"",
+            "\"chapter_end_card\"", "\"swipe_reward_ad\"", "\"page_flip_reward\"", "\"reader_next_popup\"", "\"chapter_next_popup\""
+        )
+        val coolapkSceneHit = lowerBody.contains("\"coolapk\"")
+        val coolapkCommentSceneHit = coolapkSceneHit || commentOrPostSceneHit
+        val coolapkCommentPlacementHit = containsAny(
+            "\"comment_feed_ad\"", "\"comment_flow_ad\"", "\"reply_flow_ad\"", "\"comment_overlay_ad\"",
+            "\"comment_float_card\"", "\"reply_float_card\""
+        )
+        val gdtSdkSceneHit = containsAny("\"gdt\"", "\"youlianghui\"", "\"guangdiantong\"", "\"adqq\"")
+        val sdkMediationSceneHit = containsAny("\"waterfall\"", "\"mediation\"")
+        val sdkAdMaterialPlacementHit = containsAny("\"ad_material\"", "\"placement_id\"")
+        val gdtSdkPlacementHit = containsAny(
+            "\"bidding_token\"", "\"auction_id\""
+        ) || (sdkMediationSceneHit && sdkAdMaterialPlacementHit)
+        val aliSdkSceneHit = containsAny("\"alipay\"", "\"alimama\"", "\"tanx\"", "\"adash\"")
+        val aliSdkPlacementHit = containsAny(
+            "\"ad_strategy\"", "\"template_id\""
+        ) || (sdkMediationSceneHit && sdkAdMaterialPlacementHit)
+        val shortvideoSdkSceneHit = containsAny("\"pangolin\"", "\"pangle\"", "\"gromore\"", "\"snssdk\"")
+        val shortvideoSdkPlacementHit = containsAny(
+            "\"preload_ad\"", "\"ad_slot\"", "\"rit\""
+        ) || (sdkMediationSceneHit && adMaterialHit)
+        val taskBenefitSceneHit = containsAny("\"task\"", "\"benefit\"", "\"welfare\"", "\"coin\"")
+        val taskBenefitPlacementHit = containsAny(
+            "\"task_center\"", "\"benefit_center\"", "\"welfare_center\"", "\"watch_ad_task\"", "\"daily_reward\"", "\"coin_bonus\""
+        )
+        val mediationSceneHit = sdkMediationSceneHit || containsAny("\"bidding\"", "\"auction\"")
+        val mediationPlacementHit = containsAny(
+            "\"placement_id\"", "\"slot_id\"", "\"template_id\"", "\"ad_strategy\"", "\"ad_dispatch\""
+        )
+        val commentSceneExtendedForInsertHit = commentSceneHit
+        val commentInsertPlacementHit = containsAny(
+            "\"comment_guide_ad\"", "\"comment_hot_ad\"", "\"comment_float_ad\"", "\"comment_promote_card\"",
+            "\"comment_stream_ad\"", "\"reply_promote_card\"", "\"floor_insert_ad\"", "\"comment_promote\""
+        )
+        val commentMaterialSceneExtendedHit = commentOrPostSceneHit
+        val commentMaterialPlacementHit = containsAny(
+            "\"comment_promote\"", "\"reply_promote\"", "\"floor_promote\"", "\"comment_material\"",
+            "\"reply_material\"", "\"floor_material\"", "\"comment_landing_url\"", "\"reply_landing_url\"", "\"post_landing_url\""
+        )
+        val commentPopupPlacementExtendedHit = containsAny(
+            "\"comment_popup_ad\"", "\"comment_bottom_ad\"", "\"reply_bottom_ad\"", "\"floor_bottom_ad\""
+        )
+        if (readerPageSceneHit && readerPageAdPlacementHit) {
+            score += 2
+            reasons += "reader-page-ad-extended"
+        }
+        if (readerPageSceneHit && readerPageMaterialPlacementHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "reader-page-ad-material-extended"
+        }
+        if (readerPageSceneHit && readerPagePopupPlacementHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "reader-page-popup-extended"
+        }
+        if (readerPageSceneHit && readerPageTailPlacementHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "reader-page-tail-extended"
+        }
+        if (coolapkCommentSceneHit && coolapkCommentPlacementHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "coolapk-comment-ad-extended"
+        }
+        if (gdtSdkSceneHit && gdtSdkPlacementHit && materialUrlSceneHit) {
+            score += 4
+            reasons += "gdt-sdk-ad-extended"
+        }
+        if (aliSdkSceneHit && aliSdkPlacementHit && materialUrlSceneHit) {
+            score += 4
+            reasons += "ali-sdk-ad-extended"
+        }
+        if (shortvideoSdkSceneHit && shortvideoSdkPlacementHit && materialUrlSceneHit) {
+            score += 4
+            reasons += "shortvideo-sdk-ad-extended"
+        }
+        val rewardPopupHit = lowerBody.contains("\"reward_popup")
+        val watchAdUnlockHit = lowerBody.contains("\"watch_ad_unlock")
+        val unlockByAdHit = lowerBody.contains("\"unlock_by_ad")
+        val chapterUnlockAdHit = lowerBody.contains("\"chapter_unlock_ad")
+        val dramaSceneHit = containsAny("\"drama", "\"episode", "\"short_video", "\"short_drama")
+        val dramaPlacementHit = rewardPopupHit || containsAny("\"patch_ad", "\"insert_ad", "\"ad_material")
+        val liveSceneHit = containsAny("\"live", "\"stream", "\"anchor")
+        val livePlacementHit = containsAny("\"live_ad", "\"floating_banner", "\"show_url", "\"material")
+        val comicSceneHit = containsAny("\"comic", "\"manga", "\"chapter")
+        val comicPlacementHit = unlockByAdHit || chapterUnlockAdHit || rewardPopupHit
+        val sharedUrlPlacementHit = containsAny("show_url", "click_url", "material", "landing")
+        val playerSceneHit = containsAny("pause-ad", "player-ad", "reward-pop", "offerwall")
+        val playerPlacementHit = sharedUrlPlacementHit
+        val playerExtendedSceneHit = containsAny(
+            "\"pause_ad\"", "\"player_ad\"", "\"preroll_ad\"", "\"midroll_ad\"", "\"postroll_ad\""
+        )
+        val splashSceneHit = containsAny("splash-ad", "open-screen", "startup-banner", "launch-ad")
+        val splashPlacementHit = lowerBody.contains("ad_material") || sharedUrlPlacementHit || adDispatchHit
+        if (dramaSceneHit && dramaPlacementHit) {
+            score += 2
+            reasons += "drama-ad-cluster"
+        }
+        if (liveSceneHit && livePlacementHit) {
+            score += 2
+            reasons += "live-ad-cluster"
+        }
+        if (comicSceneHit && comicPlacementHit) {
+            score += 2
+            reasons += "comic-ad-cluster"
+        }
+        val rewardSceneHit = containsAny("\"reward", "\"unlock", "\"bonus", "\"task")
+        val rewardPlacementHit = rewardPopupHit || watchAdUnlockHit || unlockByAdHit || chapterUnlockAdHit ||
+            containsAny("\"free_read_card", "\"task_reward")
+        val rewardComicSceneHit = lowerBody.contains("\"comic")
+        if (rewardSceneHit && rewardPlacementHit && (adMaterialHit || readerSceneHit || rewardComicSceneHit)) {
+            score += 2
+            reasons += "reward-ad-extended"
+        }
+        if (taskBenefitSceneHit && taskBenefitPlacementHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "task-benefit-ad-extended"
+        }
+        if (mediationSceneHit && mediationPlacementHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "mediation-ad-extended"
+        }
+        if (commentSceneExtendedForInsertHit && commentInsertPlacementHit) {
+            score += 2
+            reasons += "comment-ad-insert-extended"
+        }
+        if (commentMaterialSceneExtendedHit && commentMaterialPlacementHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "comment-ad-material-extended"
+        }
+        if (commentMaterialSceneExtendedHit && commentPopupPlacementExtendedHit && materialUrlSceneHit) {
+            score += 3
+            reasons += "comment-ad-popup-extended"
+        }
+        if (playerSceneHit && playerPlacementHit) {
             score += 2
             reasons += "player-ad-cluster"
         }
-        if ((lowerBody.contains("\"pause_ad\"") ||
-                lowerBody.contains("\"player_ad\"") ||
-                lowerBody.contains("\"preroll_ad\"") ||
-                lowerBody.contains("\"midroll_ad\"") ||
-                lowerBody.contains("\"postroll_ad\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
+        if (playerExtendedSceneHit && materialUrlSceneHit) {
             score += 2
             reasons += "player-ad-extended"
         }
-        if ((lowerBody.contains("splash-ad") || lowerBody.contains("open-screen") || lowerBody.contains("startup-banner") || lowerBody.contains("launch-ad")) &&
-            (lowerBody.contains("show_url") || lowerBody.contains("click_url") || lowerBody.contains("ad_material") || lowerBody.contains("ad_dispatch"))) {
+        if (splashSceneHit && splashPlacementHit) {
             score += 2
             reasons += "splash-ad-cluster"
         }
-        if ((lowerBody.contains("\"reader\"") || lowerBody.contains("\"chapter\"") || lowerBody.contains("\"reading\"") || lowerBody.contains("\"book\"")) &&
-            (lowerBody.contains("\"reader_reward_popup\"") ||
-                lowerBody.contains("\"chapter_offerwall\"") ||
-                lowerBody.contains("\"free_read_popup\"") ||
-                lowerBody.contains("\"reader_float_ad\"") ||
-                lowerBody.contains("\"chapter_card_ad\"") ||
-                lowerBody.contains("\"novel_task_center\"") ||
-                lowerBody.contains("\"novel_welfare_center\"")) &&
-            (lowerBody.contains("\"click_url\"") ||
-                lowerBody.contains("\"show_url\"") ||
-                lowerBody.contains("\"material_url\"") ||
-                lowerBody.contains("\"landing_url\""))) {
+        val readerMaterialPlacementHit = containsAny(
+            "\"reader_reward_popup\"", "\"chapter_offerwall\"", "\"free_read_popup\"", "\"reader_float_ad\"",
+            "\"chapter_card_ad\""
+        ) || qimaoReaderPlacementHit
+        if (readerSceneHit && readerMaterialPlacementHit && materialUrlSceneHit) {
             score += 3
             reasons += "reader-ad-material-extended"
         }
@@ -2502,6 +2385,7 @@ object HttpMitmFilter {
         val lowerAccept = normalized["accept"]?.firstOrNull()?.lowercase().orEmpty()
         val pathInspection = inspectSuspiciousHttpPath(lowerPath)
         val context = TlsMitmSessionManager.requireContext()
+        fun containsAny(value: String, vararg tokens: String): Boolean = tokens.any(value::contains)
         val requestDomain = extractRequestDomain(referer)
         reportSuspiciousRedirectDomain(
             host = lowerAuthority,
@@ -2515,7 +2399,6 @@ object HttpMitmFilter {
         val blockedUrl = RuleRepository.isUrlBlocked(context, lowerAuthority, lowerPath, session.appName, requestDomain, destinationPort = destinationPort)
         // 白名单域名允许普通流量直通，但显式命中的拦截规则仍然优先执行
         if (!blockedHost && !blockedUrl && RuleRepository.isWhitelistedDomain(lowerAuthority)) return null
-        if (!blockedHost && !blockedUrl && RuleRepository.isCommunityAppHint(session.appName)) return null
         if (!blockedHost && !blockedUrl && RuleRepository.shouldProtectMediaTraffic(lowerAuthority)) return null
         if (!blockedHost && !blockedUrl && RuleRepository.shouldProtectBusinessTraffic(lowerAuthority)) return null
         var suspiciousScore = 0
@@ -2532,6 +2415,11 @@ object HttpMitmFilter {
         val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         val aggressiveAdApp = RuleRepository.isAggressiveAdAppHint(session.appName)
         val mitmAggressive = isMitmAggressiveMode()
+        val pathMaterialHit = containsAny(lowerPath, "material", "landing", "show_url", "click_url")
+        val locationRecommendCardHit = containsAny(lowerLocation, "recommend_card", "promo_card", "ad_card")
+        val locationMaterialHit = containsAny(lowerLocation, "material_url", "landing_url")
+        val cookieMaterialHit = containsAny(lowerSetCookie, "ad_material", "material_url")
+        val headerMaterialHit = locationMaterialHit || cookieMaterialHit
         val domesticSdkHits = domesticAdSdkKeywords.count { keyword ->
             lowerAuthority.contains(keyword) || lowerPath.contains(keyword) || lowerReferer.contains(keyword) || lowerUserAgent.contains(keyword)
         }
@@ -2542,6 +2430,10 @@ object HttpMitmFilter {
         if (pathInspection.strongSuspicious) {
             suspiciousScore += if (isNovelApp) 4 else 3
             reasons += "path-strong-suspicious"
+        }
+        if (looksLikeCommentAdPath(lowerPath)) {
+            suspiciousScore += 3
+            reasons += "comment-ad-path"
         }
         if (pathInspection.rewardUnlock) {
             suspiciousScore += if (isNovelApp) 4 else 2
@@ -2568,6 +2460,10 @@ object HttpMitmFilter {
             suspiciousScore += if (aggressiveAdApp) 5 else 4
             reasons += "push-recommend-force-inspection"
         }
+        if (locationRecommendCardHit || headerMaterialHit || pathMaterialHit) {
+            suspiciousScore += 1
+            reasons += "header-material-path-signal"
+        }
         if (isKnownAdVendor(vendor)) {
             suspiciousScore += 2
             reasons += "vendor:$vendor"
@@ -2581,55 +2477,65 @@ object HttpMitmFilter {
             suspiciousScore += if (isNovelApp) 4 else 3
             reasons += "novel-app-aggressive"
         }
+        val refererKeywordHit = suspiciousHeaderKeywords.any(lowerReferer::contains)
+        val locationKeywordHit = suspiciousHeaderKeywords.any(lowerLocation::contains)
+        val setCookieKeywordHit = suspiciousHeaderKeywords.any(lowerSetCookie::contains)
+        val locationStrongHeaderHit = strongHeaderKeywords.any(lowerLocation::contains)
+        val setCookieStrongHeaderHit = strongHeaderKeywords.any(lowerSetCookie::contains)
+        val pathStrongKeywordHit = strongResponseAdKeywords.any(lowerPath::contains)
+        val locationStrongKeywordHit = strongResponseAdKeywords.any(lowerLocation::contains)
+        val setCookieStrongKeywordHit = strongResponseAdKeywords.any(lowerSetCookie::contains)
+        val contentTypeStrongKeywordHit = strongResponseAdKeywords.any(lowerContentType::contains)
+        val contentTypeWeakKeywordHit = responseAdKeywords.any(lowerContentType::contains)
         if (pathInspection.suspicious) {
             suspiciousScore += if (isNovelApp) 3 else 2
             reasons += "path-keyword"
         }
-        if (suspiciousHeaderKeywords.any { lowerReferer.contains(it) }) {
+        if (refererKeywordHit) {
             suspiciousScore += if (isNovelApp) 2 else 1
             reasons += "referer-keyword"
         }
-        if (suspiciousHeaderKeywords.any { lowerLocation.contains(it) }) {
+        if (locationKeywordHit) {
             suspiciousScore += if (isNovelApp) 2 else 1
             reasons += "location-keyword"
         }
-        if (suspiciousHeaderKeywords.any { lowerSetCookie.contains(it) }) {
+        if (setCookieKeywordHit) {
             suspiciousScore += if (isNovelApp) 2 else 1
             reasons += "set-cookie-keyword"
         }
-        if (strongHeaderKeywords.any { lowerLocation.contains(it) }) {
+        if (locationStrongHeaderHit) {
             suspiciousScore += 3
             reasons += "location-strong-header"
         }
-        if (strongHeaderKeywords.any { lowerSetCookie.contains(it) }) {
+        if (setCookieStrongHeaderHit) {
             suspiciousScore += 3
             reasons += "set-cookie-strong-header"
         }
-        if (strongResponseAdKeywords.any { lowerPath.contains(it) }) {
+        if (pathStrongKeywordHit) {
             suspiciousScore += 3
             reasons += "path-strong-keyword"
         }
-        if (strongResponseAdKeywords.any { lowerLocation.contains(it) }) {
+        if (locationStrongKeywordHit) {
             suspiciousScore += 3
             reasons += "location-strong-keyword"
         }
-        if (strongResponseAdKeywords.any { lowerSetCookie.contains(it) }) {
+        if (setCookieStrongKeywordHit) {
             suspiciousScore += 3
             reasons += "set-cookie-strong-keyword"
         }
         // 增强追踪字段检测
-        val headerTrackingHits = adTrackingHeaderFields.filter { field ->
+        val headerTrackingHits = adTrackingHeaderFields.count { field ->
             lowerLocation.contains(field) || lowerSetCookie.contains(field)
         }
-        if (headerTrackingHits.isNotEmpty()) {
-            suspiciousScore += if (headerTrackingHits.size >= 2) 4 else (if (isNovelApp) 3 else 2)
+        if (headerTrackingHits > 0) {
+            suspiciousScore += if (headerTrackingHits >= 2) 4 else (if (isNovelApp) 3 else 2)
             reasons += "header-tracking"
         }
-        if (strongResponseAdKeywords.any { lowerContentType.contains(it) }) {
+        if (contentTypeStrongKeywordHit) {
             suspiciousScore += 1
             reasons += "content-type-keyword"
         }
-        if (responseAdKeywords.any { lowerContentType.contains(it) }) {
+        if (contentTypeWeakKeywordHit) {
             suspiciousScore += 1
             reasons += "content-type-weak-keyword"
         }
@@ -2680,10 +2586,6 @@ object HttpMitmFilter {
     }
 
     private fun shouldBlockHttp2ResponseFromHeaders(inspection: Http2HeaderInspection, isNovelApp: Boolean = false): Boolean {
-        val context = TlsMitmSessionManager.requireContext()
-        if (RuleRepository.isCommunityAppHint(inspection.appName) && !RuleRepository.isBlocked(context, inspection.authority, appName = inspection.appName)) {
-            return false
-        }
         val threshold = if (isNovelApp) HTTP2_NOVEL_RESPONSE_BLOCK_SCORE else HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE
         if (inspection.suspiciousScore < threshold) return false
         // 小说 APP 降低拦截门槛
@@ -2691,70 +2593,14 @@ object HttpMitmFilter {
         if (inspection.suspiciousScore >= 4) return true
         val reasons = inspection.suspiciousReasons.toSet()
         if (reasons.any { reason ->
-                reason == "blocked-host" ||
-                    reason == "blocked-url" ||
-                    reason == "general-ad-traffic" ||
-                    reason == "novel-app-aggressive" ||
-                    reason == "novel-protected-path" ||
-                    reason == "domestic-sdk-signal" ||
-                    reason == "reward-unlock-path" ||
-                    reason == "doh-request" ||
-                    reason == "json-ad-field" ||
-                    reason == "json-ad-array" ||
-                    reason == "json-ad-content" ||
-                    reason == "novel-field-cluster" ||
-                    reason == "media-field-cluster" ||
-                    reason == "feed-ad-cluster" ||
-                    reason == "banner-ad-cluster" ||
-                    reason == "reader-ad-cluster" ||
-                    reason == "comment-ad-cluster" ||
-                    reason == "comment-ad-extended" ||
-                    reason == "comment-ad-float-extended" ||
-                    reason == "comment-ad-flow-extended" ||
-                    reason == "comment-ad-insert-extended" ||
-                    reason == "coolapk-comment-ad-extended" ||
-                    reason == "comment-ad-material-extended" ||
-                    reason == "comment-ad-popup-extended" ||
-                    reason == "gdt-sdk-ad-extended" ||
-                    reason == "ali-sdk-ad-extended" ||
-                    reason == "shortvideo-sdk-ad-extended" ||
-                    reason == "video-ad-cluster" ||
-                    reason == "feed-ad-extended" ||
-                    reason == "push-recommend-ad-extended" ||
-                    reason == "message-center-ad-material-extended" ||
-                    reason == "sign-task-benefit-ad-extended" ||
-                    reason == "reader-sign-benefit-ad-extended" ||
-                    reason == "reader-page-ad-extended" ||
-                    reason == "reader-page-ad-material-extended" ||
-                    reason == "reader-page-popup-extended" ||
-                    reason == "reader-page-tail-extended" ||
-                    reason == "reader-ad-material-extended" ||
-                    reason == "qimao-reader-ad-extended" ||
-                    reason == "drama-ad-cluster" ||
-                    reason == "live-ad-cluster" ||
-                    reason == "comic-ad-cluster" ||
-                    reason == "player-ad-cluster" ||
-                    reason == "player-ad-extended" ||
-                    reason == "splash-ad-cluster" ||
-                    reason == "startup-ad-extended" ||
-                    reason == "startup-ad-cache-extended" ||
-                    reason == "startup-ad-preload-extended" ||
-                    reason == "startup-ad-material-extended" ||
-                    reason == "reward-ad-extended" ||
-                    reason == "neutralized-body-reward-unlock" ||
-                    reason == "path-strong-suspicious" ||
-                    reason == "location-strong-header" ||
-                    reason == "set-cookie-strong-header" ||
-                    reason.startsWith("header-field:") ||
-                    reason == "path-strong-keyword" ||
-                    reason == "location-strong-keyword" ||
-                    reason == "set-cookie-strong-keyword"
+                reason in http2ImmediateBlockReasons ||
+                    reason.startsWith("header-field:")
             }
         ) {
             return true
         }
         return inspection.suspiciousScore >= 3 &&
-            reasons.any { it == "path-keyword" || it == "location-keyword" || it == "set-cookie-keyword" } &&
+            reasons.any(http2KeywordBlockReasons::contains) &&
             reasons.any { it.startsWith("vendor:") }
     }
 
@@ -2790,8 +2636,8 @@ object HttpMitmFilter {
             ))
         }
         val strongSuspicious = looksLikeStrongSuspiciousHttpPath(path)
+        val rewardUnlock = looksLikeRewardUnlockPath(path)
         if (strongSuspicious) {
-            val rewardUnlock = looksLikeRewardUnlockPath(path)
             return cachePathInspection(path, PathInspection(suspicious = true, strongSuspicious = true, rewardUnlock = rewardUnlock))
         }
         val suspicious = suspiciousPathKeywords.any { path.contains(it) }
@@ -2800,16 +2646,16 @@ object HttpMitmFilter {
             return cachePathInspection(path, PathInspection(
                 suspicious = suspicious,
                 strongSuspicious = false,
-                rewardUnlock = looksLikeRewardUnlockPath(path)
+                rewardUnlock = rewardUnlock
             ))
         }
         val querySuspicious = suspiciousQueryKeywords.any { keyword ->
-            query.contains("$keyword=") || query.contains("_$keyword=") || query.contains("-$keyword=") || query.contains(keyword)
+            queryContainsKeywordAssignment(query, keyword) || query.contains(keyword)
         }
         return cachePathInspection(path, PathInspection(
             suspicious = suspicious || querySuspicious,
             strongSuspicious = false,
-            rewardUnlock = looksLikeRewardUnlockPath(path)
+            rewardUnlock = rewardUnlock
         ))
     }
 
@@ -2842,18 +2688,27 @@ object HttpMitmFilter {
             "ad_material", "ad_strategy", "ad_platform", "waterfall", "mediation", "biddingtoken", "auctionid",
             "message_center_ad", "promotion_card", "discover_card", "sign_popup_ad", "benefit_popup_ad", "welfare_popup_ad"
         )
-        return strongQueryKeywords.any { keyword ->
-            query.contains("$keyword=") || query.contains("_$keyword=") || query.contains("-$keyword=")
-        }
+        return strongQueryKeywords.any { keyword -> queryContainsKeywordAssignment(query, keyword) }
     }
 
     private fun looksLikeRewardUnlockPath(path: String): Boolean {
         if (path.isBlank()) return false
-        return path.contains("reward") && path.contains("unlock") ||
-            path.contains("watch_ad") ||
-            path.contains("unlock_by_ad") ||
-            path.contains("chapter_unlock") ||
-            path.contains("benefit") && path.contains("task")
+        val rewardHit = path.contains("reward")
+        val unlockHit = path.contains("unlock")
+        val watchAdHit = path.contains("watch_ad")
+        val unlockByAdHit = path.contains("unlock_by_ad")
+        val chapterUnlockHit = path.contains("chapter_unlock")
+        val benefitHit = path.contains("benefit")
+        val taskHit = path.contains("task")
+        return rewardHit && unlockHit ||
+            watchAdHit ||
+            unlockByAdHit ||
+            chapterUnlockHit ||
+            benefitHit && taskHit
+    }
+
+    private fun queryContainsKeywordAssignment(query: String, keyword: String): Boolean {
+        return query.contains("$keyword=") || query.contains("_$keyword=") || query.contains("-$keyword=")
     }
 
     private data class PathInspection(

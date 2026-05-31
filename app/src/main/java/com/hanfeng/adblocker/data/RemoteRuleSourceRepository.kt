@@ -15,6 +15,12 @@ object RemoteRuleSourceRepository {
     private const val READ_TIMEOUT_MILLIS = 20_000
     private const val SYNC_INTERVAL_MILLIS = 24 * 60 * 60 * 1000L
 
+    enum class WhitelistImportMode {
+        BLOCK,
+        ALLOW,
+        REMOVE_CONFLICTS
+    }
+
     suspend fun syncEnabledSources(context: Context, allowWhitelistDomains: Boolean = false): List<RemoteRuleSyncResult> = withContext(Dispatchers.IO) {
         val results = RuleRepository.getRemoteRuleSources(context).filter { it.enabled }.map { source ->
             syncSource(context, source, allowWhitelistDomains)
@@ -35,10 +41,30 @@ object RemoteRuleSourceRepository {
     }
 
     suspend fun syncSource(context: Context, source: RemoteRuleSourceConfig, allowWhitelistDomains: Boolean = false): RemoteRuleSyncResult = withContext(Dispatchers.IO) {
+        syncSource(
+            context = context,
+            source = source,
+            whitelistImportMode = if (allowWhitelistDomains) WhitelistImportMode.ALLOW else WhitelistImportMode.BLOCK
+        )
+    }
+
+    suspend fun syncEnabledSources(context: Context, whitelistImportMode: WhitelistImportMode): List<RemoteRuleSyncResult> = withContext(Dispatchers.IO) {
+        val results = RuleRepository.getRemoteRuleSources(context).filter { it.enabled }.map { source ->
+            syncSource(context, source, whitelistImportMode)
+        }
+        updateLastSyncAtIfSuccessful(context, results)
+        results
+    }
+
+    suspend fun syncSource(
+        context: Context,
+        source: RemoteRuleSourceConfig,
+        whitelistImportMode: WhitelistImportMode
+    ): RemoteRuleSyncResult = withContext(Dispatchers.IO) {
         runCatching {
             val content = downloadText(source.url)
             val analysis = RuleRepository.analyzeImportContent(context, content)
-            if (analysis.whitelistConflictRules > 0 && !allowWhitelistDomains) {
+            if (analysis.whitelistConflictRules > 0 && whitelistImportMode == WhitelistImportMode.BLOCK) {
                 return@withContext RemoteRuleSyncResult(
                     source = source,
                     success = false,
@@ -48,7 +74,16 @@ object RemoteRuleSourceRepository {
                     errorMessage = "规则源包含疑似白名单规则，等待确认"
                 )
             }
-            val addedCount = RuleRepository.replaceRulesForRemoteSource(context, source.id, content, allowWhitelistDomains)
+            val importContent = when (whitelistImportMode) {
+                WhitelistImportMode.REMOVE_CONFLICTS -> RuleRepository.removeWhitelistConflictLines(content)
+                else -> content
+            }
+            val addedCount = RuleRepository.replaceRulesForRemoteSource(
+                context,
+                source.id,
+                importContent,
+                whitelistImportMode == WhitelistImportMode.ALLOW
+            )
             val nonAdCandidates = RuleRepository.getRemoteSourceNonAdCandidates(context, source.id)
             val updatedSource = source.copy(
                 lastUpdatedAt = System.currentTimeMillis(),

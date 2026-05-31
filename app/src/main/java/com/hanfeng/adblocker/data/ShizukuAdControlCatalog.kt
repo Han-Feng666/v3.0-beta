@@ -2,6 +2,8 @@ package com.HanFeng.data
 
 object ShizukuAdControlCatalog {
 
+    private val batchProtectedCategories = setOf("浏览器推荐", "主题壁纸", "锁屏推荐", "系统应用推荐")
+
     data class Preset(
         val id: String,
         val title: String,
@@ -34,10 +36,10 @@ object ShizukuAdControlCatalog {
         ),
         Preset(
             id = "xiaomi-global-search",
-            title = "小米全局搜索",
-            packageName = "com.miui.miwallpaper",
-            description = "适合治理搜索推荐、下滑搜索页推荐和热词内容。",
-            category = "搜索推荐"
+            title = "小米智能助理",
+            packageName = "com.miui.personalassistant",
+            description = "适合治理负一屏推荐、搜索热词、资讯卡片和系统推荐内容。",
+            category = "负一屏推荐"
         ),
         Preset(
             id = "xiaomi-browser",
@@ -59,6 +61,34 @@ object ShizukuAdControlCatalog {
             packageName = "com.android.thememanager",
             description = "适合治理主题商店、壁纸、动态壁纸推荐广告。",
             category = "主题壁纸"
+        ),
+        Preset(
+            id = "xiaomi-content-center",
+            title = "小米内容中心",
+            packageName = "com.miui.contentextension",
+            description = "适合治理系统内容分发、资讯推荐和搜索联动推广。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "xiaomi-reader-promo",
+            title = "小米阅读推荐",
+            packageName = "com.duokan.phone.remotecontroller",
+            description = "适合治理阅读内容推荐、书城活动位和营销入口。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "xiaomi-video",
+            title = "小米视频推荐",
+            packageName = "com.miui.video",
+            description = "适合治理视频频道推荐、精选内容和营销卡片。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "xiaomi-system-ad-service",
+            title = "小米系统广告服务",
+            packageName = "com.miui.systemAdSolution",
+            description = "适合治理系统广告分发、应用内推荐投放和营销素材下发。",
+            category = "系统推广"
         ),
         Preset(
             id = "oppo-app-market",
@@ -89,6 +119,27 @@ object ShizukuAdControlCatalog {
             category = "负一屏推荐"
         ),
         Preset(
+            id = "oppo-video",
+            title = "OPPO 视频推荐",
+            packageName = "com.heytap.yoli",
+            description = "适合治理视频频道推荐、精选内容和营销卡片。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "oppo-search",
+            title = "OPPO 搜索推荐",
+            packageName = "com.heytap.quicksearchbox",
+            description = "适合治理系统搜索联想、热榜推荐和内容分发入口。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "oppo-content-service",
+            title = "OPPO 内容服务推荐",
+            packageName = "com.heytap.reader",
+            description = "适合治理系统内容分发、阅读推荐和资讯联动入口。",
+            category = "内容推荐"
+        ),
+        Preset(
             id = "oppo-game-center",
             title = "OPPO 游戏中心",
             packageName = "com.nearme.gamecenter",
@@ -108,6 +159,27 @@ object ShizukuAdControlCatalog {
             packageName = "com.vivo.browser",
             description = "适合治理浏览器首页、搜索热词和信息流推荐。",
             category = "浏览器推荐"
+        ),
+        Preset(
+            id = "vivo-reader",
+            title = "vivo 内容推荐",
+            packageName = "com.vivo.contentcatcher",
+            description = "适合治理系统内容推荐、资讯卡片和营销流量。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "vivo-search",
+            title = "vivo 搜索推荐",
+            packageName = "com.vivo.globalsearch",
+            description = "适合治理系统搜索联想、热榜推荐和内容分发入口。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "vivo-system-ad-service",
+            title = "vivo 系统广告服务",
+            packageName = "com.vivo.abe",
+            description = "适合治理系统广告分发、推荐素材下发和营销投放能力。",
+            category = "系统推广"
         ),
         Preset(
             id = "vivo-jovi",
@@ -166,6 +238,27 @@ object ShizukuAdControlCatalog {
             category = "内容推荐"
         ),
         Preset(
+            id = "huawei-reader",
+            title = "华为阅读推荐",
+            packageName = "com.huawei.ohos.books",
+            description = "适合治理阅读书城推荐、内容分发和营销活动入口。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "huawei-search",
+            title = "华为搜索推荐",
+            packageName = "com.huawei.search",
+            description = "适合治理系统搜索推荐、热榜词和内容分发入口。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "huawei-reader-service",
+            title = "华为内容服务推荐",
+            packageName = "com.huawei.contentsensor",
+            description = "适合治理系统内容感知推荐、资讯分发和搜索联动入口。",
+            category = "内容推荐"
+        ),
+        Preset(
             id = "honor-app-market",
             title = "荣耀应用市场",
             packageName = "com.hihonor.appmarket",
@@ -180,6 +273,41 @@ object ShizukuAdControlCatalog {
             category = "浏览器推荐"
         ),
         Preset(
+            id = "honor-smart-assistant",
+            title = "荣耀智慧助手推荐",
+            packageName = "com.hihonor.intelligent",
+            description = "适合治理负一屏资讯流、推荐卡片和系统内容推广。",
+            category = "负一屏推荐"
+        ),
+        Preset(
+            id = "honor-video",
+            title = "荣耀视频推荐",
+            packageName = "com.hihonor.video",
+            description = "适合治理视频频道推荐、精选内容和营销位。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "honor-search",
+            title = "荣耀搜索推荐",
+            packageName = "com.hihonor.search",
+            description = "适合治理系统搜索联想、热榜推荐和内容分发入口。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "honor-reader-service",
+            title = "荣耀内容服务推荐",
+            packageName = "com.hihonor.contentsensor",
+            description = "适合治理系统内容分发、资讯推荐和搜索联动入口。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "honor-smart-suggestion",
+            title = "荣耀推荐服务",
+            packageName = "com.hihonor.suggestion",
+            description = "适合治理系统推荐建议、搜索联想和内容发现入口。",
+            category = "内容推荐"
+        ),
+        Preset(
             id = "realme-app-market",
             title = "realme 软件商店",
             packageName = "com.heytap.market",
@@ -187,11 +315,53 @@ object ShizukuAdControlCatalog {
             category = "系统推广"
         ),
         Preset(
+            id = "realme-smart-assistant",
+            title = "realme 负一屏推荐",
+            packageName = "com.heytap.pictorial",
+            description = "适合治理 realme 负一屏资讯、推荐卡片和画报内容。",
+            category = "负一屏推荐"
+        ),
+        Preset(
+            id = "realme-search",
+            title = "realme 搜索推荐",
+            packageName = "com.heytap.quicksearchbox",
+            description = "适合治理 realme 系系统搜索推荐、热榜词和内容分发入口。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "realme-content-service",
+            title = "realme 内容服务推荐",
+            packageName = "com.heytap.reader",
+            description = "适合治理 realme 系内容分发、阅读推荐和资讯联动入口。",
+            category = "内容推荐"
+        ),
+        Preset(
             id = "oneplus-app-market",
             title = "一加应用商店",
             packageName = "com.heytap.market",
             description = "适合治理一加系应用市场推荐和更新推广。",
             category = "系统推广"
+        ),
+        Preset(
+            id = "oneplus-smart-recommend",
+            title = "一加负一屏推荐",
+            packageName = "com.heytap.pictorial",
+            description = "适合治理一加负一屏资讯流、推荐卡片和画报推广。",
+            category = "负一屏推荐"
+        ),
+        Preset(
+            id = "oneplus-search",
+            title = "一加搜索推荐",
+            packageName = "com.heytap.quicksearchbox",
+            description = "适合治理一加系系统搜索联想、热榜推荐和内容分发入口。",
+            category = "内容推荐"
+        ),
+        Preset(
+            id = "oneplus-content-service",
+            title = "一加内容服务推荐",
+            packageName = "com.heytap.reader",
+            description = "适合治理一加系内容分发、阅读推荐和资讯联动入口。",
+            category = "内容推荐"
         ),
         Preset(
             id = "samsung-galaxy-store",
@@ -208,11 +378,32 @@ object ShizukuAdControlCatalog {
             category = "负一屏推荐"
         ),
         Preset(
+            id = "samsung-game-home",
+            title = "三星游戏中心",
+            packageName = "com.samsung.android.game.gamehome",
+            description = "适合治理游戏中心推荐、活动位和营销入口。",
+            category = "系统推广"
+        ),
+        Preset(
+            id = "samsung-finder",
+            title = "三星 Finder 推荐",
+            packageName = "com.samsung.android.app.galaxyfinder",
+            description = "适合治理系统搜索发现、热榜联想和内容分发入口。",
+            category = "内容推荐"
+        ),
+        Preset(
             id = "meizu-app-store",
             title = "魅族应用商店",
             packageName = "com.meizu.mstore",
             description = "适合治理应用商店推荐和更新推广。",
             category = "系统推广"
+        ),
+        Preset(
+            id = "meizu-reader-service",
+            title = "魅族内容服务推荐",
+            packageName = "com.meizu.media.reader",
+            description = "适合治理系统内容分发、阅读推荐和资讯联动入口。",
+            category = "内容推荐"
         ),
         Preset(
             id = "meizu-browser",
@@ -230,16 +421,51 @@ object ShizukuAdControlCatalog {
         )
     )
 
-    private val presetsByPackage = presets.associateBy { it.packageName }
+    private val presetsByPackage = presets.groupBy { it.packageName }
+    private val exactLabels = presets.associateBy { "${it.title} (${it.packageName})".lowercase() }
+    private val exactTitles = presets.associateBy { it.title.lowercase() }
 
     fun allPresets(): List<Preset> = presets
+
+    fun installedFirstLabels(installedPackages: Set<String>): List<String> {
+        return presets
+            .sortedWith(
+                compareByDescending<Preset> { it.packageName in installedPackages }
+                    .thenBy { it.category }
+                    .thenBy { it.title }
+            )
+            .map { preset ->
+                val installed = preset.packageName in installedPackages
+                val badge = if (installed) "已安装" else "未安装"
+                "[$badge] ${preset.title} (${preset.packageName})"
+            }
+    }
 
     fun categories(): List<String> = presets.map { it.category }.distinct()
 
     fun findPresetByPackage(packageName: String?): Preset? {
         val normalized = packageName?.trim().orEmpty()
         if (normalized.isBlank()) return null
-        return presetsByPackage[normalized]
+        return presetsByPackage[normalized]?.firstOrNull()
+    }
+
+    fun findPresetsByPackage(packageName: String?): List<Preset> {
+        val normalized = packageName?.trim().orEmpty()
+        if (normalized.isBlank()) return emptyList()
+        return presetsByPackage[normalized].orEmpty()
+    }
+
+    fun shouldSkipBatchDisable(packageName: String?): Boolean {
+        return findPresetsByPackage(packageName).any { it.category in batchProtectedCategories }
+    }
+
+    fun batchProtectedReason(packageName: String?): String? {
+        val categories = findPresetsByPackage(packageName)
+            .map { it.category }
+            .filter { it in batchProtectedCategories }
+            .distinct()
+        if (categories.isEmpty()) return null
+        return categories.joinToString("、")
     }
 
     fun findPresetByAppName(appName: String?): Preset? {
@@ -248,9 +474,11 @@ object ShizukuAdControlCatalog {
         val packageCandidate = Regex("\\(([^()]+)\\)").find(normalized)?.groupValues?.getOrNull(1)
         findPresetByPackage(packageCandidate)?.let { return it }
         findPresetByPackage(normalized)?.let { return it }
+        exactLabels[normalized.lowercase()]?.let { return it }
+        exactTitles[normalized.lowercase()]?.let { return it }
         return presets.firstOrNull { preset ->
-            normalized.contains(preset.title, ignoreCase = true) ||
-                normalized.contains(preset.packageName, ignoreCase = true)
+            normalized.contains("(${preset.packageName})", ignoreCase = true) ||
+                normalized.equals(preset.packageName, ignoreCase = true)
         }
     }
 

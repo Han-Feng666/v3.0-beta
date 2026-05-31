@@ -10,6 +10,7 @@ data class BlockRule(
     val dnsTypes: Set<Int>? = null,
     val excludedDnsTypes: Set<Int>? = null,
     val thirdParty: Boolean = false,
+    val firstParty: Boolean = false,
     val redirect: Boolean = false,
     val domainConstraints: Set<String>? = null,
     val denyallow: Set<String> = emptySet(),

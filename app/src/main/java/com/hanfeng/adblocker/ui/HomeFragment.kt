@@ -44,13 +44,12 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         toggle.setOnClickListener {
             activity.requestToggleVpn()
             updateAllStatus()
+            uiHandler.removeCallbacks(statusRefreshRunnable)
             uiHandler.postDelayed(statusRefreshRunnable, 300)
-            uiHandler.postDelayed(statusRefreshRunnable, 1000)
-            uiHandler.postDelayed(statusRefreshRunnable, 2200)
+            uiHandler.postDelayed(statusRefreshRunnable, 1200)
         }
         view.findViewById<Button>(R.id.btnGuide).setOnClickListener { activity.showGuideDialog() }
         view.findViewById<Button>(R.id.btnWhitelist).setOnClickListener { activity.openWhitelist() }
-        view.findViewById<Button>(R.id.btnCoexist).setOnClickListener { activity.openCoexistApps() }
         view.findViewById<ImageView>(R.id.btnSettings).setOnClickListener { activity.openSettings() }
         view.findViewById<TextView>(R.id.textVersion)?.text = "v${BuildConfig.VERSION_NAME}"
         updateAllStatus()
@@ -105,10 +104,15 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         val certificateInstalled = HttpsMitmRepository.isCertificateInstalled(ctx)
         val shizukuStatus = ShizukuRepository.getStatus(ctx)
         val shizukuEnabled = com.HanFeng.data.AppSettingsRepository.isShizukuEnabled(ctx)
-        val shizukuServiceReady = if (shizukuEnabled && shizukuStatus.installed && shizukuStatus.binderAlive && shizukuStatus.permissionGranted) {
-            ShizukuAdControlRepository.checkServiceHealth(ctx)
+        val shizukuServiceReady = if (shizukuEnabled && shizukuStatus.installed && shizukuStatus.binderAlive) {
+            ShizukuAdControlRepository.isServiceAlive()
         } else {
             false
+        }
+        val shizukuReady = shizukuEnabled && shizukuStatus.installed && shizukuStatus.binderAlive && (shizukuStatus.permissionGranted || shizukuServiceReady)
+        val shizukuMode = when {
+            shizukuServiceReady && !shizukuStatus.permissionGranted -> "UserService"
+            else -> shizukuStatus.runningMode
         }
         val workStatus = when {
             vpnRunning -> "运行中"
@@ -131,9 +135,11 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
             !shizukuEnabled -> "未启用"
             !shizukuStatus.installed -> "未安装"
             !shizukuStatus.binderAlive -> "未启动"
+            shizukuServiceReady && !shizukuStatus.permissionGranted -> "已连接 (${shizukuMode} / 兼容模式)"
+            !shizukuStatus.permissionStateKnown -> "权限状态异常"
             !shizukuStatus.permissionGranted -> "未授权"
-            shizukuServiceReady -> "已连接 (${shizukuStatus.runningMode})"
-            else -> "服务待绑定 (${shizukuStatus.runningMode})"
+            shizukuServiceReady -> "已连接 (${shizukuMode})"
+            else -> "服务待绑定 (${shizukuMode})"
         }
         statusText.text = buildString {
             append("工作状态：")

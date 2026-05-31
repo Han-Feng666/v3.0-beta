@@ -52,14 +52,17 @@ object CertificateAuthorityManager {
             val certDir = File(context.filesDir, CERT_DIR).apply { mkdirs() }
             val certFile = File(certDir, CERT_FILE_NAME)
             val publicCertFile = File(certDir, CERT_PUBLIC_FILE_NAME)
-            val newlyGenerated = !isValidCertificateFile(certFile) || !isValidCertificateFile(publicCertFile)
+            val storedCertFileName = HttpsMitmRepository.getCertificateFileName(context)
+            val storedKeystoreFileName = HttpsMitmRepository.getCaKeystoreFileName(context)
+            val hasMatchingStoredMeta = storedCertFileName == CERT_PUBLIC_FILE_NAME && storedKeystoreFileName == CERT_FILE_NAME
+            val newlyGenerated = !hasMatchingStoredMeta || !isValidCertificateFile(certFile) || !isValidCertificateFile(publicCertFile)
             if (newlyGenerated) {
                 val generated = generateCaCertificate()
                 storePkcs12(certFile, generated.keyPair, generated.certificate)
                 storePublicCertificate(publicCertFile, generated.certificate)
             }
             HttpsMitmRepository.saveCertificateMeta(context, CERT_ALIAS, CERT_PASSWORD, CERT_PUBLIC_FILE_NAME, CERT_FILE_NAME)
-            val downloadDisplayPath = if (newlyGenerated || !HttpsMitmRepository.isCertificateReady(context)) {
+            val downloadDisplayPath = if (newlyGenerated || HttpsMitmRepository.getCertificateExportPath(context).isNullOrBlank()) {
                 exportCertificateToDownloads(context, publicCertFile)
             } else {
                 HttpsMitmRepository.getCertificateExportPath(context)

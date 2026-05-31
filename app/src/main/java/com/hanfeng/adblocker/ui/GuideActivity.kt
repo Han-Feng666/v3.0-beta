@@ -131,7 +131,7 @@ class GuideActivity : BaseActivity() {
             "5. 第一次建议先只用 DNS 拦截确认联网正常，再按需开启 MITM 模式。\n" +
             "6. 如果你需要更强的系统推广治理和连接归属增强，再去设置里开启 Shizuku 增强。\n\n" +
             "二、首页所有功能说明\n" +
-            "1. 开启拦截 / 停止拦截：启动或停止寒枫本地 VPN 拦截内核。\n" +
+            "1. 开启拦截 / 停止拦截：启动或停止寒枫本地 VPN 拦截内核。点击后按钮文本会按当前运行状态实时刷新。\n" +
             "2. MITM 模式开关：开启后会导出证书文件，并对命中的 HTTP/HTTPS/HTTP2 流量进行增强过滤。\n" +
             "3. 使用说明：打开当前帮助文档。\n" +
             "4. 黑白名单：管理完全放行应用。加入白名单的应用会绕过寒枫拦截链。\n" +
@@ -154,9 +154,9 @@ class GuideActivity : BaseActivity() {
             "4. Shizuku 目前用于两类增强：\n" +
             "   - 连接归属增强：辅助识别流量属于哪个 App，提高应用级拦截准确率。\n" +
             "   - 系统推广治理：对系统推广包执行停用、恢复、暂停、恢复暂停。\n" +
-            "5. 设置页的系统推广治理支持单项治理和批量治理。\n" +
-            "6. 单项治理当前支持：停用、恢复、暂停、恢复暂停。\n" +
-            "7. 批量治理当前支持：批量停用、批量恢复、批量暂停、批量恢复暂停。\n" +
+            "5. 设置页的系统推广治理会优先展示已安装项，并区分系统推广、负一屏推荐、浏览器推荐、主题壁纸等分类。\n" +
+            "6. 单项治理当前支持：智能治理、停用、恢复、暂停、恢复暂停。智能治理会优先停用，失败后自动回退为暂停。\n" +
+            "7. 批量治理当前支持：智能治理已安装推广项、批量停用、批量恢复、批量暂停、批量恢复暂停。\n" +
             "8. 对已纳入系统推广治理目录的系统推荐 App，寒枫会更积极地把它们识别为广告型上下文，并减少无意义的未知样本重复采集。\n\n" +
             "五、加速器共存与本地代理共存教程\n" +
             "1. 如果你在用 VPN、代理、加速器，先到首页点击 \"加速器共存\"。\n" +
@@ -200,22 +200,24 @@ class GuideActivity : BaseActivity() {
             "2. Hosts 规则：如 0.0.0.0 domain.com、127.0.0.1 domain.com。\n" +
             "3. dnsmasq / SmartDNS / OpenWrt 域名规则：如 address=/domain.com/0.0.0.0、server=/domain.com/、ipset=/domain.com/...、nftset=/domain.com/...。\n" +
             "4. AdGuard / ABP 域名型规则：如 ||domain.com^、@@||domain.com^。\n" +
-            "5. 一部分 AdGuard 修饰符：如 dnstype=、important、match-case、badfilter。\n" +
+            "5. 一部分 AdGuard 修饰符：如 dnstype=、important、match-case、badfilter、app=、domain=、denyallow=、path=、removeparam=、csp=、urlblock、first-party / 1p、third-party / 3p。\n" +
             "6. 端口规则：dst-port=、src-port=。\n" +
-            "7. 星号端口规则：如 *:41826\$network。\n" +
-            "8. IP 网络段规则：IP-CIDR、IP-CIDR6。\n" +
-            "9. 域名加端口规则：如 ||domain.com^\$dst-port=443。\n" +
-            "10. Clash / Surge / Loon / Shadowrocket 常见域名型规则：DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、DOMAIN-FULL、HOST、HOST-SUFFIX、HOSTNAME、HOSTNAME-KEYWORD、HOST-WILDCARD、DOMAIN-REGEX。\n" +
-            "11. 一部分 URL / path / keyword / regex 规则：如 URL-KEYWORD、URL-REGEX、path=、部分请求路径匹配。\n" +
-            "12. 一部分 cosmetic 规则和 cosmetic exception 规则：如 ##、#@#。\n" +
-            "13. 一部分应用上下文和请求上下文规则。\n" +
-            "14. 注释、空行、行尾注释、混合规则文件、部分厂商标记注释。\n\n" +
+            "7. 应用规则：package-name、process-name，以及 app= 修饰符。\n" +
+            "8. 星号应用 / 端口规则：如 package-name,com.example.app、dst-port,443、* 配合端口或应用范围的规则。\n" +
+            "9. 星号端口规则：如 *:41826\$network。\n" +
+            "10. IP 网络段规则：IP-CIDR、IP-CIDR6。\n" +
+            "11. 域名加端口规则：如 ||domain.com^\$dst-port=443。\n" +
+            "12. Clash / Surge / Loon / Shadowrocket 常见规则：DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、DOMAIN-FULL、HOST、HOST-SUFFIX、HOSTNAME、HOSTNAME-KEYWORD、HOST-WILDCARD、DOMAIN-REGEX、PACKAGE-NAME、PROCESS-NAME、DEST-PORT、SRC-PORT。\n" +
+            "13. 一部分 URL / path / keyword / regex 规则：如 URL-KEYWORD、URL-REGEX、path=、部分请求路径匹配。\n" +
+            "14. 一部分 cosmetic 规则和 cosmetic exception 规则：如 ##、#@#。\n" +
+            "15. 一部分应用上下文和请求上下文规则。\n" +
+            "16. 注释、空行、行尾注释、混合规则文件、部分厂商标记注释。\n\n" +
             "十、规则支持边界说明\n" +
-            "1. 生效最稳定的规则类型：纯域名、Hosts、dnsmasq 域名规则、AdGuard / ABP 域名型规则、IP-CIDR、带端口限制的 IP 规则、域名加端口规则。\n" +
-            "2. 依赖增强过滤的规则类型：URL-KEYWORD、URL-REGEX、path=、部分 regex、部分请求上下文规则、部分应用上下文规则、部分 cosmetic 规则。\n" +
+            "1. 生效最稳定的规则类型：纯域名、Hosts、dnsmasq 域名规则、AdGuard / ABP 域名型规则、IP-CIDR、带端口限制的 IP 规则、域名加端口规则、应用包名规则。\n" +
+            "2. 依赖增强过滤的规则类型：URL-KEYWORD、URL-REGEX、path=、first-party / third-party、部分 regex、部分请求上下文规则、部分应用上下文规则、部分 cosmetic 规则。\n" +
             "3. 当前会跳过或部分跳过的类型：远程脚本、完整浏览器语义脚本、复杂逻辑组合、无法安全降级的高级代理规则、完整重定向脚本链。\n\n" +
             "十一、统计页说明\n" +
-            "1. 统计页展示今日拦截、累计拦截、DNS 总拦截、MITM 总拦截、请求拦截和节省流量。\n" +
+            "1. 统计页展示今日拦截、累计拦截、DNS 总拦截、MITM 总拦截、请求拦截和节省流量。MITM 总拦截只统计证书解密后真实命中的 HTTP/HTTPS/HTTP2 深度拦截。\n" +
             "2. 排行榜区域会展示主要命中来源，方便判断哪些厂商、规则或广告方向最活跃。\n\n" +
             "十二、推荐使用方案\n" +
             "1. 追求稳定省电：只开 DNS 拦截。\n" +

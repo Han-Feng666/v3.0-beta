@@ -28,6 +28,7 @@ object StatsRepository {
     private const val KEY_TODAY_BLOCKED = "today_blocked"
     private const val KEY_DNS_BLOCKED = "dns_blocked"
     private const val KEY_HTTP_BLOCKED = "http_blocked"
+    private const val KEY_MITM_BLOCKED = "mitm_blocked"
     private const val KEY_BYTES_SAVED = "bytes_saved"
     private const val KEY_VENDOR_BLOCKED = "vendor_blocked"
     private const val KEY_VENDOR_REQUEST = "vendor_request"
@@ -47,6 +48,7 @@ object StatsRepository {
     @Volatile private var totalBlocked = AtomicInteger(0)
     @Volatile private var dnsBlocked = AtomicInteger(0)
     @Volatile private var httpBlocked = AtomicInteger(0)
+    @Volatile private var mitmBlocked = AtomicInteger(0)
     @Volatile private var requestTotal = AtomicInteger(0)
     @Volatile private var responseTotal = AtomicInteger(0)
     @Volatile private var bytesSaved = AtomicLong(0)
@@ -89,6 +91,7 @@ object StatsRepository {
             totalBlocked.set(prefs.getInt(KEY_TOTAL_BLOCKED, 0))
             dnsBlocked.set(prefs.getInt(KEY_DNS_BLOCKED, 0))
             httpBlocked.set(prefs.getInt(KEY_HTTP_BLOCKED, 0))
+            mitmBlocked.set(prefs.getInt(KEY_MITM_BLOCKED, prefs.getInt(KEY_HTTP_BLOCKED, 0)))
             requestTotal.set(prefs.getInt(KEY_REQUEST_TOTAL, 0))
             responseTotal.set(prefs.getInt(KEY_RESPONSE_TOTAL, 0))
             bytesSaved.set(prefs.getLong(KEY_BYTES_SAVED, 0))
@@ -170,6 +173,22 @@ object StatsRepository {
         scheduleFlush(context)
     }
 
+    fun recordBlockedMitm(context: Context, vendor: String, appName: String, bytesSaved: Long = 0) {
+        ensureInitialized(context)
+        todayBlocked.incrementAndGet()
+        totalBlocked.incrementAndGet()
+        httpBlocked.incrementAndGet()
+        mitmBlocked.incrementAndGet()
+        responseTotal.incrementAndGet()
+        this.bytesSaved.addAndGet(bytesSaved)
+        incrementMapInMemory(vendorBlockedMap, vendor)
+        incrementMapInMemory(vendorResponseMap, vendor)
+        incrementMapInMemory(appBlockedMap, appName)
+        incrementMapInMemory(appResponseMap, appName)
+        notifyUpdated()
+        scheduleFlush(context)
+    }
+
     private fun scheduleFlush(context: Context) {
         val dirtyCount = dirtyEvents.incrementAndGet()
         if (dirtyCount >= FLUSH_EVENT_THRESHOLD) {
@@ -201,6 +220,7 @@ object StatsRepository {
             .putInt(KEY_TOTAL_BLOCKED, totalBlocked.get())
             .putInt(KEY_DNS_BLOCKED, dnsBlocked.get())
             .putInt(KEY_HTTP_BLOCKED, httpBlocked.get())
+            .putInt(KEY_MITM_BLOCKED, mitmBlocked.get())
             .putInt(KEY_REQUEST_TOTAL, requestTotal.get())
             .putInt(KEY_RESPONSE_TOTAL, responseTotal.get())
             .putLong(KEY_BYTES_SAVED, bytesSaved.get())
@@ -230,7 +250,7 @@ object StatsRepository {
             todayBlocked = todayBlocked.get(),
             totalBlocked = totalBlocked.get(),
             dnsBlocked = dnsBlocked.get(),
-            httpBlocked = httpBlocked.get(),
+            httpBlocked = mitmBlocked.get(),
             requestTotal = requestTotal.get(),
             responseTotal = responseTotal.get(),
             bytesSaved = bytesSaved.get()

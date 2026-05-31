@@ -24,11 +24,12 @@ object LogRepository {
     private const val LOG_FILE = "adblock.log"
     private const val LOG_CHANNEL_CAPACITY = 2048
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val logChannel = Channel<String>(capacity = LOG_CHANNEL_CAPACITY)
+    @Volatile private var logChannel = Channel<String>(capacity = LOG_CHANNEL_CAPACITY)
     private var writerJob: Job? = null
     private var currentContext: Context? = null
     private var snapshotExportJob: Job? = null
     private val droppedLogCount = AtomicInteger(0)
+    @Volatile private var currentLogSessionId: String? = null
     private val noisyLogPrefixes = listOf(
         "HTTP/2 frame ",
         "HTTP/2 headers decoded ",
@@ -50,6 +51,7 @@ object LogRepository {
         if (shouldDropNoisyLog(message)) return
         // Capture context once for the writer
         if (currentContext == null) currentContext = context.applicationContext
+        ensureFreshLogFile(context.applicationContext)
         flushDroppedNoticeIfNeeded()
         if (logChannel.trySend("${System.currentTimeMillis()} $message\n").isFailure) {
             droppedLogCount.incrementAndGet()
@@ -95,9 +97,25 @@ object LogRepository {
         }
     }
 
+    private fun ensureFreshLogFile(context: Context) {
+        val sessionId = context.packageName + ":" + android.os.Process.myPid()
+        if (currentLogSessionId == sessionId) return
+        synchronized(this) {
+            if (currentLogSessionId == sessionId) return
+            val file = logFile(context)
+            file.parentFile?.mkdirs()
+            runCatching { FileOutputStream(file, false).use { } }
+            currentLogSessionId = sessionId
+        }
+    }
+
     fun flushAndClose() {
-        logChannel.close()
-        writerJob?.let { scope.runCatching { it.cancel() } }
+        synchronized(this) {
+            runCatching { logChannel.close() }
+            writerJob?.let { scope.runCatching { it.cancel() } }
+            writerJob = null
+            logChannel = Channel(capacity = LOG_CHANNEL_CAPACITY)
+        }
     }
 
     fun exportZip(context: Context): android.net.Uri {

@@ -413,7 +413,7 @@ object HttpsTlsBridgeManager {
             is HttpMitmFilter.FilterResult.Replaced -> {
                 LogRepository.append(context, "HTTPS response neutralized host=${session.host} reason=${result.reason} originalBytes=${result.originalBytes}")
                 val vendor = RuleRepository.classifyVendorFromHints(context, session.host, session.appName)
-                StatsRepository.recordBlockedHttp(context, vendor, session.appName, result.originalBytes.toLong())
+                StatsRepository.recordBlockedMitm(context, vendor, session.appName, result.originalBytes.toLong())
                 result.payload
             }
         }
@@ -921,7 +921,10 @@ object HttpsTlsBridgeManager {
                 output.flush()
                 control.terminalBlockedStreams += directive.streamId
                 val vendor = RuleRepository.classifyVendorFromHints(context, session.host, session.appName)
-                StatsRepository.recordBlockedHttp(context, vendor, session.appName, 100 * 1024)
+                if (!control.terminalStatsRecorded.contains(directive.streamId)) {
+                    StatsRepository.recordBlockedMitm(context, vendor, session.appName, 100 * 1024)
+                    control.terminalStatsRecorded += directive.streamId
+                }
                 LogRepository.append(
                     context,
                     "HTTP/2 synthetic response host=${session.host} flow=${session.flowKey} stream=${directive.streamId} action=${directive.action} confidence=${directive.confidence} peer=$resetPeer bytes=${directive.syntheticResponse.size} sendRst=${directive.sendRst}"
@@ -930,7 +933,10 @@ object HttpsTlsBridgeManager {
             if (directive.sendRst && control.resetSentStreams.add(directive.streamId)) {
                 writeHttp2RstStream(output, directive.streamId)
                 val vendor = RuleRepository.classifyVendorFromHints(context, session.host, session.appName)
-                StatsRepository.recordBlockedHttp(context, vendor, session.appName, 50 * 1024)
+                if (!control.terminalStatsRecorded.contains(directive.streamId)) {
+                    StatsRepository.recordBlockedMitm(context, vendor, session.appName, 50 * 1024)
+                    control.terminalStatsRecorded += directive.streamId
+                }
                 LogRepository.append(
                     context,
                     "HTTP/2 stream reset host=${session.host} flow=${session.flowKey} stream=${directive.streamId} action=${directive.action} confidence=${directive.confidence} peer=$resetPeer"
@@ -998,7 +1004,7 @@ object HttpsTlsBridgeManager {
             terminalStreams.forEach { streamId ->
                 if (!control.terminalStatsRecorded.contains(streamId)) {
                     val vendor = RuleRepository.classifyVendorFromHints(context, session.host, session.appName)
-                    StatsRepository.recordBlockedHttp(context, vendor, session.appName, 50 * 1024)
+                    StatsRepository.recordBlockedMitm(context, vendor, session.appName, 50 * 1024)
                     control.terminalStatsRecorded += streamId
                 }
             }

@@ -7,6 +7,7 @@ import androidx.annotation.Keep
 class ShizukuAdControlUserService() : IAdControlService.Stub() {
 
     private var serviceContext: Context? = null
+    @Volatile private var lastOperationSummary: String = "idle"
 
     @Keep
     constructor(context: Context) : this() {
@@ -15,25 +16,72 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
 
     override fun ping(): Boolean = true
 
+    override fun blockPackageNotifications(packageName: String): Boolean {
+        return runAppOpsBatch(
+            packageName,
+            modes = listOf(
+                "POST_NOTIFICATION" to "ignore",
+                "RUN_ANY_IN_BACKGROUND" to "ignore",
+                "WAKE_LOCK" to "ignore"
+            )
+        )
+    }
+
+    override fun allowPackageNotifications(packageName: String): Boolean {
+        return runAppOpsBatch(
+            packageName,
+            modes = listOf(
+                "POST_NOTIFICATION" to "allow",
+                "RUN_ANY_IN_BACKGROUND" to "allow",
+                "WAKE_LOCK" to "allow"
+            )
+        )
+    }
+
     override fun disablePackage(packageName: String): Boolean {
-        return runPmCommand("disable-user", "--user", "0", packageName)
+        return runShellCommandWithFallback(
+            listOf(
+                listOf("pm", "disable-user", "--user", "0", packageName),
+                listOf("cmd", "package", "disable-user", "--user", "0", packageName)
+            )
+        )
     }
 
     override fun enablePackage(packageName: String): Boolean {
-        return runPmCommand("enable", packageName)
+        return runShellCommandWithFallback(
+            listOf(
+                listOf("pm", "enable", packageName),
+                listOf("cmd", "package", "enable", packageName)
+            )
+        )
     }
 
     override fun suspendPackage(packageName: String): Boolean {
-        return runPmCommand("suspend", "--user", "0", packageName)
+        return runShellCommandWithFallback(
+            listOf(
+                listOf("pm", "suspend", "--user", "0", packageName),
+                listOf("cmd", "package", "suspend", "--user", "0", packageName)
+            )
+        )
     }
 
     override fun unsuspendPackage(packageName: String): Boolean {
-        return runPmCommand("unsuspend", "--user", "0", packageName)
+        return runShellCommandWithFallback(
+            listOf(
+                listOf("pm", "unsuspend", "--user", "0", packageName),
+                listOf("cmd", "package", "unsuspend", "--user", "0", packageName)
+            )
+        )
     }
 
     override fun uninstallPackageForUser(packageName: String, userId: Int): Boolean {
         val safeUserId = if (userId >= 0) userId else 0
-        return runPmCommand("uninstall", "--user", safeUserId.toString(), packageName)
+        return runShellCommandWithFallback(
+            listOf(
+                listOf("pm", "uninstall", "--user", safeUserId.toString(), packageName),
+                listOf("cmd", "package", "uninstall", "--user", safeUserId.toString(), packageName)
+            )
+        )
     }
 
     override fun isPackageInstalled(packageName: String): Boolean {
@@ -60,18 +108,110 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
         }.getOrDefault(false)
     }
 
+    override fun getLastOperationSummary(): String = lastOperationSummary
+
     override fun destroy() {
         System.exit(0)
     }
 
-    private fun runPmCommand(vararg args: String): Boolean {
-        val command = listOf("pm") + args.toList()
+    private fun runShellCommandWithFallback(commands: List<List<String>>): Boolean {
+        val attemptSummaries = mutableListOf<String>()
+        commands.forEachIndexed { index, command ->
+            val result = runCommand(command)
+            attemptSummaries += "try${index + 1}:${result.summary}"
+            if (result.success) {
+                lastOperationSummary = attemptSummaries.joinToString(" | ")
+                return true
+            }
+            if (!result.retryable) {
+                lastOperationSummary = attemptSummaries.joinToString(" | ")
+                return false
+            }
+        }
+        lastOperationSummary = attemptSummaries.joinToString(" | ")
+        return false
+    }
+
+    private fun runAppOpsBatch(packageName: String, modes: List<Pair<String, String>>): Boolean {
+        val attemptSummaries = mutableListOf<String>()
+        var anySuccess = false
+        modes.forEach { (opName, opMode) ->
+            val commands = listOf(
+                listOf("cmd", "appops", "set", packageName, opName, opMode),
+                listOf("appops", "set", packageName, opName, opMode)
+            )
+            var opSucceeded = false
+            commands.forEachIndexed { index, command ->
+                val result = runCommand(command)
+                attemptSummaries += "$opName-try${index + 1}:${result.summary}"
+                if (result.success) {
+                    opSucceeded = true
+                    anySuccess = true
+                    return@forEachIndexed
+                }
+                if (!result.retryable) {
+                    return@forEachIndexed
+                }
+            }
+            if (!opSucceeded) {
+                attemptSummaries += "$opName-no-success"
+            }
+        }
+        lastOperationSummary = attemptSummaries.joinToString(" | ")
+        return anySuccess
+    }
+
+    private fun runCommand(command: List<String>): CommandResult {
         return runCatching {
             val process = ProcessBuilder(command)
                 .redirectErrorStream(true)
                 .start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
             val exitCode = process.waitFor()
-            exitCode == 0
-        }.getOrDefault(false)
+            val commandText = command.joinToString(" ")
+            val summary = buildSummary(commandText, exitCode, output)
+            when {
+                exitCode == 0 -> CommandResult(true, false, "success $summary")
+                isUnsupportedCommand(output) -> CommandResult(false, true, "unsupported $summary")
+                isPermissionFailure(output) -> CommandResult(false, false, "permission $summary")
+                output.contains("SecurityException", ignoreCase = true) -> CommandResult(false, false, "security $summary")
+                output.contains("Unknown package", ignoreCase = true) -> CommandResult(false, false, "package-missing $summary")
+                else -> CommandResult(false, false, "failed $summary")
+            }
+        }.getOrElse {
+            CommandResult(false, true, "exception command=${command.joinToString(" ")} error=${it.message ?: it.javaClass.simpleName}")
+        }
     }
+
+    private fun buildSummary(command: String, exitCode: Int, output: String): String {
+        return buildString {
+            append("command=")
+            append(command)
+            append(" exit=")
+            append(exitCode)
+            if (output.isNotBlank()) {
+                append(" output=")
+                append(output.replace('\n', ' ').take(240))
+            }
+        }
+    }
+
+    private fun isUnsupportedCommand(output: String): Boolean {
+        return output.contains("Unknown command", ignoreCase = true) ||
+            output.contains("Unknown option", ignoreCase = true) ||
+            output.contains("Unsupported", ignoreCase = true) ||
+            output.contains("not found", ignoreCase = true)
+    }
+
+    private fun isPermissionFailure(output: String): Boolean {
+        return output.contains("Permission", ignoreCase = true) ||
+            output.contains("not allowed", ignoreCase = true) ||
+            output.contains("Operation not permitted", ignoreCase = true)
+    }
+
+    private data class CommandResult(
+        val success: Boolean,
+        val retryable: Boolean,
+        val summary: String
+    )
 }

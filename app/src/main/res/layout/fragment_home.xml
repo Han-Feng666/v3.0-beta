@@ -98,20 +98,6 @@
                 android:textColor="@color/hf_text_primary"
                 android:textSize="18sp" />
 
-            <Button
-                android:id="@+id/btnCoexist"
-                android:layout_width="@dimen/home_button_max_width"
-                android:layout_height="@dimen/home_button_height"
-                android:layout_marginBottom="12dp"
-                android:background="@drawable/bg_panel"
-                android:backgroundTint="@null"
-                android:minWidth="120dp"
-                android:paddingHorizontal="@dimen/home_button_horizontal_padding"
-                android:text="加速器共存"
-                android:textAllCaps="false"
-                android:textColor="@color/hf_text_primary"
-                android:textSize="18sp" />
-
         <LinearLayout
             android:id="@+id/homeStatusCard"
             android:layout_width="@dimen/home_button_max_width"

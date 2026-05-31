@@ -10,6 +10,13 @@
 
 ## 当前支持的规则
 
+## MITM 与增强过滤说明
+
+- 开启 MITM 并正确安装证书后，应用会对命中的 HTTP/HTTPS/HTTP2 流量做更深入的广告识别。
+- 当前重点增强场景包括：开屏广告、信息流广告、评论区插入广告、回复楼层广告、推荐卡片广告、消息中心广告、小说激励解锁广告、部分同域广告 JSON。
+- 统计页中的 `MITM 总拦截` 只统计证书解密后真实命中的增强过滤结果。
+- 系统推广治理和一键治理已安装推广项依赖 Shizuku，用于处理系统推广包、负一屏推荐、浏览器推荐、主题壁纸推荐等系统级推广来源。
+
 ### 1. 纯域名
 
 支持示例：
@@ -64,6 +71,8 @@ tracker.example.org
 - `dnstype=` 当前支持：`A` `NS` `CNAME` `SOA` `PTR` `MX` `TXT` `AAAA` `SRV` `NAPTR` `SVCB` `HTTPS` `CAA` `ANY`
 - `ANY` 会被视为不限制记录类型
 - `badfilter` 当前用于关闭已导入的同域名规则或对应记录类型规则
+- 额外支持的高频修饰符：`app=` `src-port=` `dst-port=` `path=` `domain=` `denyallow=` `removeparam=` `csp=` `urlblock` `first-party` `1p` `third-party` `3p`
+- `first-party` / `1p` 与 `third-party` / `3p` 当前主要在 URL/MITM 请求上下文匹配中生效
 
 ### 5. dnsmasq 风格域名规则
 
@@ -117,6 +126,27 @@ domain-suffix=example.com
 - `domain-exact`
 - `host-exact`
 
+### 6.1 结构化应用与端口规则
+
+支持示例：
+
+```text
+package-name,com.ss.android.article.news
+process-name,com.dragon.read
+dst-port,443
+src-port,53
+PACKAGE-NAME,com.qimao.reader
+PROCESS-NAME,com.dragon.read
+DEST-PORT,443
+SRC-PORT,853
+```
+
+说明：
+
+- `package-name` / `process-name` 会映射为应用维度规则
+- `dst-port` / `src-port` 会映射为端口维度规则
+- 这类规则只有在当前运行态能拿到应用名或端口时才会生效
+
 ### 7. YAML 列表前缀
 
 支持示例：
@@ -151,10 +181,8 @@ example.com#@#.ad-banner
 
 当前不支持的代表项：
 
-- `third-party`
-- `domain`
-- `app`
-- `denyallow`
+- `from`
+- `to`
 - `redirect`
 
 说明：
@@ -178,12 +206,8 @@ example.com#@#.ad-banner
 - `geoip`
 - `geosite`
 - `rule-set`
-- `process-name`
 - `process-path`
-- `package-name`
 - `user-agent`
-- `dst-port`
-- `src-port`
 - `inbound`
 - `network`
 - `protocol`

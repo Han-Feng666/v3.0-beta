@@ -5,34 +5,45 @@ import android.content.Context
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
+import android.os.SystemClock
 import com.HanFeng.shizuku.IAdControlService
 import com.HanFeng.shizuku.ShizukuAdControlUserService
 import rikka.shizuku.Shizuku
 
 object ShizukuAdControlRepository {
+    private const val BIND_RETRY_INTERVAL_MILLIS = 1500L
+    private const val BIND_WAIT_TIMEOUT_MILLIS = 350L
+    private const val BIND_WAIT_STEP_MILLIS = 25L
+    private const val BIND_STALE_TIMEOUT_MILLIS = 3000L
     @Volatile private var service: IAdControlService? = null
     @Volatile private var binding = false
     @Volatile private var lastBindAttemptAt = 0L
+    @Volatile private var lastBindLogAt = 0L
+    @Volatile private var lastContext: Context? = null
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = IAdControlService.Stub.asInterface(binder)
             binding = false
+            logBindEvent(name, binder, "connected")
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             service = null
             binding = false
+            logBindEvent(name, null, "disconnected")
         }
     }
 
-    private val userServiceArgs = Shizuku.UserServiceArgs(
-        ComponentName("com.HanFeng", ShizukuAdControlUserService::class.java.name)
-    )
-        .daemon(false)
-        .processNameSuffix("ad-control")
-        .debuggable(false)
-        .version(1)
+    private fun createUserServiceArgs(context: Context): Shizuku.UserServiceArgs {
+        return Shizuku.UserServiceArgs(
+            ComponentName(context.packageName, ShizukuAdControlUserService::class.java.name)
+        )
+            .daemon(false)
+            .processNameSuffix("ad-control")
+            .debuggable(false)
+            .version(1)
+    }
 
     data class PackageControlStatus(
         val installed: Boolean,
@@ -43,19 +54,27 @@ object ShizukuAdControlRepository {
     )
 
     fun isReady(context: Context): Boolean {
-        return AppSettingsRepository.isShizukuEnabled(context) && ShizukuRepository.canUseEnhancedMode(context)
+        return AppSettingsRepository.isShizukuEnabled(context) && ShizukuRepository.canAttemptUserService(context)
     }
 
     fun ensureBound(context: Context): Boolean {
+        lastContext = context.applicationContext
         if (!isReady(context)) return false
-        service?.let { return true }
+        if (hasLiveService()) return true
+        if (!runCatching { Shizuku.pingBinder() || Shizuku.getBinder()?.isBinderAlive == true }.getOrDefault(false)) {
+            return false
+        }
+        if (binding && System.currentTimeMillis() - lastBindAttemptAt > BIND_STALE_TIMEOUT_MILLIS) {
+            maybeLog(context, "Shizuku ad control binding stale, reset after ${System.currentTimeMillis() - lastBindAttemptAt}ms")
+            binding = false
+        }
         if (binding) return false
         val now = System.currentTimeMillis()
-        if (now - lastBindAttemptAt < 1500L) return false
+        if (now - lastBindAttemptAt < BIND_RETRY_INTERVAL_MILLIS) return false
         lastBindAttemptAt = now
         binding = true
         return runCatching {
-            Shizuku.bindUserService(userServiceArgs, serviceConnection)
+            Shizuku.bindUserService(createUserServiceArgs(context), serviceConnection)
             true
         }.onFailure {
             binding = false
@@ -63,13 +82,40 @@ object ShizukuAdControlRepository {
         }.getOrDefault(false)
     }
 
+    fun invalidateService() {
+        service = null
+        binding = false
+    }
+
     fun checkServiceHealth(context: Context): Boolean {
         val healthy = runCatching { getService(context)?.ping() == true }.getOrDefault(false)
         if (!healthy) {
-            service = null
-            binding = false
+            invalidateService()
         }
         return healthy
+    }
+
+    fun isServiceAlive(): Boolean = liveService() != null
+
+    fun getLastOperationSummary(context: Context): String {
+        return runCatching { getService(context)?.getLastOperationSummary().orEmpty() }
+            .getOrDefault("")
+    }
+
+    fun blockPackageNotifications(context: Context, packageName: String): Boolean {
+        val normalized = packageName.trim()
+        if (normalized.isBlank()) return false
+        val result = getService(context)?.blockPackageNotifications(normalized) == true
+        LogRepository.append(context, "Shizuku block package notifications package=$normalized success=$result")
+        return result
+    }
+
+    fun allowPackageNotifications(context: Context, packageName: String): Boolean {
+        val normalized = packageName.trim()
+        if (normalized.isBlank()) return false
+        val result = getService(context)?.allowPackageNotifications(normalized) == true
+        LogRepository.append(context, "Shizuku allow package notifications package=$normalized success=$result")
+        return result
     }
 
     fun disablePackage(context: Context, packageName: String): Boolean {
@@ -150,8 +196,29 @@ object ShizukuAdControlRepository {
     }
 
     private fun getService(context: Context): IAdControlService? {
-        if (!ensureBound(context)) return service
-        return service
+        liveService()?.let { return it }
+        ensureBound(context)
+        val deadline = SystemClock.elapsedRealtime() + BIND_WAIT_TIMEOUT_MILLIS
+        while (binding && SystemClock.elapsedRealtime() < deadline) {
+            liveService()?.let { return it }
+            SystemClock.sleep(BIND_WAIT_STEP_MILLIS)
+        }
+        if (binding) {
+            maybeLog(context, "Wait Shizuku ad control service timeout after ${BIND_WAIT_TIMEOUT_MILLIS}ms")
+        }
+        return liveService()
+    }
+
+    private fun hasLiveService(): Boolean = liveService() != null
+
+    private fun liveService(): IAdControlService? {
+        val current = service ?: return null
+        return if (current.asBinder()?.isBinderAlive == true) {
+            current
+        } else {
+            invalidateService()
+            null
+        }
     }
 
     private fun enabledStateLabel(state: Int): String {
@@ -162,5 +229,20 @@ object ShizukuAdControlRepository {
             PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED -> "disabled_until_used"
             else -> "default"
         }
+    }
+
+    private fun logBindEvent(name: ComponentName?, binder: IBinder?, state: String) {
+        val context = lastContext ?: return
+        maybeLog(
+            context,
+            "Shizuku ad control service $state component=${name?.flattenToShortString() ?: "unknown"} binderAlive=${binder?.isBinderAlive == true}"
+        )
+    }
+
+    private fun maybeLog(context: Context, message: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastBindLogAt < 1500L) return
+        lastBindLogAt = now
+        LogRepository.append(context, message)
     }
 }

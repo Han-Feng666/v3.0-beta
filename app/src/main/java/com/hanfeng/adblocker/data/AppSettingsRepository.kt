@@ -9,7 +9,7 @@ object AppSettingsRepository {
 
     fun isShizukuEnabled(context: Context): Boolean {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_USE_SHIZUKU, true)
+            .getBoolean(KEY_USE_SHIZUKU, false)
     }
 
     fun setShizukuEnabled(context: Context, enabled: Boolean) {
@@ -21,7 +21,7 @@ object AppSettingsRepository {
 
     fun isHideBackgroundEnabled(context: Context): Boolean {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_HIDE_BACKGROUND, true)
+            .getBoolean(KEY_HIDE_BACKGROUND, false)
     }
 
     fun setHideBackgroundEnabled(context: Context, enabled: Boolean) {

@@ -9,8 +9,8 @@ class MainPagerAdapter(activity: AppCompatActivity) : FragmentStateAdapter(activ
 
     override fun createFragment(position: Int): Fragment {
         return when (position) {
-            0 -> HomeFragment()
-            1 -> RulesFragment()
+            0 -> RulesFragment()
+            1 -> HomeFragment()
             else -> StatsFragment()
         }
     }

@@ -25,9 +25,11 @@ import com.HanFeng.data.RuleRepository
 import com.HanFeng.data.ShizukuAdControlRepository
 import com.HanFeng.data.ShizukuAdControlCatalog
 import com.HanFeng.data.ShizukuConnectionOwnerRepository
+import com.HanFeng.data.ShizukuRepository
 import com.HanFeng.data.StatsRepository
 import com.HanFeng.data.WhitelistRepository
 import com.HanFeng.dns.DnsMessageParser
+import com.HanFeng.model.BlockRule
 import com.HanFeng.model.LocalProxyCoexistConfig
 import com.HanFeng.security.CertificateAuthorityManager
 import com.HanFeng.security.TlsClientHelloParser
@@ -57,6 +59,7 @@ class AdBlockVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var packetJob: Job? = null
     private var pendingRouteReloadJob: Job? = null
+    private var pendingVpnReloadJob: Job? = null
     private var pendingReacquireJob: Job? = null
     private var pendingLocalProxyProbeJob: Job? = null
     @Volatile private var startInProgress = false
@@ -144,6 +147,8 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var cachedDnsServers: CachedDnsServers? = null
     @Volatile private var httpDecryptEnabled = false
     @Volatile private var mitmCertificateInstalled = false
+    @Volatile private var shizukuConnectionOwnerReady = false
+    @Volatile private var shizukuAdControlReady = false
     @Volatile private var localProxyCoexistConfig = LocalProxyCoexistConfig()
     @Volatile private var localProxyTargetPackages: Set<String> = emptySet()
     @Volatile private var localProxyReachable: Boolean? = null
@@ -180,7 +185,7 @@ class AdBlockVpnService : VpnService() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
-                reloadVpn()
+                scheduleVpnReload()
                 true
             }
             ACTION_START -> {
@@ -336,15 +341,19 @@ class AdBlockVpnService : VpnService() {
                 }
         }
         scope.launch {
-            if (ShizukuConnectionOwnerRepository.isReady(this@AdBlockVpnService)) {
+            if (shizukuConnectionOwnerReady) {
                 runCatching { ShizukuConnectionOwnerRepository.ensureBound(this@AdBlockVpnService) }
                     .onSuccess { bound ->
+                        if (!bound) {
+                            shizukuConnectionOwnerReady = false
+                        }
                         LogRepository.append(
                             this@AdBlockVpnService,
                             if (bound) "Shizuku connection owner service warmed after VPN start" else "Shizuku connection owner service warm deferred after VPN start"
                         )
                     }
                     .onFailure {
+                        shizukuConnectionOwnerReady = false
                         LogRepository.append(
                             this@AdBlockVpnService,
                             "Shizuku connection owner warm failed after VPN start: ${it.message ?: it.javaClass.simpleName}"
@@ -352,14 +361,46 @@ class AdBlockVpnService : VpnService() {
                     }
             }
         }
+        scope.launch {
+            if (shizukuAdControlReady) {
+                runCatching { ShizukuAdControlRepository.ensureBound(this@AdBlockVpnService) }
+                    .onSuccess { bound ->
+                        if (!bound) {
+                            shizukuAdControlReady = false
+                        }
+                        LogRepository.append(
+                            this@AdBlockVpnService,
+                            if (bound) "Shizuku ad control service warmed after VPN start" else "Shizuku ad control service warm deferred after VPN start"
+                        )
+                    }
+                    .onFailure {
+                        shizukuAdControlReady = false
+                        LogRepository.append(
+                            this@AdBlockVpnService,
+                            "Shizuku ad control warm failed after VPN start: ${it.message ?: it.javaClass.simpleName}"
+                        )
+                    }
+            }
+        }
     }
 
     private fun reloadVpn() {
+        pendingVpnReloadJob?.cancel()
+        pendingVpnReloadJob = null
         refreshRuntimeFeatureFlags()
         LogRepository.append(this, "VPN reload requested")
         if (!performSeamlessReload()) {
             stopVpn(stopService = false)
             startVpn(preserveUserIntentOnFailure = isWaitingForReacquire())
+        }
+    }
+
+    private fun scheduleVpnReload(delayMillis: Long = 220L) {
+        pendingVpnReloadJob?.cancel()
+        pendingVpnReloadJob = scope.launch {
+            delay(delayMillis)
+            if (!FeatureSettingsRepository.isAdBlockEnabled(this@AdBlockVpnService)) return@launch
+            reloadVpn()
         }
     }
 
@@ -404,6 +445,8 @@ class AdBlockVpnService : VpnService() {
     private fun stopVpn(stopService: Boolean = true, keepForeground: Boolean = false) {
         isRunning = false
         startInProgress = false
+        pendingVpnReloadJob?.cancel()
+        pendingVpnReloadJob = null
         pendingReacquireJob?.cancel()
         pendingReacquireJob = null
         pendingRouteReloadJob?.cancel()
@@ -497,6 +540,8 @@ class AdBlockVpnService : VpnService() {
     private fun clearRuntimeState() {
         httpDecryptEnabled = false
         mitmCertificateInstalled = false
+        shizukuConnectionOwnerReady = false
+        shizukuAdControlReady = false
         localProxyTargetPackages = emptySet()
         localProxyReachable = null
         pendingLocalProxyProbeJob?.cancel()
@@ -651,23 +696,6 @@ class AdBlockVpnService : VpnService() {
                 }
             }
         }
-        scope.launch {
-            if (ShizukuAdControlRepository.isReady(this@AdBlockVpnService)) {
-                runCatching { ShizukuAdControlRepository.ensureBound(this@AdBlockVpnService) }
-                    .onSuccess { bound ->
-                        LogRepository.append(
-                            this@AdBlockVpnService,
-                            if (bound) "Shizuku ad control service warmed after VPN start" else "Shizuku ad control service warm deferred after VPN start"
-                        )
-                    }
-                    .onFailure {
-                        LogRepository.append(
-                            this@AdBlockVpnService,
-                            "Shizuku ad control warm failed after VPN start: ${it.message ?: it.javaClass.simpleName}"
-                        )
-                    }
-            }
-        }
     }
 
     private fun handlePacket(packet: ByteArray, length: Int, output: FileOutputStream) {
@@ -729,14 +757,20 @@ class AdBlockVpnService : VpnService() {
             }
 
             // DNS 拦截决策优化：复用计算结果，避免重复调用
-            val appName = resolveAppName(question.domain, info)
-            val matchedRule = RuleRepository.findMatchingRule(this, question.domain, question.qType)
+            val domainContext = resolveDomainDecisionContext(
+                domain = question.domain,
+                info = info,
+                qType = question.qType
+            )
+            val appName = domainContext.appName
+            val matchedRule = domainContext.matchedRule
             val isBlocked = matchedRule != null
-            val vendor = matchedRule?.vendor ?: classifyVendorCached(question.domain, appName)
+            val vendor = domainContext.vendor
             val bypassProtectionBlock = RuleRepository.isBypassProtectionDomain(question.domain)
             val generalAdTraffic = RuleRepository.shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)
-            val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, vendor)
-            val protectedNovelUrlBlock = RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(this, question.domain, null, appName)
+            val novelSignals = evaluateNovelBlockingSignals(question.domain, appName, vendor, includeForceNovelQuic = false)
+            val aggressiveNovelBlock = novelSignals.aggressiveNovelBlock
+            val protectedNovelUrlBlock = novelSignals.protectedNovelUrlBlock
             if (!isBlocked) {
                 if (generalAdTraffic || aggressiveNovelBlock || protectedNovelUrlBlock) {
                     RuleRepository.reportUnknownVendorIfNeeded(
@@ -782,13 +816,23 @@ class AdBlockVpnService : VpnService() {
             if (aliasTargets.isNotEmpty()) {
                 // 检查所有 CNAME 目标（包括多级 CNAME）
                 for (aliasTarget in aliasTargets) {
-                    if (RuleRepository.shouldProtectMediaTraffic(aliasTarget)) continue
-                    if (RuleRepository.shouldProtectBusinessTraffic(aliasTarget)) continue
-                    val aliasVendor = classifyVendorCached(aliasTarget, appName)
-                    if (RuleRepository.isBypassProtectionDomain(aliasTarget) ||
-                        RuleRepository.isBlocked(this, aliasTarget) ||
-                        RuleRepository.shouldTreatAsGeneralAdTraffic(aliasTarget, aliasVendor, appName) ||
-                        RuleRepository.shouldAggressivelyBlockForNovelApp(this, aliasTarget, appName, aliasVendor)) {
+                    if (isProtectedTrafficDomain(aliasTarget)) continue
+                    val aliasContext = resolveDomainDecisionContext(
+                        domain = aliasTarget,
+                        info = info,
+                        qType = question.qType,
+                        knownAppName = appName
+                    )
+                    val matchedAliasRule = aliasContext.matchedRule
+                    val aliasVendor = aliasContext.vendor
+                    if (shouldTreatAsTrackedAdTarget(
+                            domain = aliasTarget,
+                            appName = appName,
+                            vendor = aliasVendor,
+                            matchedRule = matchedAliasRule,
+                            includeProtectedNovelUrl = false,
+                            includeForceNovelQuic = false
+                        )) {
                         RuleRepository.reportUnknownVendorIfNeeded(
                             context = this,
                             vendor = aliasVendor,
@@ -866,7 +910,7 @@ class AdBlockVpnService : VpnService() {
         if (!looksLikeQuicPacket(payload)) return false
 
         val cacheKeys = buildCacheKeys(info)
-        val localProxyTarget = belongsToLocalProxyTargetUid(info, cacheKeys)
+        val localProxyTarget = belongsToLocalProxyTargetUid(cacheKeys)
 
         val destinationIp = formatAddress(info.destinationAddress)
         maybePruneRouteCaches()
@@ -888,23 +932,28 @@ class AdBlockVpnService : VpnService() {
         if (RuleRepository.isWhitelistedDomain(domain)) return false
         if (RuleRepository.isSensitiveAuthDomain(domain)) return false
 
-        val appName = httpsTarget?.appName?.takeIf { it.isNotBlank() }
-            ?: route?.appName?.takeIf { it.isNotBlank() }
-            ?: resolveAppName(domain, info)
+        val domainContext = resolveDomainDecisionContext(
+            domain = domain,
+            info = info,
+            knownAppName = httpsTarget?.appName?.takeIf { it.isNotBlank() }
+                ?: route?.appName?.takeIf { it.isNotBlank() },
+            knownVendor = httpsTarget?.vendor?.takeIf { it.isNotBlank() }
+                ?: route?.vendor?.takeIf { it.isNotBlank() },
+            destinationPort = info.destinationPort,
+            sourcePort = info.sourcePort
+        )
+        val appName = domainContext.appName
         if (RuleRepository.isGameCoreDomain(domain) || RuleRepository.isCommunityAppHint(appName) || RuleRepository.isSocialCoreDomain(domain)) {
             return false
         }
-        val vendor = httpsTarget?.vendor?.takeIf { it.isNotBlank() }
-            ?: route?.vendor?.takeIf { it.isNotBlank() }
-            ?: classifyVendorCached(domain, appName)
-        val matchedRule = RuleRepository.findMatchingRule(this, domain)
-        val isBlocked = RuleRepository.isBlocked(this, domain)
-        if (!isBlocked && RuleRepository.isWhitelistedDomain(domain)) return false
+        val vendor = domainContext.vendor
+        val matchedRule = domainContext.matchedRule
         val bypassProtectionBlock = RuleRepository.isBypassProtectionDomain(domain)
-        val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, domain, appName, vendor)
-        val forcedNovelQuicBlock = RuleRepository.shouldForceNovelQuicBlock(domain, appName, vendor)
-        val protectedNovelUrlBlock = RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(this, domain, null, appName)
-        if (!isBlocked && (aggressiveNovelBlock || forcedNovelQuicBlock || protectedNovelUrlBlock)) {
+        val novelSignals = evaluateNovelBlockingSignals(domain, appName, vendor)
+        val aggressiveNovelBlock = novelSignals.aggressiveNovelBlock
+        val forcedNovelQuicBlock = novelSignals.forcedNovelQuicBlock
+        val protectedNovelUrlBlock = novelSignals.protectedNovelUrlBlock
+        if (matchedRule == null && (aggressiveNovelBlock || forcedNovelQuicBlock || protectedNovelUrlBlock)) {
             RuleRepository.reportUnknownVendorIfNeeded(
                 context = this,
                 vendor = vendor,
@@ -916,12 +965,11 @@ class AdBlockVpnService : VpnService() {
         }
         val bypassReason = HttpsMitmRepository.getActiveBypassReason(this, domain)
         val shouldForceTcpFallback = httpDecryptEnabled && httpsTarget != null && bypassReason == null
-        if (matchedRule == null && !isBlocked && !bypassProtectionBlock && !aggressiveNovelBlock && !forcedNovelQuicBlock && !protectedNovelUrlBlock && !shouldForceTcpFallback) return false
+        if (matchedRule == null && !bypassProtectionBlock && !aggressiveNovelBlock && !forcedNovelQuicBlock && !protectedNovelUrlBlock && !shouldForceTcpFallback) return false
 
         val reason = when {
             localProxyTarget -> "local-proxy-force-tcp"
             matchedRule != null -> "matched-rule"
-            isBlocked -> "is-blocked"
             bypassProtectionBlock -> "encrypted-dns-bypass"
             aggressiveNovelBlock -> "novel-aggressive"
             forcedNovelQuicBlock -> "novel-quic-force-block"
@@ -942,7 +990,7 @@ class AdBlockVpnService : VpnService() {
         if (info.destinationPort == 53) return
         val cacheKeys = buildCacheKeys(info)
         val localProxyTarget = localProxyTargetAppCache[cacheKeys.sourcePortKey]
-            ?: belongsToLocalProxyTargetUid(info, cacheKeys)
+            ?: belongsToLocalProxyTargetUid(cacheKeys)
         if (!localProxyTarget) return
         val destinationIp = formatAddress(info.destinationAddress)
         if ((destinationIp == localProxyCoexistConfig.host || destinationIp == "127.0.0.1" || destinationIp == "::1") && info.destinationPort == localProxyCoexistConfig.port) {
@@ -970,13 +1018,14 @@ class AdBlockVpnService : VpnService() {
         val cacheKeys = buildCacheKeys(info)
         localProxyTargetAppCache[cacheKeys.flowKey]?.let { return it }
         localProxyTargetAppCache[cacheKeys.sourcePortKey]?.let { return it }
-        val destinationIp = formatAddress(info.destinationAddress)
+        val targetContext = resolveDestinationAppContext(info) ?: return false
+        val destinationIp = targetContext.destinationIp
         if ((destinationIp == config.host || destinationIp == "127.0.0.1" || destinationIp == "::1") && info.destinationPort == port) {
             localProxyTargetAppCache[cacheKeys.flowKey] = false
             return false
         }
-        val appName = resolveAppName(destinationIp, info)
-        val matched = belongsToLocalProxyTarget(appName) || belongsToLocalProxyTargetUid(info, cacheKeys)
+        val appName = targetContext.appName
+        val matched = belongsToLocalProxyTarget(appName) || belongsToLocalProxyTargetUid(cacheKeys)
         localProxyTargetAppCache[cacheKeys.flowKey] = matched
         localProxyTargetAppCache[cacheKeys.sourcePortKey] = matched
         return matched
@@ -989,29 +1038,8 @@ class AdBlockVpnService : VpnService() {
         }
     }
 
-    private fun belongsToLocalProxyTargetUid(info: com.HanFeng.model.PacketInfo, cacheKeys: AppResolveCacheKeys): Boolean {
-        val uid = readCachedOwnerUid(cacheKeys) ?: runCatching {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
-            if (hasRecentOwnerUidFailure(cacheKeys)) return false
-            val protocol = if (info.protocol == OsConstants.IPPROTO_UDP) OsConstants.IPPROTO_UDP else OsConstants.IPPROTO_TCP
-            val localHost = InetAddress.getByAddress(info.sourceAddress).hostAddress ?: return false
-            val remoteHost = InetAddress.getByAddress(info.destinationAddress).hostAddress ?: return false
-            val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return false
-            val local = InetSocketAddress(localHost, info.sourcePort)
-            val remote = InetSocketAddress(remoteHost, info.destinationPort)
-            var resolvedUid = connectivityManager.getConnectionOwnerUid(protocol, local, remote)
-            if (resolvedUid <= 0 && ShizukuConnectionOwnerRepository.isReady(this)) {
-                resolvedUid = ShizukuConnectionOwnerRepository.getConnectionOwnerUid(
-                    context = this,
-                    protocol = protocol,
-                    localHost = localHost,
-                    localPort = info.sourcePort,
-                    remoteHost = remoteHost,
-                    remotePort = info.destinationPort
-                )
-            }
-            resolvedUid
-        }.getOrNull() ?: return false
+    private fun belongsToLocalProxyTargetUid(cacheKeys: AppResolveCacheKeys): Boolean {
+        val uid = readCachedOwnerUid(cacheKeys) ?: return false
         if (uid <= 0) return false
         cacheOwnerUid(cacheKeys, uid)
         clearOwnerUidFailure(cacheKeys)
@@ -1025,31 +1053,29 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun shouldBlockEncryptedDnsDirectFlow(info: com.HanFeng.model.PacketInfo): Boolean {
-        val destinationIp = formatAddress(info.destinationAddress)
+        val targetContext = resolveDestinationAppContext(info) ?: return false
+        val destinationIp = targetContext.destinationIp
         val port = info.destinationPort
         val currentDnsEndpoint = isCurrentDnsEndpoint(destinationIp)
         val knownPublicDnsEndpoint = isKnownPublicDnsEndpoint(destinationIp)
         val httpsTarget = synchronized(httpsDecryptIpCache) { httpsDecryptIpCache[destinationIp] }
         val quicTarget = synchronized(quicRouteCache) { quicRouteCache[destinationIp] }
+        val trackedTargetDomain = httpsTarget?.domain ?: quicTarget?.domain
+        val trackedTargetBypassProtection = trackedTargetDomain?.let(RuleRepository::isBypassProtectionDomain) == true
         if (!currentDnsEndpoint && !knownPublicDnsEndpoint) {
             if (port != 443 && port != 853 && port != 784 && port != 8853) return false
-            val domain = httpsTarget?.domain ?: quicTarget?.domain ?: return false
-            if (!RuleRepository.isBypassProtectionDomain(domain)) return false
+            if (!trackedTargetBypassProtection) return false
         }
         val encryptedDnsPort = when (port) {
             853 -> true
             784, 8853 -> knownPublicDnsEndpoint
-            443 -> knownPublicDnsEndpoint || synchronized(httpsDecryptIpCache) {
-                httpsDecryptIpCache[destinationIp]?.domain?.let(RuleRepository::isBypassProtectionDomain) == true
-            } || synchronized(quicRouteCache) {
-                quicRouteCache[destinationIp]?.domain?.let(RuleRepository::isBypassProtectionDomain) == true
-            }
+            443 -> knownPublicDnsEndpoint || trackedTargetBypassProtection
             else -> false
         }
         if (!encryptedDnsPort) return false
         val appName = httpsTarget?.appName?.takeIf { it.isNotBlank() }
             ?: quicTarget?.appName?.takeIf { it.isNotBlank() }
-            ?: resolveAppName(destinationIp, info)
+            ?: targetContext.appName
         StatsRepository.recordBlockedHttp(this, "加密DNS", appName, 8 * 1024)
         logDecisionOnce(
             key = "encrypted-dns-direct:$destinationIp:$port",
@@ -1108,25 +1134,21 @@ class AdBlockVpnService : VpnService() {
         } ?: return false
         if (RuleRepository.isSensitiveAuthDomain(target.domain)) return false
         if (RuleRepository.isSocialCoreDomain(target.domain)) return false
-        if (RuleRepository.shouldProtectMediaTraffic(target.domain)) return false
-        if (RuleRepository.shouldProtectBusinessTraffic(target.domain)) return false
+        if (isProtectedTrafficDomain(target.domain)) return false
         // HTTP 连接拦截优化：复用计算结果，避免重复调用
-        val appName = target.appName.takeIf { it.isNotBlank() } ?: resolveAppName(target.domain, info)
-        val matchedRule = RuleRepository.findMatchingRule(
-            context = this,
+        val domainContext = resolveDomainDecisionContext(
             domain = target.domain,
-            appName = appName,
+            info = info,
+            knownAppName = target.appName.takeIf { it.isNotBlank() },
             destinationPort = info.destinationPort,
             sourcePort = info.sourcePort
         )
-        val isBlocked = matchedRule != null
-        val vendor = matchedRule?.vendor ?: classifyVendorCached(target.domain, appName)
-        val bypassProtectionBlock = RuleRepository.isBypassProtectionDomain(target.domain)
-        val generalAdTraffic = RuleRepository.shouldTreatAsGeneralAdTraffic(target.domain, vendor, appName)
-        val aggressiveNovelBlock = if (!isBlocked) {
-            RuleRepository.shouldAggressivelyBlockForNovelApp(this, target.domain, appName, vendor)
-        } else false
-        if (!isBlocked && !bypassProtectionBlock && !generalAdTraffic && !aggressiveNovelBlock) return false
+        val appName = domainContext.appName
+        val matchedRule = domainContext.matchedRule
+        val vendor = domainContext.vendor
+        if (!shouldTreatAsTrackedAdTarget(target.domain, appName, vendor, matchedRule, includeProtectedNovelUrl = false, includeForceNovelQuic = false)) {
+            return false
+        }
         // 需要拦截
         StatsRepository.recordBlockedHttp(this, vendor, appName, 50 * 1024)
         LogRepository.append(
@@ -1146,29 +1168,32 @@ class AdBlockVpnService : VpnService() {
         } ?: return
         val clientHelloInfo = TlsClientHelloParser.extractClientHelloInfo(info.payload) ?: return
         val sniHost = clientHelloInfo.sniHost ?: return
-        val appName = decryptTarget.appName.takeIf { it.isNotBlank() } ?: resolveAppName(sniHost, info)
+        val targetContext = resolveDomainDecisionContext(
+            domain = decryptTarget.domain,
+            info = info,
+            knownAppName = decryptTarget.appName.takeIf { it.isNotBlank() },
+            knownVendor = decryptTarget.vendor.takeIf { it.isNotBlank() },
+            destinationPort = info.destinationPort,
+            sourcePort = info.sourcePort
+        )
+        val appName = targetContext.appName
         if (RuleRepository.isSocialCoreDomain(decryptTarget.domain)) return
         if (RuleRepository.isSocialCoreDomain(sniHost)) return
-        if (RuleRepository.shouldProtectMediaTraffic(decryptTarget.domain)) return
-        if (RuleRepository.shouldProtectMediaTraffic(sniHost)) return
-        if (RuleRepository.shouldProtectBusinessTraffic(decryptTarget.domain)) return
-        if (RuleRepository.shouldProtectBusinessTraffic(sniHost)) return
-        val blockedTarget = RuleRepository.isBlocked(
-            context = this,
-            domain = decryptTarget.domain,
-            appName = appName,
-            destinationPort = info.destinationPort,
-            sourcePort = info.sourcePort
-        )
-        val blockedSni = RuleRepository.isBlocked(
-            context = this,
+        if (isProtectedTrafficDomain(decryptTarget.domain)) return
+        if (isProtectedTrafficDomain(sniHost)) return
+        val targetMatchedRule = targetContext.matchedRule
+        val blockedTarget = targetMatchedRule != null
+        val sniContext = resolveDomainDecisionContext(
             domain = sniHost,
-            appName = appName,
+            info = info,
+            knownAppName = appName,
             destinationPort = info.destinationPort,
             sourcePort = info.sourcePort
         )
-        val targetGeneralAd = RuleRepository.shouldTreatAsGeneralAdTraffic(decryptTarget.domain, decryptTarget.vendor, appName)
-        val sniVendor = classifyVendorCached(sniHost, appName)
+        val blockedSni = sniContext.matchedRule != null
+        val targetVendor = targetContext.vendor
+        val targetGeneralAd = RuleRepository.shouldTreatAsGeneralAdTraffic(decryptTarget.domain, targetVendor, appName)
+        val sniVendor = sniContext.vendor
         val sniGeneralAd = RuleRepository.shouldTreatAsGeneralAdTraffic(sniHost, sniVendor, appName)
         if (shouldBlockEncryptedDnsClientHello(sniHost, clientHelloInfo.offeredAlpnProtocols, destinationIp, appName)) {
             return
@@ -1186,7 +1211,7 @@ class AdBlockVpnService : VpnService() {
         )
         RuleRepository.reportUnknownVendorIfNeeded(
             context = this,
-            vendor = classifyVendorCached(sniHost, appName),
+            vendor = sniVendor,
             domain = sniHost,
             appName = appName,
             signal = RuleRepository.SuspiciousSignal.TLS_SNI,
@@ -1251,22 +1276,17 @@ class AdBlockVpnService : VpnService() {
         }
         // TCP SYN 阶段检查规则（早期拦截广告连接）优化：复用计算结果
         if (info.tcpFlags.hasTcpFlag(TCP_FLAG_SYN) && !info.tcpFlags.hasTcpFlag(TCP_FLAG_ACK)) {
-            val appName = target.appName.takeIf { it.isNotBlank() } ?: resolveAppName(target.domain, info)
-            val matchedRule = RuleRepository.findMatchingRule(
-                context = this,
+            val domainContext = resolveDomainDecisionContext(
                 domain = target.domain,
-                appName = appName,
+                info = info,
+                knownAppName = target.appName.takeIf { it.isNotBlank() },
                 destinationPort = info.destinationPort,
                 sourcePort = info.sourcePort
             )
-            val isBlocked = matchedRule != null
-            val vendor = matchedRule?.vendor ?: classifyVendorCached(target.domain, appName)
-            val bypassProtectionBlock = RuleRepository.isBypassProtectionDomain(target.domain)
-            val generalAdTraffic = RuleRepository.shouldTreatAsGeneralAdTraffic(target.domain, vendor, appName)
-            val aggressiveNovelBlock = if (!isBlocked) {
-                RuleRepository.shouldAggressivelyBlockForNovelApp(this, target.domain, appName, vendor)
-            } else false
-            if (isBlocked || bypassProtectionBlock || generalAdTraffic || aggressiveNovelBlock) {
+            val appName = domainContext.appName
+            val matchedRule = domainContext.matchedRule
+            val vendor = domainContext.vendor
+            if (shouldTreatAsTrackedAdTarget(target.domain, appName, vendor, matchedRule, includeProtectedNovelUrl = false, includeForceNovelQuic = false)) {
                 StatsRepository.recordBlockedHttp(this, vendor, appName, 64 * 1024)
                 LogRepository.append(
                     this,
@@ -1347,8 +1367,9 @@ class AdBlockVpnService : VpnService() {
     private fun observeLocalProxyTcpFlow(info: com.HanFeng.model.PacketInfo) {
         if (info.protocol != OsConstants.IPPROTO_TCP) return
         val flowKey = buildCacheKeys(info).flowKey
-        val targetIp = formatAddress(info.destinationAddress)
-        val appName = resolveAppName(targetIp, info)
+        val targetContext = resolveDestinationAppContext(info) ?: return
+        val targetIp = targetContext.destinationIp
+        val appName = targetContext.appName
         val flags = info.tcpFlags
         synchronized(localProxyTcpFlowCache) {
             val current = localProxyTcpFlowCache[flowKey]
@@ -2544,13 +2565,14 @@ class AdBlockVpnService : VpnService() {
         vendor: String
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
-        if (RuleRepository.shouldProtectMediaTraffic(question.domain)) return
-        if (RuleRepository.shouldProtectBusinessTraffic(question.domain)) return
+        if (isProtectedTrafficDomain(question.domain)) return
         if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isProtectedNovelAppDomain(question.domain)) return
         if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isNovelContentDomain(question.domain)) return
-        val matchedRule = RuleRepository.findMatchingRule(this, question.domain, question.qType)
-        val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, vendor)
-        val generalAdTraffic = RuleRepository.shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)
+        val domainContext = resolveDomainDecisionContextForApp(question.domain, appName, question.qType)
+        val effectiveVendor = domainContext.vendor.takeIf { it.isNotBlank() } ?: vendor
+        val matchedRule = domainContext.matchedRule
+        val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, effectiveVendor)
+        val generalAdTraffic = RuleRepository.shouldTreatAsGeneralAdTraffic(question.domain, effectiveVendor, appName)
         if (matchedRule == null && !aggressiveNovelBlock && !generalAdTraffic) return
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
@@ -2564,7 +2586,7 @@ class AdBlockVpnService : VpnService() {
                 val prefixLength = address.size * 8
                 httpDecryptIpCache[ip] = HttpDecryptTarget(
                     domain = question.domain.lowercase(),
-                    vendor = vendor,
+                    vendor = effectiveVendor,
                     appName = appName,
                     source = "direct",
                     expiresAt = expiresAt
@@ -2573,7 +2595,7 @@ class AdBlockVpnService : VpnService() {
                     ip = ip,
                     prefixLength = prefixLength,
                     domain = question.domain.lowercase(),
-                    vendor = vendor,
+                    vendor = effectiveVendor,
                     expiresAt = expiresAt
                 )
             }
@@ -2584,7 +2606,7 @@ class AdBlockVpnService : VpnService() {
         }
         if (HttpDecryptRouteRepository.upsertRoutes(this, routeEntries)) {
             requestHttpDecryptRouteReload(
-                forceImmediate = shouldForceImmediateDecryptRouteReload(question.domain, appName, vendor)
+                forceImmediate = shouldForceImmediateDecryptRouteReload(question.domain, appName, effectiveVendor, matchedRule)
             )
         }
     }
@@ -2634,22 +2656,25 @@ class AdBlockVpnService : VpnService() {
         appName: String
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
+        val aliasContexts = HashMap<String, DomainDecisionContext>(aliasTargets.size)
         val matchedAliases = aliasTargets.filter { aliasTarget ->
-            if (RuleRepository.shouldProtectMediaTraffic(aliasTarget)) return@filter false
-            if (RuleRepository.shouldProtectBusinessTraffic(aliasTarget)) return@filter false
+            if (isProtectedTrafficDomain(aliasTarget)) return@filter false
             if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isProtectedNovelAppDomain(aliasTarget)) return@filter false
             if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isNovelContentDomain(aliasTarget)) return@filter false
-            val aliasVendor = classifyVendorCached(aliasTarget, appName)
-            RuleRepository.findMatchingRule(this, aliasTarget, question.qType) != null ||
-                RuleRepository.shouldAggressivelyBlockForNovelApp(
-                    this,
-                    aliasTarget,
-                    appName,
-                    aliasVendor
-                ) ||
-                RuleRepository.shouldTreatAsGeneralAdTraffic(aliasTarget, aliasVendor, appName)
+            val aliasContext = resolveAliasDecisionContext(aliasContexts, aliasTarget, appName, question.qType)
+            shouldTreatAsTrackedAdTarget(
+                domain = aliasTarget,
+                appName = appName,
+                vendor = aliasContext.vendor,
+                matchedRule = aliasContext.matchedRule,
+                includeProtectedNovelUrl = false,
+                includeForceNovelQuic = false
+            )
         }.distinct()
         if (matchedAliases.isEmpty()) return
+        val matchedAliasContexts = matchedAliases.associateWith { matchedAlias ->
+            resolveAliasDecisionContext(aliasContexts, matchedAlias, appName, question.qType)
+        }
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
         val now = System.currentTimeMillis()
@@ -2658,7 +2683,7 @@ class AdBlockVpnService : VpnService() {
         synchronized(httpDecryptIpCache) {
             pruneHttpDecryptTargetsLocked()
             matchedAliases.forEach { matchedAlias ->
-                val vendor = classifyVendorCached(matchedAlias, appName)
+                val vendor = matchedAliasContexts.getValue(matchedAlias).vendor
                 addresses.forEach { address ->
                     val ip = formatAddress(address)
                     val prefixLength = address.size * 8
@@ -2684,10 +2709,10 @@ class AdBlockVpnService : VpnService() {
             }
         }
         val shouldForceImmediateReload = matchedAliases.any { matchedAlias ->
-            val vendor = classifyVendorCached(matchedAlias, appName)
-            shouldForceImmediateDecryptRouteReload(matchedAlias, appName, vendor)
+            val aliasContext = matchedAliasContexts.getValue(matchedAlias)
+            shouldForceImmediateDecryptRouteReload(matchedAlias, appName, aliasContext.vendor, aliasContext.matchedRule)
         }
-        val logVendor = matchedAliases.firstOrNull()?.let { classifyVendorCached(it, appName) } ?: ""
+        val logVendor = matchedAliases.firstOrNull()?.let { matchedAliasContexts.getValue(it).vendor } ?: ""
         if (HttpDecryptRouteRepository.upsertRoutes(this, routeEntries)) {
             requestHttpDecryptRouteReload(
                 forceImmediate = shouldForceImmediateReload
@@ -2713,10 +2738,12 @@ class AdBlockVpnService : VpnService() {
         vendor: String
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
-        if (RuleRepository.shouldProtectMediaTraffic(question.domain)) return
+        if (isProtectedTrafficDomain(question.domain)) return
         if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isProtectedNovelAppDomain(question.domain)) return
         if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isNovelContentDomain(question.domain)) return
-        if (!shouldTrackHttpsMitmTarget(question.domain, question.qType, appName, vendor)) return
+        val domainContext = resolveDomainDecisionContextForApp(question.domain, appName, question.qType)
+        val effectiveVendor = domainContext.vendor.takeIf { it.isNotBlank() } ?: vendor
+        if (!shouldTrackHttpsMitmTarget(question.domain, question.qType, appName, effectiveVendor, domainContext.matchedRule)) return
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
         val now = System.currentTimeMillis()
@@ -2729,7 +2756,7 @@ class AdBlockVpnService : VpnService() {
                 val prefixLength = address.size * 8
                 httpsDecryptIpCache[ip] = HttpsDecryptTarget(
                     domain = question.domain.lowercase(),
-                    vendor = vendor,
+                    vendor = effectiveVendor,
                     appName = appName,
                     source = "direct",
                     expiresAt = expiresAt
@@ -2738,7 +2765,7 @@ class AdBlockVpnService : VpnService() {
                     ip = ip,
                     prefixLength = prefixLength,
                     domain = question.domain.lowercase(),
-                    vendor = vendor,
+                    vendor = effectiveVendor,
                     expiresAt = expiresAt
                 )
             }
@@ -2749,7 +2776,7 @@ class AdBlockVpnService : VpnService() {
         }
         if (HttpsDecryptRouteRepository.upsertRoutes(this, routeEntries)) {
             requestHttpDecryptRouteReload(
-                forceImmediate = shouldForceImmediateDecryptRouteReload(question.domain, appName, vendor)
+                forceImmediate = shouldForceImmediateDecryptRouteReload(question.domain, appName, effectiveVendor, domainContext.matchedRule)
             )
         }
     }
@@ -2765,9 +2792,11 @@ class AdBlockVpnService : VpnService() {
         appName: String,
         vendor: String
     ) {
-        val shouldTrack = RuleRepository.findMatchingRule(this, question.domain, question.qType) != null ||
-            RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, vendor) ||
-            RuleRepository.shouldForceNovelQuicBlock(question.domain, appName, vendor)
+        val domainContext = resolveDomainDecisionContextForApp(question.domain, appName, question.qType)
+        val effectiveVendor = domainContext.vendor.takeIf { it.isNotBlank() } ?: vendor
+        val shouldTrack = domainContext.matchedRule != null ||
+            RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, effectiveVendor) ||
+            RuleRepository.shouldForceNovelQuicBlock(question.domain, appName, effectiveVendor)
         if (!shouldTrack) return
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
@@ -2778,7 +2807,7 @@ class AdBlockVpnService : VpnService() {
             addresses.forEach { address ->
                 quicRouteCache[formatAddress(address)] = QuicRouteTarget(
                     domain = question.domain.lowercase(),
-                    vendor = vendor,
+                    vendor = effectiveVendor,
                     appName = appName,
                     source = "direct",
                     expiresAt = expiresAt
@@ -2798,7 +2827,9 @@ class AdBlockVpnService : VpnService() {
         vendor: String
     ) {
         val domain = question.domain.lowercase()
-        if (!shouldTrackAdIpTarget(domain, appName, vendor, question.qType)) return
+        val domainContext = resolveDomainDecisionContextForApp(domain, appName, question.qType)
+        val effectiveVendor = domainContext.vendor.takeIf { it.isNotBlank() } ?: vendor
+        if (!shouldTrackAdIpTarget(domain, appName, effectiveVendor, question.qType, domainContext.matchedRule)) return
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
         val now = System.currentTimeMillis()
@@ -2808,7 +2839,7 @@ class AdBlockVpnService : VpnService() {
             addresses.forEach { address ->
                 adIpTargetCache[formatAddress(address)] = AdIpTarget(
                     domain = domain,
-                    vendor = vendor,
+                    vendor = effectiveVendor,
                     appName = appName,
                     source = "direct",
                     expiresAt = expiresAt
@@ -2827,11 +2858,15 @@ class AdBlockVpnService : VpnService() {
         response: ByteArray,
         appName: String
     ) {
+        val aliasContexts = HashMap<String, DomainDecisionContext>(aliasTargets.size)
         val matchedAliases = aliasTargets.filter { aliasTarget ->
-            val aliasVendor = classifyVendorCached(aliasTarget, appName)
-            shouldTrackAdIpTarget(aliasTarget, appName, aliasVendor, question.qType)
+            val aliasContext = resolveAliasDecisionContext(aliasContexts, aliasTarget, appName, question.qType)
+            shouldTrackAdIpTarget(aliasTarget, appName, aliasContext.vendor, question.qType, aliasContext.matchedRule)
         }.map { it.lowercase() }.distinct()
         if (matchedAliases.isEmpty()) return
+        val matchedAliasContexts = matchedAliases.associateWith { matchedAlias ->
+            resolveAliasDecisionContext(aliasContexts, matchedAlias, appName, question.qType)
+        }
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
         val now = System.currentTimeMillis()
@@ -2839,7 +2874,7 @@ class AdBlockVpnService : VpnService() {
         synchronized(adIpTargetCache) {
             pruneAdIpTargetsLocked()
             matchedAliases.forEach { matchedAlias ->
-                val vendor = classifyVendorCached(matchedAlias, appName)
+                val vendor = matchedAliasContexts.getValue(matchedAlias).vendor
                 addresses.forEach { address ->
                     adIpTargetCache[formatAddress(address)] = AdIpTarget(
                         domain = matchedAlias,
@@ -2857,17 +2892,19 @@ class AdBlockVpnService : VpnService() {
         }
     }
 
-    private fun shouldTrackAdIpTarget(domain: String, appName: String, vendor: String, qType: Int?): Boolean {
+    private fun shouldTrackAdIpTarget(
+        domain: String,
+        appName: String,
+        vendor: String,
+        qType: Int?,
+        matchedRule: BlockRule?
+    ): Boolean {
+        val resolvedRule = matchedRule ?: RuleRepository.findMatchingRule(this, domain, qType)
         if (RuleRepository.isWhitelistedDomain(domain)) return false
         if (RuleRepository.isSensitiveAuthDomain(domain)) return false
-        if (RuleRepository.shouldProtectMediaTraffic(domain) && RuleRepository.findMatchingRule(this, domain, qType) == null) return false
-        if (RuleRepository.shouldProtectBusinessTraffic(domain) && RuleRepository.findMatchingRule(this, domain, qType) == null) return false
-        if (RuleRepository.findMatchingRule(this, domain, qType) != null) return true
-        if (RuleRepository.isBypassProtectionDomain(domain)) return true
-        if (RuleRepository.shouldTreatAsGeneralAdTraffic(domain, vendor, appName)) return true
-        if (RuleRepository.shouldAggressivelyBlockForNovelApp(this, domain, appName, vendor)) return true
-        if (RuleRepository.shouldForceNovelQuicBlock(domain, appName, vendor)) return true
-        return RuleRepository.looksLikeAdSdkInfraDomain(domain, vendor)
+        if (isProtectedTrafficDomain(domain) && resolvedRule == null) return false
+        return shouldTreatAsTrackedAdTarget(domain, appName, vendor, resolvedRule) ||
+            RuleRepository.looksLikeAdSdkInfraDomain(domain, vendor)
     }
 
     private fun rememberQuicAliasTargets(
@@ -2878,19 +2915,30 @@ class AdBlockVpnService : VpnService() {
     ) {
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
+        val aliasContexts = HashMap<String, DomainDecisionContext>(aliasTargets.size)
         val matchedAliases = aliasTargets.map { it.lowercase() }.filter { alias ->
-            val vendor = classifyVendorCached(alias, appName)
-            RuleRepository.findMatchingRule(this, alias, question.qType) != null ||
-                RuleRepository.shouldAggressivelyBlockForNovelApp(this, alias, appName, vendor) ||
-                RuleRepository.shouldForceNovelQuicBlock(alias, appName, vendor)
+            val aliasContext = resolveAliasDecisionContext(aliasContexts, alias, appName, question.qType)
+            val novelSignals = evaluateNovelBlockingSignals(
+                domain = alias,
+                appName = appName,
+                vendor = aliasContext.vendor,
+                includeProtectedNovelUrl = false,
+                includeForceNovelQuic = true
+            )
+            aliasContext.matchedRule != null ||
+                novelSignals.aggressiveNovelBlock ||
+                novelSignals.forcedNovelQuicBlock
         }.distinct()
         if (matchedAliases.isEmpty()) return
+        val matchedAliasContexts = matchedAliases.associateWith { matchedAlias ->
+            resolveAliasDecisionContext(aliasContexts, matchedAlias, appName, question.qType)
+        }
         val now = System.currentTimeMillis()
         val expiresAt = min(now + DnsMessageParser.extractCacheTtlMillis(response), now + 180_000L)
         synchronized(quicRouteCache) {
             pruneQuicTargetsLocked()
             matchedAliases.forEach { matchedAlias ->
-                val vendor = classifyVendorCached(matchedAlias, appName)
+                val vendor = matchedAliasContexts.getValue(matchedAlias).vendor
                 addresses.forEach { address ->
                     quicRouteCache[formatAddress(address)] = QuicRouteTarget(
                         domain = matchedAlias,
@@ -2925,14 +2973,18 @@ class AdBlockVpnService : VpnService() {
         appName: String
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
+        val aliasContexts = HashMap<String, DomainDecisionContext>(aliasTargets.size)
         val matchedAliases = aliasTargets.filter { aliasTarget ->
-            if (RuleRepository.shouldProtectMediaTraffic(aliasTarget)) return@filter false
+            if (isProtectedTrafficDomain(aliasTarget)) return@filter false
             if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isProtectedNovelAppDomain(aliasTarget)) return@filter false
             if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isNovelContentDomain(aliasTarget)) return@filter false
-            val aliasVendor = classifyVendorCached(aliasTarget, appName)
-            shouldTrackHttpsMitmTarget(aliasTarget, question.qType, appName, aliasVendor)
+            val aliasContext = resolveAliasDecisionContext(aliasContexts, aliasTarget, appName, question.qType)
+            shouldTrackHttpsMitmTarget(aliasTarget, question.qType, appName, aliasContext.vendor, aliasContext.matchedRule)
         }.distinct()
         if (matchedAliases.isEmpty()) return
+        val matchedAliasContexts = matchedAliases.associateWith { matchedAlias ->
+            resolveAliasDecisionContext(aliasContexts, matchedAlias, appName, question.qType)
+        }
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
         val now = System.currentTimeMillis()
@@ -2941,7 +2993,7 @@ class AdBlockVpnService : VpnService() {
         synchronized(httpsDecryptIpCache) {
             pruneHttpsDecryptTargetsLocked()
             matchedAliases.forEach { matchedAlias ->
-                val vendor = classifyVendorCached(matchedAlias, appName)
+                val vendor = matchedAliasContexts.getValue(matchedAlias).vendor
                 addresses.forEach { address ->
                     val ip = formatAddress(address)
                     val prefixLength = address.size * 8
@@ -2967,10 +3019,10 @@ class AdBlockVpnService : VpnService() {
             }
         }
         val shouldForceImmediateReload = matchedAliases.any { matchedAlias ->
-            val vendor = classifyVendorCached(matchedAlias, appName)
-            shouldForceImmediateDecryptRouteReload(matchedAlias, appName, vendor)
+            val aliasContext = matchedAliasContexts.getValue(matchedAlias)
+            shouldForceImmediateDecryptRouteReload(matchedAlias, appName, aliasContext.vendor, aliasContext.matchedRule)
         }
-        val logVendor = matchedAliases.firstOrNull()?.let { classifyVendorCached(it, appName) } ?: ""
+        val logVendor = matchedAliases.firstOrNull()?.let { matchedAliasContexts.getValue(it).vendor } ?: ""
         if (HttpsDecryptRouteRepository.upsertRoutes(this, routeEntries)) {
             requestHttpDecryptRouteReload(
                 forceImmediate = shouldForceImmediateReload
@@ -2993,23 +3045,19 @@ class AdBlockVpnService : VpnService() {
         domain: String,
         qType: Int?,
         appName: String,
-        vendor: String
+        vendor: String,
+        matchedRule: BlockRule? = null
     ): Boolean {
-        if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isProtectedNovelAppDomain(domain)) return false
-        if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isNovelContentDomain(domain)) return false
-        if (RuleRepository.shouldProtectMediaTraffic(domain) && RuleRepository.findMatchingRule(this, domain, qType) == null) return false
-        if (RuleRepository.shouldProtectBusinessTraffic(domain) && RuleRepository.findMatchingRule(this, domain, qType) == null) return false
-        if (RuleRepository.findMatchingRule(this, domain, qType) != null) return true
-        if (RuleRepository.isBypassProtectionDomain(domain)) return true
-        if (RuleRepository.shouldTreatAsGeneralAdTraffic(domain, vendor, appName)) return true
-        if (RuleRepository.shouldAggressivelyBlockForNovelApp(this, domain, appName, vendor)) return true
-        if (RuleRepository.shouldForceNovelQuicBlock(domain, appName, vendor)) return true
-        if (RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(this, domain, null, appName)) return true
-        if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isProtectedNovelAppDomain(domain)) return true
+        val resolvedRule = matchedRule ?: RuleRepository.findMatchingRule(this, domain, qType)
+        val novelApp = RuleRepository.isNovelAppHint(appName)
+        if (novelApp && RuleRepository.isProtectedNovelAppDomain(domain)) return false
+        if (novelApp && RuleRepository.isNovelContentDomain(domain)) return false
+        if (isProtectedTrafficDomain(domain) && resolvedRule == null) return false
+        if (shouldTreatAsTrackedAdTarget(domain, appName, vendor, resolvedRule)) return true
         val suspiciousScore = RuleRepository.suspiciousDomainConfidenceScore(
             domain = domain,
             vendor = vendor,
-            novelHits = if (RuleRepository.isNovelAppHint(appName)) 1 else 0,
+            novelHits = if (novelApp) 1 else 0,
             count = 1,
             appName = appName
         )
@@ -3019,15 +3067,87 @@ class AdBlockVpnService : VpnService() {
     private fun shouldForceImmediateDecryptRouteReload(
         domain: String,
         appName: String,
-        vendor: String
+        vendor: String,
+        matchedRule: BlockRule?
     ): Boolean {
+        return shouldTreatAsTrackedAdTarget(
+            domain = domain,
+            appName = appName,
+            vendor = vendor,
+            matchedRule = matchedRule
+        )
+    }
+
+    private fun resolveDomainDecisionContextForApp(
+        domain: String,
+        appName: String,
+        qType: Int? = null
+    ): DomainDecisionContext {
+        val matchedRule = RuleRepository.findMatchingRule(
+            context = this,
+            domain = domain,
+            qType = qType,
+            appName = appName
+        )
+        val vendor = matchedRule?.vendor ?: classifyVendorCached(domain, appName)
+        return DomainDecisionContext(
+            appName = appName,
+            matchedRule = matchedRule,
+            vendor = vendor
+        )
+    }
+
+    private fun resolveAliasDecisionContext(
+        aliasContexts: MutableMap<String, DomainDecisionContext>,
+        aliasTarget: String,
+        appName: String,
+        qType: Int?
+    ): DomainDecisionContext {
+        return aliasContexts.getOrPut(aliasTarget) {
+            resolveDomainDecisionContextForApp(aliasTarget, appName, qType)
+        }
+    }
+
+    private fun shouldTreatAsTrackedAdTarget(
+        domain: String,
+        appName: String,
+        vendor: String,
+        matchedRule: Any?,
+        includeProtectedNovelUrl: Boolean = true,
+        includeForceNovelQuic: Boolean = true
+    ): Boolean {
+        if (matchedRule != null) return true
         if (RuleRepository.isBypassProtectionDomain(domain)) return true
-        if (RuleRepository.findMatchingRule(this, domain) != null) return true
         if (RuleRepository.shouldTreatAsGeneralAdTraffic(domain, vendor, appName)) return true
-        if (RuleRepository.shouldAggressivelyBlockForNovelApp(this, domain, appName, vendor)) return true
-        if (RuleRepository.shouldForceNovelQuicBlock(domain, appName, vendor)) return true
-        if (RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(this, domain, null, appName)) return true
+        val novelSignals = evaluateNovelBlockingSignals(
+            domain = domain,
+            appName = appName,
+            vendor = vendor,
+            includeProtectedNovelUrl = includeProtectedNovelUrl,
+            includeForceNovelQuic = includeForceNovelQuic
+        )
+        if (novelSignals.aggressiveNovelBlock) return true
+        if (novelSignals.forcedNovelQuicBlock) return true
+        if (novelSignals.protectedNovelUrlBlock) return true
         return false
+    }
+
+    private fun evaluateNovelBlockingSignals(
+        domain: String,
+        appName: String,
+        vendor: String,
+        includeProtectedNovelUrl: Boolean = true,
+        includeForceNovelQuic: Boolean = true
+    ): NovelBlockingSignals {
+        val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, domain, appName, vendor)
+        val forcedNovelQuicBlock = includeForceNovelQuic && RuleRepository.shouldForceNovelQuicBlock(domain, appName, vendor)
+        val protectedNovelUrlBlock = includeProtectedNovelUrl &&
+            RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(this, domain, null, appName)
+        return NovelBlockingSignals(
+            aggressiveNovelBlock = aggressiveNovelBlock,
+            forcedNovelQuicBlock = forcedNovelQuicBlock,
+            protectedNovelUrlBlock = protectedNovelUrlBlock
+        )
     }
 
     private fun queryUpstreamDns(payload: ByteArray): UpstreamDnsResult? {
@@ -3333,9 +3453,9 @@ class AdBlockVpnService : VpnService() {
 
     private fun findMatchingIpRule(info: com.HanFeng.model.PacketInfo): MatchedIpRule? {
         if (!RuleRepository.hasIpRules(this)) return null
-        val destinationIp = formatAddress(info.destinationAddress)
-        if (destinationIp.isBlank()) return null
-        val appName = resolveAppName(destinationIp, info)
+        val targetContext = resolveDestinationAppContext(info) ?: return null
+        val destinationIp = targetContext.destinationIp
+        val appName = targetContext.appName
         val rule = RuleRepository.findMatchingIpRule(
             context = this,
             ip = destinationIp,
@@ -3348,8 +3468,8 @@ class AdBlockVpnService : VpnService() {
 
     private fun findMatchingPortOnlyRule(info: com.HanFeng.model.PacketInfo): MatchedIpRule? {
         if (!RuleRepository.hasPortOnlyRules(this)) return null
-        val destinationIp = formatAddress(info.destinationAddress)
-        val appName = resolveAppName(destinationIp, info)
+        val targetContext = resolveDestinationAppContext(info) ?: return null
+        val appName = targetContext.appName
         val rule = RuleRepository.findMatchingPortOnlyRule(
             context = this,
             appName = appName,
@@ -3383,6 +3503,15 @@ class AdBlockVpnService : VpnService() {
 
     private fun formatAddress(bytes: ByteArray): String = InetAddress.getByAddress(bytes).hostAddress ?: ""
 
+    private fun resolveDestinationAppContext(info: com.HanFeng.model.PacketInfo): DestinationAppContext? {
+        val destinationIp = formatAddress(info.destinationAddress)
+        if (destinationIp.isBlank()) return null
+        return DestinationAppContext(
+            destinationIp = destinationIp,
+            appName = resolveAppName(destinationIp, info)
+        )
+    }
+
     private fun resolveAppName(domain: String, info: com.HanFeng.model.PacketInfo): String {
         val cacheKeys = buildCacheKeys(info)
         val normalizedDomain = normalizeDomain(domain)
@@ -3406,6 +3535,54 @@ class AdBlockVpnService : VpnService() {
         return readCachedPortAppName(cacheKeys) ?: "未知应用"
     }
 
+    private fun resolveDomainDecisionContext(
+        domain: String,
+        info: com.HanFeng.model.PacketInfo,
+        qType: Int? = null,
+        knownAppName: String? = null,
+        knownVendor: String? = null,
+        destinationPort: Int? = null,
+        sourcePort: Int? = null
+    ): DomainDecisionContext {
+        val appName = knownAppName?.takeIf { it.isNotBlank() } ?: resolveAppName(domain, info)
+        val matchedRule = RuleRepository.findMatchingRule(
+            context = this,
+            domain = domain,
+            qType = qType,
+            appName = appName,
+            destinationPort = destinationPort,
+            sourcePort = sourcePort
+        )
+        val vendor = knownVendor?.takeIf { it.isNotBlank() } ?: matchedRule?.vendor ?: classifyVendorCached(domain, appName)
+        return DomainDecisionContext(
+            appName = appName,
+            matchedRule = matchedRule,
+            vendor = vendor
+        )
+    }
+
+    private fun isProtectedTrafficDomain(domain: String): Boolean {
+        return RuleRepository.shouldProtectMediaTraffic(domain) ||
+            RuleRepository.shouldProtectBusinessTraffic(domain)
+    }
+
+    private data class DomainDecisionContext(
+        val appName: String,
+        val matchedRule: BlockRule?,
+        val vendor: String
+    )
+
+    private data class NovelBlockingSignals(
+        val aggressiveNovelBlock: Boolean,
+        val forcedNovelQuicBlock: Boolean,
+        val protectedNovelUrlBlock: Boolean
+    )
+
+    private data class DestinationAppContext(
+        val destinationIp: String,
+        val appName: String
+    )
+
     private fun resolveAppNameByUid(info: com.HanFeng.model.PacketInfo, cacheKeys: AppResolveCacheKeys): String? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         if (hasRecentOwnerUidFailure(cacheKeys)) return null
@@ -3421,7 +3598,7 @@ class AdBlockVpnService : VpnService() {
             val local = InetSocketAddress(localHost, info.sourcePort)
             val remote = InetSocketAddress(remoteHost, info.destinationPort)
             var uid = connectivityManager.getConnectionOwnerUid(protocol, local, remote)
-            if (uid <= 0 && ShizukuConnectionOwnerRepository.isReady(this)) {
+            if (uid <= 0 && shizukuConnectionOwnerReady) {
                 uid = ShizukuConnectionOwnerRepository.getConnectionOwnerUid(
                     context = this,
                     protocol = protocol,
@@ -3430,13 +3607,22 @@ class AdBlockVpnService : VpnService() {
                     remoteHost = remoteHost,
                     remotePort = info.destinationPort
                 )
+                if (uid <= 0) {
+                    ShizukuConnectionOwnerRepository.invalidateService()
+                    shizukuConnectionOwnerReady = false
+                }
             }
             cacheOwnerUid(cacheKeys, uid)
-            clearOwnerUidFailure(cacheKeys)
+            if (uid > 0) {
+                clearOwnerUidFailure(cacheKeys)
+            } else {
+                cacheOwnerUidFailure(cacheKeys)
+            }
             if (uid <= 0) return@runCatching null
             buildAppLabel(uid)
         }.getOrElse {
             cacheOwnerUidFailure(cacheKeys)
+            shizukuConnectionOwnerReady = false
             logDecisionOnce(
                 key = "resolve-app-failed:${info.sourcePort}:${info.destinationPort}",
                 message = "Resolve app failed: ${it.message ?: it.javaClass.simpleName}",
@@ -3782,6 +3968,10 @@ class AdBlockVpnService : VpnService() {
     private fun refreshRuntimeFeatureFlags() {
         httpDecryptEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(this)
         mitmCertificateInstalled = HttpsMitmRepository.isCertificateInstalled(this)
+        shizukuConnectionOwnerReady = ShizukuConnectionOwnerRepository.isReady(this) &&
+            ShizukuRepository.canAttemptUserService(this)
+        shizukuAdControlReady = ShizukuAdControlRepository.isReady(this) &&
+            ShizukuRepository.canUseEnhancedMode(this)
         localProxyCoexistConfig = WhitelistRepository.getLocalProxyCoexistConfig(this)
         localProxyTargetPackages = WhitelistRepository.getLocalProxyTargetPackages(this)
     }

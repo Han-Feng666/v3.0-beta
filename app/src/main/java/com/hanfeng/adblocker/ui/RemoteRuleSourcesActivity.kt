@@ -94,6 +94,19 @@ class RemoteRuleSourcesActivity : BaseActivity() {
     }
 
     private fun syncSources(sourceId: String? = null, manual: Boolean = false, allowWhitelistDomains: Boolean = false) {
+        val whitelistImportMode = if (allowWhitelistDomains) {
+            RemoteRuleSourceRepository.WhitelistImportMode.ALLOW
+        } else {
+            RemoteRuleSourceRepository.WhitelistImportMode.BLOCK
+        }
+        syncSources(sourceId, manual, whitelistImportMode)
+    }
+
+    private fun syncSources(
+        sourceId: String? = null,
+        manual: Boolean = false,
+        whitelistImportMode: RemoteRuleSourceRepository.WhitelistImportMode
+    ) {
         binding.loadingOverlay.isVisible = true
         if (manual) {
             Toast.makeText(this, if (sourceId == null) "正在同步规则源" else "正在更新规则源", Toast.LENGTH_SHORT).show()
@@ -102,30 +115,28 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             runCatching {
                 withContext(Dispatchers.IO) {
                     if (sourceId == null) {
-                        RemoteRuleSourceRepository.syncEnabledSources(this@RemoteRuleSourcesActivity, allowWhitelistDomains)
+                        RemoteRuleSourceRepository.syncEnabledSources(this@RemoteRuleSourcesActivity, whitelistImportMode)
                     } else {
                         val source = RuleRepository.getRemoteRuleSources(this@RemoteRuleSourcesActivity).firstOrNull { it.id == sourceId }
                             ?: throw IllegalStateException("规则源不存在")
-                        listOf(RemoteRuleSourceRepository.syncSource(this@RemoteRuleSourcesActivity, source, allowWhitelistDomains))
+                        listOf(RemoteRuleSourceRepository.syncSource(this@RemoteRuleSourcesActivity, source, whitelistImportMode))
                     }
                 }
             }.onSuccess { results ->
                 binding.loadingOverlay.isVisible = false
                 val whitelistConflicts = results.filter { it.whitelistConflictRules > 0 }
-                if (whitelistConflicts.isNotEmpty() && !allowWhitelistDomains) {
+                if (whitelistConflicts.isNotEmpty() && whitelistImportMode == RemoteRuleSourceRepository.WhitelistImportMode.BLOCK) {
                     showWhitelistConflictDialog(sourceId, manual, whitelistConflicts)
                     return@onSuccess
                 }
                 loadSources()
                 reloadVpnIfRunning(results.any { it.success })
                 if (manual) {
-                    val successCount = results.count { it.success }
-                    val firstFailed = results.firstOrNull { !it.success }
-                    if (firstFailed?.errorMessage != null && successCount == 0) {
-                        Toast.makeText(this@RemoteRuleSourcesActivity, buildSyncSummary(results), Toast.LENGTH_LONG).show()
-                    } else {
-                        Toast.makeText(this@RemoteRuleSourcesActivity, buildSyncSummary(results), Toast.LENGTH_LONG).show()
-                    }
+                    Toast.makeText(
+                        this@RemoteRuleSourcesActivity,
+                        buildSyncSummary(results, whitelistImportMode),
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             }.onFailure {
                 binding.loadingOverlay.isVisible = false
@@ -214,6 +225,14 @@ class RemoteRuleSourcesActivity : BaseActivity() {
     }
 
     private fun confirmDeleteSource(source: RemoteRuleSourceConfig) {
+        if (RuleRepository.isBuiltInRemoteRuleSource(source.id)) {
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("默认规则源")
+                .setMessage("这条规则源属于内置默认规则源，可以停用或立即同步。")
+                .setPositiveButton("知道了", null)
+                .show()
+            return
+        }
         val sourceRules = RuleRepository.getRulesForRemoteSource(this, source.id)
         val sampleText = sourceRules.take(8).joinToString("\n") { rule -> "- ${rule.domain}" }
         val message = buildString {
@@ -237,6 +256,7 @@ class RemoteRuleSourcesActivity : BaseActivity() {
                 val removedCount = RuleRepository.removeRulesForRemoteSource(this, source.id)
                 RuleRepository.removeRemoteRuleSource(this, source.id)
                 loadSources()
+                reloadVpnIfRunning(removedCount > 0)
                 Toast.makeText(this, "已删除规则源，并移除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
             }
             .setNeutralButton("只删规则源") { _, _ ->
@@ -278,52 +298,40 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             .setTitle("发现疑似白名单规则")
             .setMessage(displayText)
             .setPositiveButton("继续拦截") { _, _ ->
-                syncSources(sourceId, manual, allowWhitelistDomains = true)
+                syncSources(sourceId, manual, RemoteRuleSourceRepository.WhitelistImportMode.ALLOW)
+            }
+            .setNeutralButton("删除白名单后继续") { _, _ ->
+                syncSources(sourceId, manual, RemoteRuleSourceRepository.WhitelistImportMode.REMOVE_CONFLICTS)
             }
             .setNegativeButton("取消", null)
             .show()
     }
 
+    private fun buildSyncSummary(
+        results: List<RemoteRuleSourceRepository.RemoteRuleSyncResult>,
+        whitelistImportMode: RemoteRuleSourceRepository.WhitelistImportMode
+    ): String {
+        val successCount = results.count { it.success }
+        if (successCount == 0) {
+            return results.firstOrNull()?.errorMessage ?: "规则源更新失败"
+        }
+        val conflictCount = results.sumOf { it.whitelistConflictRules }
+        val suffix = when {
+            conflictCount <= 0 -> ""
+            whitelistImportMode == RemoteRuleSourceRepository.WhitelistImportMode.ALLOW -> {
+                "，含 $conflictCount 条已确认继续拦截的疑似白名单规则"
+            }
+            whitelistImportMode == RemoteRuleSourceRepository.WhitelistImportMode.REMOVE_CONFLICTS -> {
+                "，已删除 $conflictCount 条疑似白名单规则"
+            }
+            else -> ""
+        }
+        return "规则源更新完成，成功 $successCount / ${results.size}$suffix"
+    }
+
     private fun reloadVpnIfRunning(shouldReload: Boolean) {
         if (!shouldReload || !AdBlockVpnService.isRunning) return
         startService(Intent(this, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
-    }
-
-    private fun buildSyncSummary(results: List<RemoteRuleSourceRepository.RemoteRuleSyncResult>): String {
-        if (results.isEmpty()) return "规则源更新失败"
-        val successCount = results.count { it.success }
-        val failureCount = results.size - successCount
-        val addedCount = results.sumOf { it.addedCount }
-        val candidateCount = results.sumOf { it.whitelistConflictRules }
-        val firstFailed = results.firstOrNull { !it.success }
-        return buildString {
-            append("规则源更新完成，成功 ")
-            append(successCount)
-            append(" / ")
-            append(results.size)
-            append("，同步规则 ")
-            append(addedCount)
-            append(" 条")
-            if (failureCount > 0) {
-                append("，失败 ")
-                append(failureCount)
-                append(" 个")
-            }
-            if (candidateCount > 0) {
-                append("，待确认 ")
-                append(candidateCount)
-                append(" 条疑似白名单规则")
-            }
-            firstFailed?.let { failed ->
-                failed.errorMessage?.takeIf { it.isNotBlank() }?.let { message ->
-                    append("，首个失败源：")
-                    append(failed.source.name)
-                    append("（")
-                    append(message)
-                    append("）")
-                }
-            }
-        }
     }
 
     private val Int.dp: Int

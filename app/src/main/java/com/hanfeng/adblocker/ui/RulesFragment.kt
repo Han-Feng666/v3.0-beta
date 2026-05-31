@@ -17,6 +17,7 @@ import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import android.app.Activity
+import android.content.ContentResolver
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
@@ -37,6 +38,7 @@ import com.HanFeng.model.BlockRule
 import com.HanFeng.model.RemoteRuleSourceConfig
 import com.HanFeng.model.RuleListItem
 import com.HanFeng.model.RuleSource
+import com.HanFeng.service.AdBlockVpnService
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -59,7 +61,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private var refreshVersion = 0
     private var searchQuery = ""
     private var pendingSearchJob: Job? = null
+    private var pendingRefreshJob: Job? = null
     private var cachedRulesRef: List<BlockRule> = emptyList()
+    private var cachedRulesSignature: Int = 0
     private var cachedGroupedRules = linkedMapOf<String, List<CachedRuleEntry>>()
     private val remoteTimeFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
@@ -133,10 +137,10 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         binding.btnClearInput.setOnClickListener { clearRuleInput() }
         binding.btnRuleActions.setOnClickListener { showRuleActionPanel() }
         binding.btnTrafficCard.setOnClickListener { mainActivity?.openTrafficCardPage() }
-        binding.btnJoinGroup.setOnClickListener { mainActivity?.joinQqGroup() }
+        binding.btnJoinGroup.setOnClickListener { openRemoteRuleSourcesPage() }
         binding.btnSuspiciousDomains.setOnClickListener { openSuspiciousDomainsPage() }
         binding.btnFilter.setOnClickListener { deduplicateRules() }
-        binding.btnRuleSources.setOnClickListener { openRemoteRuleSourcesPage() }
+        binding.btnRuleSources.setOnClickListener { showImpactNormalNetworkDialog() }
         binding.btnSelectAll.setOnClickListener { selectAllVisible() }
         binding.btnDeleteSelected.setOnClickListener { confirmDelete(selectedIds) }
         binding.btnCancelSelection.setOnClickListener { exitSelection() }
@@ -148,7 +152,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 pendingSearchJob?.cancel()
                 pendingSearchJob = viewLifecycleOwner.lifecycleScope.launch {
                     delay(180)
-                    refreshList()
+                    refreshListSoon(0L)
                 }
             }
         })
@@ -156,11 +160,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     }
 
     private fun refreshListDelayed() {
-        view?.postDelayed({
+        refreshListSoon(200L)
+    }
+
+    private fun refreshListSoon(delayMillis: Long = 60L) {
+        pendingRefreshJob?.cancel()
+        pendingRefreshJob = viewLifecycleOwner.lifecycleScope.launch {
+            delay(delayMillis)
             if (isAdded && _binding != null && view != null) {
                 refreshList()
             }
-        }, 200)
+        }
     }
 
     override fun onResume() {
@@ -170,14 +180,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     override fun onDestroyView() {
         pendingSearchJob?.cancel()
+        pendingRefreshJob?.cancel()
         super.onDestroyView()
         _binding = null
     }
 
     private fun getGroupedRules(context: Context): LinkedHashMap<String, List<CachedRuleEntry>> {
         val rules = RuleRepository.getRules(context)
-        if (rules !== cachedRulesRef) {
+        val signature = buildRuleSnapshotSignature(rules)
+        if (rules !== cachedRulesRef || signature != cachedRulesSignature) {
             cachedRulesRef = rules
+            cachedRulesSignature = signature
             cachedGroupedRules = LinkedHashMap(
                 rules.groupBy({ it.vendor }) { rule ->
                     CachedRuleEntry(
@@ -191,6 +204,22 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             )
         }
         return cachedGroupedRules
+    }
+
+    private fun buildRuleSnapshotSignature(rules: List<BlockRule>): Int {
+        var result = rules.size
+        rules.take(64).forEach { rule ->
+            result = 31 * result + rule.id.hashCode()
+            result = 31 * result + rule.domain.hashCode()
+            result = 31 * result + rule.vendor.hashCode()
+        }
+        return result
+    }
+
+    private fun invalidateRuleListCache() {
+        cachedRulesRef = emptyList()
+        cachedRulesSignature = 0
+        cachedGroupedRules = linkedMapOf()
     }
 
     private fun safeContext(): Context? {
@@ -218,6 +247,11 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 onContinue = {
                     val added = RuleRepository.addRules(ctx, rawInput, RuleSource.MANUAL, allowWhitelistDomains = true)
                     handleManualRuleAddResult(ctx, added)
+                },
+                onDeleteWhitelistAndContinue = {
+                    val sanitizedInput = RuleRepository.removeWhitelistConflictLines(rawInput)
+                    val added = RuleRepository.addRules(ctx, sanitizedInput, RuleSource.MANUAL)
+                    handleManualRuleAddResult(ctx, added)
                 }
             )
             return
@@ -234,7 +268,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         binding.inputRule.setText("")
         LogRepository.append(ctx, "Added ${added.size} manual rules")
         Toast.makeText(ctx, "已添加 ${added.size} 条规则", Toast.LENGTH_SHORT).show()
-        refreshList()
+        invalidateRuleListCache()
+        refreshListSoon()
+        reloadVpnIfRunning(true)
     }
 
     private fun pasteRuleInput() {
@@ -279,10 +315,11 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         runCatching {
             createDialogBuilder(dialogContext)
                 .setTitle("规则工具")
-                .setItems(arrayOf("导入本地规则", "规则源管理")) { _, which ->
+                .setItems(arrayOf("导入本地规则", "规则源管理", "影响正常网络")) { _, which ->
                     when (which) {
                         0 -> launchImportRulePicker()
                         1 -> openRemoteRuleSourcesPage()
+                        2 -> showImpactNormalNetworkDialog()
                     }
                 }
                 .show()
@@ -414,8 +451,10 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                             if (enabling) {
                                 syncRemoteRuleSources(source.id, manual = true)
                             } else {
-                                RuleRepository.removeRulesForRemoteSource(dialogContext, source.id)
-                                refreshList()
+                                val removedCount = RuleRepository.removeRulesForRemoteSource(dialogContext, source.id)
+                                invalidateRuleListCache()
+                                refreshListSoon()
+                                reloadVpnIfRunning(removedCount > 0)
                                 Toast.makeText(dialogContext, "规则源已停用并移除对应规则", Toast.LENGTH_SHORT).show()
                             }
                         }
@@ -505,6 +544,20 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         justAdded: Boolean = false,
         allowWhitelistDomains: Boolean = false
     ) {
+        val whitelistImportMode = if (allowWhitelistDomains) {
+            RemoteRuleSourceRepository.WhitelistImportMode.ALLOW
+        } else {
+            RemoteRuleSourceRepository.WhitelistImportMode.BLOCK
+        }
+        syncRemoteRuleSources(sourceId, manual, justAdded, whitelistImportMode)
+    }
+
+    private fun syncRemoteRuleSources(
+        sourceId: String? = null,
+        manual: Boolean = false,
+        justAdded: Boolean = false,
+        whitelistImportMode: RemoteRuleSourceRepository.WhitelistImportMode
+    ) {
         val ctx = safeContext() ?: return
         if (manual && isAdded) {
             Toast.makeText(ctx, if (justAdded) "正在添加并同步规则源" else "正在同步规则源", Toast.LENGTH_SHORT).show()
@@ -513,19 +566,21 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             val appContext = ctx.applicationContext
             runCatching {
                 val results = if (sourceId == null) {
-                    RemoteRuleSourceRepository.syncEnabledSources(appContext, allowWhitelistDomains)
+                    RemoteRuleSourceRepository.syncEnabledSources(appContext, whitelistImportMode)
                 } else {
                     val source = RuleRepository.getRemoteRuleSources(appContext).firstOrNull { it.id == sourceId }
                         ?: throw IllegalStateException("规则源不存在")
-                    listOf(RemoteRuleSourceRepository.syncSource(appContext, source, allowWhitelistDomains))
+                    listOf(RemoteRuleSourceRepository.syncSource(appContext, source, whitelistImportMode))
                 }
                 results
             }.onSuccess { results ->
                 val whitelistConflicts = results.filter { it.whitelistConflictRules > 0 }
-                if (whitelistConflicts.isNotEmpty() && !allowWhitelistDomains) {
+                if (whitelistConflicts.isNotEmpty() && whitelistImportMode == RemoteRuleSourceRepository.WhitelistImportMode.BLOCK) {
                     showRemoteSourceWhitelistConflictDialog(sourceId, manual, justAdded, whitelistConflicts)
                     return@onSuccess
                 }
+                reloadVpnIfRunning(results.any { it.success })
+                invalidateRuleListCache()
                 refreshList()
                 if (manual && isAdded) {
                     val successCount = results.count { result -> result.success }
@@ -534,7 +589,16 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         val firstError = results.firstOrNull()?.errorMessage ?: "规则源更新失败"
                         Toast.makeText(ctx, firstError, Toast.LENGTH_LONG).show()
                     } else {
-                        val suffix = if (conflictCount > 0) "，含 $conflictCount 条已确认继续拦截的疑似白名单规则" else ""
+                        val suffix = when {
+                            conflictCount <= 0 -> ""
+                            whitelistImportMode == RemoteRuleSourceRepository.WhitelistImportMode.ALLOW -> {
+                                "，含 $conflictCount 条已确认继续拦截的疑似白名单规则"
+                            }
+                            whitelistImportMode == RemoteRuleSourceRepository.WhitelistImportMode.REMOVE_CONFLICTS -> {
+                                "，已删除 $conflictCount 条疑似白名单规则"
+                            }
+                            else -> ""
+                        }
                         Toast.makeText(ctx, "规则源更新完成，成功 $successCount / ${results.size}$suffix", Toast.LENGTH_LONG).show()
                     }
                 }
@@ -576,13 +640,16 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     append('\n')
                 }
             }
-            append("\n选择“继续拦截”后，这些规则仍会导入并参与拦截。")
+            append("\n你可以直接继续拦截，也可以只删除这些白名单候选，其余规则照常导入。")
         }
         createDialogBuilder(dialogContext)
             .setTitle("发现疑似白名单规则")
             .setMessage(message)
             .setPositiveButton("继续拦截") { _, _ ->
-                syncRemoteRuleSources(sourceId, manual, justAdded, allowWhitelistDomains = true)
+                syncRemoteRuleSources(sourceId, manual, justAdded, RemoteRuleSourceRepository.WhitelistImportMode.ALLOW)
+            }
+            .setNeutralButton("删除白名单后继续") { _, _ ->
+                syncRemoteRuleSources(sourceId, manual, justAdded, RemoteRuleSourceRepository.WhitelistImportMode.REMOVE_CONFLICTS)
             }
             .setNegativeButton("取消", null)
             .show()
@@ -698,6 +765,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         }
     }
 
+    private fun reloadVpnIfRunning(shouldReload: Boolean) {
+        val ctx = context ?: return
+        if (!shouldReload || !AdBlockVpnService.isRunning) return
+        ctx.startService(Intent(ctx, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+    }
+
     private fun updateSelectionUi() {
         if (_binding == null) return
         binding.selectionBar.isVisible = selectionMode
@@ -754,13 +827,16 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     val removedCount = RuleRepository.removeRulesByIds(actionContext, snapshot)
                     LogRepository.append(actionContext, "Requested remove=${snapshot.size} actualRemoved=$removedCount")
                     if (removedCount <= 0) {
-                        Toast.makeText(actionContext, "未删除任何规则，请刷新后重试", Toast.LENGTH_SHORT).show()
-                        refreshList()
+                        Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
+                        invalidateRuleListCache()
+                        refreshListSoon()
                         return@setPositiveButton
                     }
                     Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
+                    invalidateRuleListCache()
                     exitSelection()
-                    refreshList()
+                    refreshListSoon()
+                    reloadVpnIfRunning(true)
                 }
                 .setNegativeButton("取消", null)
                 .show()
@@ -779,7 +855,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 return
             }
             LogRepository.append(actionContext, "Removed $removed duplicate rules")
-            refreshList()
+            invalidateRuleListCache()
+            refreshListSoon()
+            reloadVpnIfRunning(true)
             Toast.makeText(actionContext, "已清理 $removed 条重复规则", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             LogRepository.append(actionContext, "Deduplicate rules failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
@@ -788,23 +866,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     }
 
     private fun filterNonAds() {
-        val dialogContext = safeDialogActivity() ?: return
-        try {
-            viewLifecycleOwner.lifecycleScope.launch {
-                val rules = withContext(Dispatchers.Default) {
-                    RuleRepository.filterNonAds(dialogContext)
-                }
-                if (!isAdded || _binding == null) return@launch
-                if (rules.isEmpty()) {
-                    Toast.makeText(dialogContext, "没有检测到可清理规则", Toast.LENGTH_SHORT).show()
-                    return@launch
-                }
-                showFilterNonAdsDialog(dialogContext, rules)
-            }
-        } catch (e: Exception) {
-            LogRepository.append(dialogContext, "Filter non-ads failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
-            Toast.makeText(dialogContext, "筛选失败：${e.message}", Toast.LENGTH_LONG).show()
-        }
+        showImpactNormalNetworkDialog()
     }
 
     private fun openSuspiciousDomainsPage() {
@@ -818,68 +880,6 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         } catch (e: Exception) {
             LogRepository.append(host, "Open suspicious domains page failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
             Toast.makeText(host, "打开分析页面失败：${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun showFilterNonAdsDialog(dialogContext: androidx.fragment.app.FragmentActivity, rules: List<BlockRule>) {
-        try {
-            val selected = rules.map { it.id }.toMutableSet()
-            val listView = RecyclerView(dialogContext).apply {
-                layoutManager = LinearLayoutManager(dialogContext)
-                setHasFixedSize(true)
-                itemAnimator = null
-                setPadding(0, 12, 0, 12)
-                clipToPadding = false
-                adapter = FilterRuleAdapter(rules, selected) { ruleId, checked ->
-                    if (checked) selected += ruleId else selected -= ruleId
-                }
-            }
-            val dialog = MaterialAlertDialogBuilder(dialogContext, R.style.ThemeOverlay_HanFeng_Dialog)
-                .setTitle("清理重复与无效规则")
-                .setMessage("勾选表示要删除的规则。系统已自动筛选出疑似非广告域名和暂不支持的规则。")
-                .setView(listView)
-                .setPositiveButton("删除勾选", null)
-                .setNeutralButton("全不选", null)
-                .setNegativeButton("取消", null)
-                .create()
-            dialog.setOnShowListener {
-                val listAdapter = listView.adapter as? FilterRuleAdapter
-                dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setOnClickListener {
-                    val actionContext = context ?: return@setOnClickListener
-                    if (selected.isEmpty()) {
-                        Toast.makeText(actionContext, "请先勾选要删除的规则", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
-                    val removedCount = RuleRepository.removeRulesByIds(actionContext, selected.toSet())
-                    LogRepository.append(actionContext, "Requested remove non-ad candidates=${selected.size} actualRemoved=$removedCount")
-                    if (removedCount <= 0) {
-                        Toast.makeText(actionContext, "未删除任何规则，请刷新后重试", Toast.LENGTH_SHORT).show()
-                        refreshList()
-                        return@setOnClickListener
-                    }
-                    exitSelection()
-                    refreshList()
-                    Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
-                    dialog.dismiss()
-                }
-                dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener {
-                    val shouldSelectAll = selected.isEmpty()
-                    selected.clear()
-                    if (shouldSelectAll) {
-                        selected += rules.map { it.id }
-                    }
-                    listAdapter?.setAllChecked(shouldSelectAll)
-                    dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.text = if (shouldSelectAll) "全不选" else "全选"
-                }
-                dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.text = if (selected.isEmpty()) "全选" else "全不选"
-            }
-            dialog.show()
-            styleDialogButtons(dialog)
-        } catch (e: Exception) {
-            val ctx = safeContext() ?: return
-            LogRepository.append(ctx, "Low-value rule cleanup dialog failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
-            enterFilteredSelection(rules.map { it.id })
-            Toast.makeText(ctx, "弹窗打开失败，已切换到多选删除模式", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -987,8 +987,81 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private suspend fun readRuleContent(context: android.content.Context, uri: Uri): String? {
         return withContext(Dispatchers.IO) {
-            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                ?.takeIf { it.isNotBlank() }
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            val contentResolver = context.contentResolver
+            val candidates = listOfNotNull(
+                runCatching {
+                    contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                }.getOrNull(),
+                readRuleContentFromTypedAsset(contentResolver, uri, "text/plain"),
+                readRuleContentFromTypedAsset(contentResolver, uri, "*/*")
+            )
+            candidates.firstOrNull { it.isNotBlank() }
+        }
+    }
+
+    private fun readRuleContentFromTypedAsset(contentResolver: ContentResolver, uri: Uri, mimeType: String): String? {
+        return runCatching {
+            contentResolver.openTypedAssetFileDescriptor(uri, mimeType, null)?.createInputStream()?.bufferedReader()?.use { it.readText() }
+        }.getOrNull()
+    }
+
+    private fun showImpactNormalNetworkDialog() {
+        val ctx = safeDialogActivity() ?: return
+        viewLifecycleOwner.lifecycleScope.launch {
+            runCatching {
+                val candidates = withContext(Dispatchers.Default) {
+                    RuleRepository.getImpactNormalNetworkCandidates(ctx)
+                }
+                if (!isAdded || _binding == null) return@launch
+                if (candidates.isEmpty()) {
+                    Toast.makeText(ctx, "当前没有识别到明显影响正常网络的规则", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                val displayCandidates = candidates.take(180)
+                val ids = displayCandidates.map { it.rule.id }.toMutableSet()
+                val items = displayCandidates.map { candidate ->
+                    val domain = candidate.rule.domain.ifBlank { "(未识别域名)" }
+                    val reason = candidate.reasons.joinToString("；")
+                    "$domain\n$reason"
+                }.toTypedArray()
+                val checked = BooleanArray(displayCandidates.size) { true }
+                val title = if (candidates.size > displayCandidates.size) {
+                    "影响正常网络（仅显示前 ${displayCandidates.size} 条）"
+                } else {
+                    "影响正常网络"
+                }
+                MaterialAlertDialogBuilder(ctx, R.style.ThemeOverlay_HanFeng_Dialog)
+                    .setTitle(title)
+                    .setMultiChoiceItems(items, checked) { _, which, isChecked ->
+                        val id = displayCandidates.getOrNull(which)?.rule?.id ?: return@setMultiChoiceItems
+                        if (isChecked) ids += id else ids -= id
+                    }
+                    .setPositiveButton("删除所选") { _, _ ->
+                        val actionContext = context ?: return@setPositiveButton
+                        if (ids.isEmpty()) {
+                            Toast.makeText(actionContext, "请至少选择一条规则", Toast.LENGTH_SHORT).show()
+                            return@setPositiveButton
+                        }
+                        val removedCount = RuleRepository.removeRulesByIds(actionContext, ids)
+                        LogRepository.append(actionContext, "Requested remove impact-network candidates=${ids.size} actualRemoved=$removedCount")
+                        Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
+                        invalidateRuleListCache()
+                        refreshListSoon()
+                        reloadVpnIfRunning(removedCount > 0)
+                    }
+                    .setNegativeButton("保留全部", null)
+                    .show()
+            }.onFailure {
+                val actionContext = safeContext() ?: return@onFailure
+                LogRepository.append(actionContext, "Open impact-normal-network dialog failed: ${it.message ?: it.javaClass.simpleName}\nStack: ${it.stackTraceToString()}")
+                Toast.makeText(actionContext, "影响正常网络页面打开失败，请重试", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -1024,11 +1097,38 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         }
                         if (!isAdded || _binding == null) return@launch
                         LogRepository.append(appContext, "Imported rules from $sourceLabel with whitelist conflicts accepted")
-                        refreshList()
+                        invalidateRuleListCache()
+                        refreshListSoon()
+                        reloadVpnIfRunning(true)
                         context?.let {
                             Toast.makeText(it, "规则已导入，正在展示分析结果", Toast.LENGTH_SHORT).show()
                         }
                         openImportAnalysisPage(inventory, report, sourceLabel, sourceUri)
+                    }
+                },
+                onDeleteWhitelistAndContinue = {
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        val sanitizedContent = withContext(Dispatchers.Default) {
+                            RuleRepository.removeWhitelistConflictLines(content)
+                        }
+                        withContext(Dispatchers.Default) {
+                            RuleRepository.importRules(appContext, sanitizedContent)
+                        }
+                        val inventory = withContext(Dispatchers.Default) {
+                            RuleRepository.getRuleInventory(appContext)
+                        }
+                        val sanitizedReport = withContext(Dispatchers.Default) {
+                            RuleRepository.analyzeImportContent(appContext, sanitizedContent)
+                        }
+                        if (!isAdded || _binding == null) return@launch
+                        LogRepository.append(appContext, "Imported rules from $sourceLabel after removing whitelist conflict lines")
+                        invalidateRuleListCache()
+                        refreshListSoon()
+                        reloadVpnIfRunning(true)
+                        context?.let {
+                            Toast.makeText(it, "已删除白名单候选，其余规则已导入", Toast.LENGTH_SHORT).show()
+                        }
+                        openImportAnalysisPage(inventory, sanitizedReport, sourceLabel, sourceUri)
                     }
                 },
                 host = host
@@ -1043,7 +1143,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         }
         if (!isAdded || _binding == null) return
         LogRepository.append(appContext, "Imported rules from $sourceLabel")
-        refreshList()
+        invalidateRuleListCache()
+        refreshListSoon()
+        reloadVpnIfRunning(true)
         context?.let {
             Toast.makeText(it, "规则已导入，正在展示分析结果", Toast.LENGTH_SHORT).show()
         }
@@ -1174,6 +1276,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         title: String,
         domains: List<String>,
         onContinue: () -> Unit,
+        onDeleteWhitelistAndContinue: () -> Unit,
         host: androidx.fragment.app.FragmentActivity? = safeDialogActivity()
     ) {
         val activityHost = host ?: return
@@ -1182,12 +1285,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val message = buildString {
             append("以下规则命中了当前保护白名单，继续拦截可能影响应用正常功能：\n\n")
             append(sampleText)
-            append("\n\n选择“继续拦截”后，这些规则仍会被导入并参与拦截。")
+            append("\n\n你可以直接继续拦截，也可以只删除这些白名单候选，其余规则照常导入。")
         }
         MaterialAlertDialogBuilder(activityHost)
             .setTitle(title)
             .setMessage(message)
             .setPositiveButton("继续拦截") { _, _ -> onContinue() }
+            .setNeutralButton("删除白名单后继续") { _, _ -> onDeleteWhitelistAndContinue() }
             .setNegativeButton("取消", null)
             .show()
     }
