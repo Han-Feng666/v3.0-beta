@@ -218,6 +218,8 @@ class SuspiciousDomainsActivity : BaseActivity() {
     companion object {
         fun createIntent(context: Context): Intent = Intent(context, SuspiciousDomainsActivity::class.java)
 
+        private const val SELECTION_PAYLOAD = "selection"
+
         private val DIFF = object : DiffUtil.ItemCallback<RuleRepository.SuspiciousDomainSample>() {
             override fun areItemsTheSame(
                 oldItem: RuleRepository.SuspiciousDomainSample,
@@ -304,8 +306,4 @@ class SuspiciousDomainsActivity : BaseActivity() {
 
     private val Int.dp: Int
         get() = (this * resources.displayMetrics.density).toInt()
-
-    private companion object {
-        private const val SELECTION_PAYLOAD = "selection"
-    }
 }
