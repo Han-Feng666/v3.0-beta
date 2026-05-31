@@ -247,9 +247,14 @@ class MainActivity : BaseActivity() {
                 dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                     lifecycleScope.launch {
                         val addedCount = withContext(Dispatchers.Default) {
+                            val candidateDomains = pendingDomains
+                                .asSequence()
+                                .map { it.domain }
+                                .distinct()
+                                .toList()
                             RuleRepository.addRules(
-                                this@MainActivity,
-                                pendingDomains.map { it.domain },
+                                applicationContext,
+                                candidateDomains,
                                 com.HanFeng.model.RuleSource.MANUAL
                             ).size
                         }

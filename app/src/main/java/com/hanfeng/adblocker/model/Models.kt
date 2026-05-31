@@ -51,7 +51,7 @@ data class DashboardStats(
     val todayBlocked: Int,
     val totalBlocked: Int,
     val dnsBlocked: Int,
-    val httpBlocked: Int,
+    val mitmBlocked: Int,
     val requestTotal: Int,
     val responseTotal: Int,
     val bytesSaved: Long

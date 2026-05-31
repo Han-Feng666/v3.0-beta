@@ -4,10 +4,13 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
+import android.net.NetworkRequest
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -99,6 +102,7 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var lastHttpsDecryptPruneAt = 0L
     @Volatile private var lastQuicRoutePruneAt = 0L
     @Volatile private var lastRouteCachePruneCheckAt = 0L
+    @Volatile private var lastUnderlyingNetworkRefreshAt = 0L
     @Volatile private var tunOutputStream: FileOutputStream? = null
     private val blockedIpNetworks by lazy(LazyThreadSafetyMode.NONE) { loadBlockedIpNetworks() }
     private val upstreamFallbackDnsHosts = listOf(
@@ -152,6 +156,8 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var localProxyCoexistConfig = LocalProxyCoexistConfig()
     @Volatile private var localProxyTargetPackages: Set<String> = emptySet()
     @Volatile private var localProxyReachable: Boolean? = null
+    @Volatile private var networkCallbackRegistered = false
+    private var connectivityNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private val handledDnsHosts by lazy(LazyThreadSafetyMode.NONE) {
         setOf(localDnsV4, localDnsV6).mapNotNull { host ->
             runCatching { InetAddress.getByName(host).hostAddress }.getOrNull()
@@ -166,6 +172,7 @@ class AdBlockVpnService : VpnService() {
             FeatureSettingsRepository.setAdBlockEnabled(this, false)
             FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
             isRunning = false
+            notifyRuntimeStatusChanged()
             stopVpn(stopService = false)
             stopSelf()
             return START_NOT_STICKY
@@ -195,7 +202,7 @@ class AdBlockVpnService : VpnService() {
                 } else {
                     LogRepository.append(this, "VPN start skipped: already running")
                 }
-                isRunning
+                true
             }
             else -> {
                 if (!FeatureSettingsRepository.isAdBlockEnabled(this)) {
@@ -209,10 +216,10 @@ class AdBlockVpnService : VpnService() {
                 } else {
                     LogRepository.append(this, "VPN start skipped: already running")
                 }
-                isRunning
+                true
             }
         }
-        return if (shouldStaySticky && (isRunning || isWaitingForReacquire())) START_STICKY else START_NOT_STICKY
+        return if (shouldStaySticky && (isRunning || isWaitingForReacquire() || startInProgress)) START_STICKY else START_NOT_STICKY
     }
 
     private fun hasVpnPermissionReady(): Boolean {
@@ -221,6 +228,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        unregisterNetworkMonitoring()
         StatsRepository.flushNow(this)
         LogRepository.flushAndClose()
         if (FeatureSettingsRepository.isAdBlockEnabled(this) && (isRunning || isWaitingForReacquire())) {
@@ -242,6 +250,7 @@ class AdBlockVpnService : VpnService() {
         LogRepository.append(this, "VPN revoked by system or replaced by another VPN")
         FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, true)
         AdBlockVpnService.isRunning = false
+        notifyRuntimeStatusChanged()
         stopVpn(stopService = false, keepForeground = true)
         scheduleVpnReacquireAfterRevoke()
         super.onRevoke()
@@ -251,6 +260,7 @@ class AdBlockVpnService : VpnService() {
         refreshRuntimeFeatureFlags()
         if (vpnInterface != null && packetJob?.isActive == true) {
             isRunning = true
+            notifyRuntimeStatusChanged()
             startInProgress = false
             LogRepository.append(this, "VPN start called while already running")
             return
@@ -262,6 +272,7 @@ class AdBlockVpnService : VpnService() {
                 foregroundShown = true
             }.onFailure { error ->
                 isRunning = false
+                notifyRuntimeStatusChanged()
                 startInProgress = false
                 LogRepository.append(this, "VPN foreground start failed: ${error.message ?: error.javaClass.simpleName}")
                 stopSelf()
@@ -277,6 +288,7 @@ class AdBlockVpnService : VpnService() {
             .getOrNull()
         if (vpnInterface == null) {
             isRunning = false
+            notifyRuntimeStatusChanged()
             startInProgress = false
             if (preserveUserIntentOnFailure) {
                 FeatureSettingsRepository.setAdBlockEnabled(this, true)
@@ -297,11 +309,14 @@ class AdBlockVpnService : VpnService() {
             return
         }
         isRunning = vpnInterface != null
+        notifyRuntimeStatusChanged()
         startInProgress = false
         FeatureSettingsRepository.setAdBlockEnabled(this, true)
         FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
         pendingReacquireJob?.cancel()
         pendingReacquireJob = null
+        registerNetworkMonitoringIfNeeded()
+        invalidateDnsServerCache()
         refreshForegroundNotification()
         applyUnderlyingNetworks()
         probeLocalProxyCoexistAsync()
@@ -417,6 +432,8 @@ class AdBlockVpnService : VpnService() {
         activeTunGeneration += 1L
         val tunGeneration = activeTunGeneration
         vpnInterface = nextInterface
+        registerNetworkMonitoringIfNeeded()
+        invalidateDnsServerCache()
         applyUnderlyingNetworks()
         packetJob = scope.launch {
             runCatching { runPacketLoop(tunGeneration) }
@@ -444,6 +461,7 @@ class AdBlockVpnService : VpnService() {
 
     private fun stopVpn(stopService: Boolean = true, keepForeground: Boolean = false) {
         isRunning = false
+        notifyRuntimeStatusChanged()
         startInProgress = false
         pendingVpnReloadJob?.cancel()
         pendingVpnReloadJob = null
@@ -456,6 +474,7 @@ class AdBlockVpnService : VpnService() {
         packetJob?.cancel()
         packetJob = null
         activeTunGeneration += 1L
+        unregisterNetworkMonitoring()
         vpnInterface?.close()
         vpnInterface = null
         clearRuntimeState()
@@ -481,9 +500,16 @@ class AdBlockVpnService : VpnService() {
             }.onFailure { error ->
                 startInProgress = false
                 isRunning = false
+                notifyRuntimeStatusChanged()
                 LogRepository.append(this@AdBlockVpnService, "VPN async start failed: ${error.message ?: error.javaClass.simpleName}")
             }
         }
+    }
+
+    private fun notifyRuntimeStatusChanged() {
+        sendBroadcast(
+            Intent(ACTION_STATUS_CHANGED).setPackage(packageName)
+        )
     }
 
     private fun scheduleVpnReacquireAfterRevoke() {
@@ -571,6 +597,7 @@ class AdBlockVpnService : VpnService() {
         cachedDnsServers = null
         dnsSocketPool.forEach { (_, socket) -> socket.close() }
         dnsSocketPool.clear()
+        lastUnderlyingNetworkRefreshAt = 0L
     }
 
     private fun buildInterface(): ParcelFileDescriptor? {
@@ -641,17 +668,25 @@ class AdBlockVpnService : VpnService() {
             builder.setBlocking(true)
         }
 
-        if (!stableMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            WhitelistRepository.getDisallowedPackages(this).forEach { packageName ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            val disallowedPackages = WhitelistRepository.getDisallowedPackages(this)
+            disallowedPackages.forEach { packageName ->
                 runCatching { builder.addDisallowedApplication(packageName) }
                     .onFailure {
                         LogRepository.append(this, "Skip disallowed app $packageName: ${it.message ?: it.javaClass.simpleName}")
                     }
             }
+            logDecisionOnce(
+                key = "vpn-disallowed-apps:${if (stableMode) "stable" else "full"}",
+                message = "Applied disallowed apps count=${disallowedPackages.size} mode=${if (stableMode) "stable" else "full"}",
+                minIntervalMillis = 15_000L
+            )
         }
 
         if (stableMode) {
             LogRepository.append(this, "VPN established with stable fallback mode")
+        } else {
+            LogRepository.append(this, "VPN established with targeted routes only")
         }
         return builder.establish()
     }
@@ -659,18 +694,198 @@ class AdBlockVpnService : VpnService() {
     private fun currentUnderlyingNetworks(): Array<Network>? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
         val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return null
-        val activeNetwork = connectivityManager.activeNetwork ?: return null
-        return arrayOf(activeNetwork)
+        val networks = selectEligibleUnderlyingNetworks(connectivityManager)
+        return networks.takeIf { it.isNotEmpty() }?.toTypedArray()
+    }
+
+    private fun currentLinkProperties(): List<LinkProperties> {
+        val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return emptyList()
+        val networks = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            selectEligibleUnderlyingNetworks(connectivityManager)
+        } else {
+            listOfNotNull(connectivityManager.activeNetwork)
+        }
+        return networks.mapNotNull(connectivityManager::getLinkProperties)
     }
 
     private fun applyUnderlyingNetworks() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
-        currentUnderlyingNetworks()?.takeIf { it.isNotEmpty() }?.let { networks ->
-            runCatching { setUnderlyingNetworks(networks) }
-                .onFailure {
-                    LogRepository.append(this, "Set underlying networks failed: ${it.message ?: it.javaClass.simpleName}")
-                }
+        val networks = currentUnderlyingNetworks()
+        val summary = describeUnderlyingNetworks()
+        runCatching { setUnderlyingNetworks(networks) }
+            .onSuccess {
+                logDecisionOnce(
+                    key = "underlying-network-apply:${summary}:${networks?.size ?: 0}",
+                    message = "Applied underlying networks count=${networks?.size ?: 0} summary=$summary",
+                    minIntervalMillis = 3_000L
+                )
+            }
+            .onFailure {
+                LogRepository.append(this, "Set underlying networks failed: ${it.message ?: it.javaClass.simpleName}")
+            }
+    }
+
+    private fun selectEligibleUnderlyingNetworks(connectivityManager: ConnectivityManager): List<Network> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return listOfNotNull(connectivityManager.activeNetwork)
         }
+        val candidates = connectivityManager.allNetworks.mapNotNull { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@mapNotNull null
+            if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+            ) {
+                return@mapNotNull null
+            }
+            UnderlyingNetworkCandidate(
+                network = network,
+                capabilities = capabilities
+            )
+        }
+        val validated = candidates.filter { it.capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) }
+        val selected = if (validated.isNotEmpty()) validated else candidates
+        return selected
+            .sortedWith(compareByDescending<UnderlyingNetworkCandidate> { underlyingNetworkPriority(it.capabilities) }
+                .thenBy { it.network.hashCode() })
+            .map { it.network }
+    }
+
+    private fun underlyingNetworkPriority(capabilities: NetworkCapabilities): Int {
+        return when {
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 4
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 3
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 2
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> 1
+            else -> 0
+        }
+    }
+
+    private fun describeUnderlyingNetworks(): String {
+        val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return "none"
+        val networks = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            connectivityManager.allNetworks.toList()
+        } else {
+            listOfNotNull(connectivityManager.activeNetwork)
+        }
+        val entries = networks.mapNotNull { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@mapNotNull null
+            if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+            ) {
+                return@mapNotNull null
+            }
+            val transports = buildList {
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) add("wifi")
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) add("cellular")
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) add("ethernet")
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) add("bluetooth")
+            }.ifEmpty { listOf("other") }
+            val dnsServers = connectivityManager.getLinkProperties(network)
+                ?.dnsServers
+                .orEmpty()
+                .mapNotNull { it.hostAddress }
+                .distinct()
+                .joinToString("|")
+                .ifBlank { "none" }
+            "${transports.joinToString("+")}:dns=$dnsServers"
+        }
+        return entries.distinct().joinToString(", ").ifBlank { "none" }
+    }
+
+    private fun registerNetworkMonitoringIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
+        if (networkCallbackRegistered) return
+        val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                handleUnderlyingNetworkChanged()
+            }
+
+            override fun onLost(network: Network) {
+                handleUnderlyingNetworkChanged()
+            }
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                handleUnderlyingNetworkChanged()
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                handleUnderlyingNetworkChanged()
+            }
+        }
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        runCatching {
+            connectivityManager.registerNetworkCallback(request, callback)
+            connectivityNetworkCallback = callback
+            networkCallbackRegistered = true
+        }.onFailure {
+            LogRepository.append(this, "Register network callback failed: ${it.message ?: it.javaClass.simpleName}")
+        }
+    }
+
+    private fun unregisterNetworkMonitoring() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
+        val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return
+        val callback = connectivityNetworkCallback ?: return
+        runCatching {
+            connectivityManager.unregisterNetworkCallback(callback)
+        }
+        connectivityNetworkCallback = null
+        networkCallbackRegistered = false
+    }
+
+    private fun handleUnderlyingNetworkChanged() {
+        if (!isRunning) return
+        val now = System.currentTimeMillis()
+        if (now - lastUnderlyingNetworkRefreshAt < UNDERLYING_NETWORK_REFRESH_MIN_INTERVAL_MILLIS) {
+            logDecisionOnce(
+                key = "underlying-network-changed-throttled",
+                message = "Skipped underlying network refresh due to throttle summary=${describeUnderlyingNetworks()}",
+                minIntervalMillis = UNDERLYING_NETWORK_REFRESH_MIN_INTERVAL_MILLIS
+            )
+            return
+        }
+        lastUnderlyingNetworkRefreshAt = now
+        invalidateNetworkDependentCaches(reason = "connectivity-change")
+        applyUnderlyingNetworks()
+        probeLocalProxyCoexistAsync()
+        logDecisionOnce(
+            key = "underlying-network-changed",
+            message = "Underlying networks updated after connectivity change summary=${describeUnderlyingNetworks()}",
+            minIntervalMillis = 5_000L
+        )
+    }
+
+    private fun invalidateDnsServerCache() {
+        synchronized(dnsServerCacheLock) {
+            cachedDnsServers = null
+        }
+    }
+
+    private fun invalidateNetworkDependentCaches(reason: String) {
+        invalidateDnsServerCache()
+        synchronized(adIpTargetCache) {
+            adIpTargetCache.clear()
+        }
+        synchronized(httpDecryptIpCache) {
+            httpDecryptIpCache.clear()
+        }
+        synchronized(httpsDecryptIpCache) {
+            httpsDecryptIpCache.clear()
+        }
+        synchronized(quicRouteCache) {
+            quicRouteCache.clear()
+        }
+        lastHttpDecryptPruneAt = 0L
+        lastHttpsDecryptPruneAt = 0L
+        lastQuicRoutePruneAt = 0L
+        lastRouteCachePruneCheckAt = 0L
+        logDecisionOnce(
+            key = "invalidate-network-dependent-caches:$reason",
+            message = "Cleared network-dependent route caches reason=$reason",
+            minIntervalMillis = 5_000L
+        )
     }
 
     private fun runPacketLoop(tunGeneration: Long) {
@@ -734,7 +949,11 @@ class AdBlockVpnService : VpnService() {
         val isTcp = info.protocol == OsConstants.IPPROTO_TCP
         if (isUdp && info.destinationPort == 53) {
             if (!shouldHandleDns(info.destinationAddress)) {
-                return
+                logDecisionOnce(
+                    key = "dns-non-local-endpoint:${formatAddress(info.destinationAddress)}",
+                    message = "Observed DNS query to non-local endpoint ip=${formatAddress(info.destinationAddress)}, fallback to local DNS handler",
+                    minIntervalMillis = 30_000L
+                )
             }
 
             val question = DnsMessageParser.parseQuestion(info.payload) ?: return
@@ -766,25 +985,7 @@ class AdBlockVpnService : VpnService() {
             val matchedRule = domainContext.matchedRule
             val isBlocked = matchedRule != null
             val vendor = domainContext.vendor
-            val bypassProtectionBlock = RuleRepository.isBypassProtectionDomain(question.domain)
-            val generalAdTraffic = RuleRepository.shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)
-            val novelSignals = evaluateNovelBlockingSignals(question.domain, appName, vendor, includeForceNovelQuic = false)
-            val aggressiveNovelBlock = novelSignals.aggressiveNovelBlock
-            val protectedNovelUrlBlock = novelSignals.protectedNovelUrlBlock
-            if (!isBlocked) {
-                if (generalAdTraffic || aggressiveNovelBlock || protectedNovelUrlBlock) {
-                    RuleRepository.reportUnknownVendorIfNeeded(
-                        context = this,
-                        vendor = vendor,
-                        domain = question.domain,
-                        appName = appName,
-                        signal = RuleRepository.SuspiciousSignal.DNS_QUERY,
-                        confidenceBoost = if (generalAdTraffic) 1 else 0
-                    )
-                }
-            }
-
-            if (isBlocked || bypassProtectionBlock || generalAdTraffic || aggressiveNovelBlock || protectedNovelUrlBlock) {
+            if (isBlocked) {
                 output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
                 StatsRepository.recordBlockedDns(this, vendor, appName, 512)
                 return
@@ -825,7 +1026,7 @@ class AdBlockVpnService : VpnService() {
                     )
                     val matchedAliasRule = aliasContext.matchedRule
                     val aliasVendor = aliasContext.vendor
-                    if (shouldTreatAsTrackedAdTarget(
+                    if (matchedAliasRule != null && shouldTreatAsTrackedAdTarget(
                             domain = aliasTarget,
                             appName = appName,
                             vendor = aliasVendor,
@@ -878,7 +1079,7 @@ class AdBlockVpnService : VpnService() {
             observeLocalProxyUdpFlow(info)
         }
 
-        if (shouldBlockEncryptedDnsDirectFlow(info)) {
+        if (httpDecryptEnabled && shouldBlockEncryptedDnsDirectFlow(info)) {
             return
         }
 
@@ -948,32 +1149,13 @@ class AdBlockVpnService : VpnService() {
         }
         val vendor = domainContext.vendor
         val matchedRule = domainContext.matchedRule
-        val bypassProtectionBlock = RuleRepository.isBypassProtectionDomain(domain)
-        val novelSignals = evaluateNovelBlockingSignals(domain, appName, vendor)
-        val aggressiveNovelBlock = novelSignals.aggressiveNovelBlock
-        val forcedNovelQuicBlock = novelSignals.forcedNovelQuicBlock
-        val protectedNovelUrlBlock = novelSignals.protectedNovelUrlBlock
-        if (matchedRule == null && (aggressiveNovelBlock || forcedNovelQuicBlock || protectedNovelUrlBlock)) {
-            RuleRepository.reportUnknownVendorIfNeeded(
-                context = this,
-                vendor = vendor,
-                domain = domain,
-                appName = appName,
-                signal = RuleRepository.SuspiciousSignal.HTTP_FLOW,
-                confidenceBoost = 1
-            )
-        }
         val bypassReason = HttpsMitmRepository.getActiveBypassReason(this, domain)
         val shouldForceTcpFallback = httpDecryptEnabled && httpsTarget != null && bypassReason == null
-        if (matchedRule == null && !bypassProtectionBlock && !aggressiveNovelBlock && !forcedNovelQuicBlock && !protectedNovelUrlBlock && !shouldForceTcpFallback) return false
+        if (matchedRule == null && !shouldForceTcpFallback) return false
 
         val reason = when {
             localProxyTarget -> "local-proxy-force-tcp"
             matchedRule != null -> "matched-rule"
-            bypassProtectionBlock -> "encrypted-dns-bypass"
-            aggressiveNovelBlock -> "novel-aggressive"
-            forcedNovelQuicBlock -> "novel-quic-force-block"
-            protectedNovelUrlBlock -> "novel-protected-url"
             else -> "force-tcp-fallback"
         }
         StatsRepository.recordBlockedHttp(this, vendor, appName, 64 * 1024)
@@ -1020,8 +1202,13 @@ class AdBlockVpnService : VpnService() {
         localProxyTargetAppCache[cacheKeys.sourcePortKey]?.let { return it }
         val targetContext = resolveDestinationAppContext(info) ?: return false
         val destinationIp = targetContext.destinationIp
-        if ((destinationIp == config.host || destinationIp == "127.0.0.1" || destinationIp == "::1") && info.destinationPort == port) {
+        if (isLocalProxyEndpoint(destinationIp, info.destinationPort)) {
             localProxyTargetAppCache[cacheKeys.flowKey] = false
+            logDecisionOnce(
+                key = "local-proxy-route-skip:$destinationIp:${info.destinationPort}",
+                message = "Skipped local proxy reroute for direct proxy endpoint ip=$destinationIp port=${info.destinationPort}",
+                minIntervalMillis = 15_000L
+            )
             return false
         }
         val appName = targetContext.appName
@@ -1150,7 +1337,7 @@ class AdBlockVpnService : VpnService() {
             return false
         }
         // 需要拦截
-        StatsRepository.recordBlockedHttp(this, vendor, appName, 50 * 1024)
+        StatsRepository.recordBlockedMitm(this, vendor, appName, 50 * 1024)
         LogRepository.append(
             this,
             "Blocked HTTP connection domain=${target.domain} ip=$ip app=$appName vendor=$vendor source=${target.source} via=http-decrypt-entry"
@@ -1162,6 +1349,14 @@ class AdBlockVpnService : VpnService() {
         if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return
         if (info.payload.isEmpty()) return
         val destinationIp = formatAddress(info.destinationAddress)
+        if (isLocalLoopOrProxyEndpoint(destinationIp, info.destinationPort)) {
+            logDecisionOnce(
+                key = "https-clienthello-skip-local:$destinationIp:${info.destinationPort}",
+                message = "Skipped HTTPS ClientHello MITM tracking for local endpoint ip=$destinationIp port=${info.destinationPort}",
+                minIntervalMillis = 15_000L
+            )
+            return
+        }
         maybePruneRouteCaches()
         val decryptTarget = synchronized(httpsDecryptIpCache) {
             httpsDecryptIpCache[destinationIp]
@@ -1258,6 +1453,17 @@ class AdBlockVpnService : VpnService() {
         if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return
         val flowKey = buildCacheKeys(info).flowKey
         val ip = formatAddress(info.destinationAddress)
+        if (isLocalLoopOrProxyEndpoint(ip, info.destinationPort)) {
+            synchronized(httpsProxyFlowCache) {
+                httpsProxyFlowCache.remove(flowKey)
+            }
+            logDecisionOnce(
+                key = "https-transparent-skip-local:$ip:${info.destinationPort}",
+                message = "Skipped HTTPS transparent proxy tracking for local endpoint ip=$ip port=${info.destinationPort}",
+                minIntervalMillis = 15_000L
+            )
+            return
+        }
         maybePruneRouteCaches()
         val target = synchronized(httpsDecryptIpCache) {
             httpsDecryptIpCache[ip]
@@ -1287,7 +1493,7 @@ class AdBlockVpnService : VpnService() {
             val matchedRule = domainContext.matchedRule
             val vendor = domainContext.vendor
             if (shouldTreatAsTrackedAdTarget(target.domain, appName, vendor, matchedRule, includeProtectedNovelUrl = false, includeForceNovelQuic = false)) {
-                StatsRepository.recordBlockedHttp(this, vendor, appName, 64 * 1024)
+                StatsRepository.recordBlockedMitm(this, vendor, appName, 64 * 1024)
                 LogRepository.append(
                     this,
                     "Blocked HTTPS connection at SYN domain=${target.domain} ip=$ip app=$appName vendor=$vendor source=${target.source} via=https-decrypt-entry"
@@ -2903,8 +3109,7 @@ class AdBlockVpnService : VpnService() {
         if (RuleRepository.isWhitelistedDomain(domain)) return false
         if (RuleRepository.isSensitiveAuthDomain(domain)) return false
         if (isProtectedTrafficDomain(domain) && resolvedRule == null) return false
-        return shouldTreatAsTrackedAdTarget(domain, appName, vendor, resolvedRule) ||
-            RuleRepository.looksLikeAdSdkInfraDomain(domain, vendor)
+        return resolvedRule != null
     }
 
     private fun rememberQuicAliasTargets(
@@ -3053,15 +3258,7 @@ class AdBlockVpnService : VpnService() {
         if (novelApp && RuleRepository.isProtectedNovelAppDomain(domain)) return false
         if (novelApp && RuleRepository.isNovelContentDomain(domain)) return false
         if (isProtectedTrafficDomain(domain) && resolvedRule == null) return false
-        if (shouldTreatAsTrackedAdTarget(domain, appName, vendor, resolvedRule)) return true
-        val suspiciousScore = RuleRepository.suspiciousDomainConfidenceScore(
-            domain = domain,
-            vendor = vendor,
-            novelHits = if (novelApp) 1 else 0,
-            count = 1,
-            appName = appName
-        )
-        return suspiciousScore >= 4
+        return resolvedRule != null
     }
 
     private fun shouldForceImmediateDecryptRouteReload(
@@ -3116,20 +3313,7 @@ class AdBlockVpnService : VpnService() {
         includeProtectedNovelUrl: Boolean = true,
         includeForceNovelQuic: Boolean = true
     ): Boolean {
-        if (matchedRule != null) return true
-        if (RuleRepository.isBypassProtectionDomain(domain)) return true
-        if (RuleRepository.shouldTreatAsGeneralAdTraffic(domain, vendor, appName)) return true
-        val novelSignals = evaluateNovelBlockingSignals(
-            domain = domain,
-            appName = appName,
-            vendor = vendor,
-            includeProtectedNovelUrl = includeProtectedNovelUrl,
-            includeForceNovelQuic = includeForceNovelQuic
-        )
-        if (novelSignals.aggressiveNovelBlock) return true
-        if (novelSignals.forcedNovelQuicBlock) return true
-        if (novelSignals.protectedNovelUrlBlock) return true
-        return false
+        return matchedRule != null
     }
 
     private fun evaluateNovelBlockingSignals(
@@ -3226,10 +3410,12 @@ class AdBlockVpnService : VpnService() {
     private fun resolveDnsServers(): List<InetAddress> {
         val now = System.currentTimeMillis()
         cachedDnsServers?.takeIf { it.expiresAt > now }?.let { return it.servers }
-        val connectivityManager = getSystemService(ConnectivityManager::class.java)
-        val linkProperties: LinkProperties? = connectivityManager.getLinkProperties(connectivityManager.activeNetwork)
-        val dynamicServers = linkProperties?.dnsServers.orEmpty()
+        val dynamicServers = currentLinkProperties()
+            .asSequence()
+            .flatMap { it.dnsServers.asSequence() }
+            .distinctBy { it.hostAddress ?: it.hostName }
             .filterNot { handledDnsHosts.contains(it.hostAddress ?: "") }
+            .toList()
         val candidates = (dynamicServers + upstreamFallbackDnsServers)
             .distinctBy { it.hostAddress ?: it.hostName }
         val sorted = candidates.sortedWith(
@@ -3241,6 +3427,11 @@ class AdBlockVpnService : VpnService() {
         synchronized(dnsServerCacheLock) {
             cachedDnsServers = CachedDnsServers(sorted, now + dnsServerCacheTtlMillis)
         }
+        logDecisionOnce(
+            key = "resolve-dns-servers:${sorted.joinToString(",") { it.hostAddress ?: it.hostName }}",
+            message = "Resolved upstream DNS servers dynamic=${dynamicServers.joinToString("|") { it.hostAddress ?: it.hostName }} final=${sorted.joinToString("|") { it.hostAddress ?: it.hostName }} networks=${describeUnderlyingNetworks()}",
+            minIntervalMillis = 5_000L
+        )
         return sorted
     }
 
@@ -3315,19 +3506,33 @@ class AdBlockVpnService : VpnService() {
         }
     }
 
+    private fun isLocalProxyEndpoint(host: String, port: Int): Boolean {
+        val configPort = localProxyCoexistConfig.port
+        return port == configPort && (host == localProxyCoexistConfig.host || host == "127.0.0.1" || host == "::1")
+    }
+
+    private fun isLocalLoopOrProxyEndpoint(host: String, port: Int): Boolean {
+        if (host == "127.0.0.1" || host == "::1") return true
+        return isLocalProxyEndpoint(host, port)
+    }
+
     private fun isKnownPublicDnsEndpoint(host: String): Boolean {
         return forcedDnsRouteHosts.contains(host)
     }
 
     private fun isCurrentDnsEndpoint(host: String): Boolean {
         if (isKnownPublicDnsEndpoint(host)) return true
-        val connectivityManager = getSystemService(ConnectivityManager::class.java)
-        val linkProperties: LinkProperties? = connectivityManager.getLinkProperties(connectivityManager.activeNetwork)
-        return linkProperties?.dnsServers.orEmpty().any { it.hostAddress == host }
+        return currentLinkProperties().any { linkProperties ->
+            linkProperties.dnsServers.any { it.hostAddress == host }
+        }
     }
 
     private fun shouldHandleDns(address: ByteArray): Boolean {
-        return handledDnsHosts.contains(formatAddress(address))
+        val host = formatAddress(address)
+        if (handledDnsHosts.contains(host)) return true
+        if (isCurrentDnsEndpoint(host)) return true
+        if (isKnownPublicDnsEndpoint(host)) return true
+        return true
     }
 
     private fun loadDynamicHttpDecryptRoutes(): List<BlockedIpNetwork> {
@@ -3346,9 +3551,12 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun loadForcedDnsRoutes(): List<BlockedIpNetwork> {
-        val connectivityManager = getSystemService(ConnectivityManager::class.java)
-        val linkProperties: LinkProperties? = connectivityManager.getLinkProperties(connectivityManager.activeNetwork)
-        val dynamicServers = linkProperties?.dnsServers.orEmpty().mapNotNull { it.hostAddress }
+        val dynamicServers = currentLinkProperties()
+            .asSequence()
+            .flatMap { it.dnsServers.asSequence() }
+            .mapNotNull { it.hostAddress }
+            .distinct()
+            .toList()
         return (forcedDnsRouteHosts + dynamicServers)
             .distinct()
             .mapNotNull { host ->
@@ -4051,6 +4259,7 @@ class AdBlockVpnService : VpnService() {
         const val ACTION_START = "com.HanFeng.START"
         const val ACTION_STOP = "com.HanFeng.STOP"
         const val ACTION_RELOAD = "com.HanFeng.RELOAD"
+        const val ACTION_STATUS_CHANGED = "com.HanFeng.STATUS_CHANGED"
         const val EXTRA_USER_INITIATED = "extra_user_initiated"
         private const val CHANNEL_ID = "adblock_vpn"
         private const val NOTIFICATION_ID = 1001
@@ -4066,6 +4275,7 @@ class AdBlockVpnService : VpnService() {
         private const val TCP_SEGMENT_PAYLOAD_SIZE = 1400
         private const val HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS = 1_500L
         private const val HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS = 250L
+        private const val UNDERLYING_NETWORK_REFRESH_MIN_INTERVAL_MILLIS = 1_500L
         private const val OWNER_UID_FAILURE_TTL_MILLIS = 60_000L
         private const val HTTPS_BRIDGE_CONNECT_TIMEOUT_MILLIS = 4_000
         private const val MAX_BUFFERED_CLIENT_SEGMENTS = 32
@@ -4091,6 +4301,11 @@ class AdBlockVpnService : VpnService() {
     private data class CachedDnsServers(
         val servers: List<InetAddress>,
         val expiresAt: Long
+    )
+
+    private data class UnderlyingNetworkCandidate(
+        val network: Network,
+        val capabilities: NetworkCapabilities
     )
 
     private data class MatchedIpRule(

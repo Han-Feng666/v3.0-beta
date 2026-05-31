@@ -32,6 +32,7 @@ import java.util.Locale
 class SuspiciousDomainsActivity : BaseActivity() {
     private lateinit var binding: ActivitySuspiciousDomainsBinding
     private var allSamples: List<RuleRepository.SuspiciousDomainSample> = emptyList()
+    private var addedDomains: Set<String> = emptySet()
     private var hasChanges = false
     private val selectedDomains = linkedSetOf<String>()
     private val dateFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
@@ -69,13 +70,19 @@ class SuspiciousDomainsActivity : BaseActivity() {
         }
         binding.checkOnlyNovelApps.setOnCheckedChangeListener { _, _ -> applyFilters() }
         binding.btnSelectVisible.setOnClickListener {
-            adapter.currentList.forEach { selectedDomains += it.domain }
-            adapter.notifyDataSetChanged()
+            val changedDomains = adapter.currentList
+                .asSequence()
+                .filter { it.domain !in addedDomains }
+                .map { it.domain }
+                .filter { selectedDomains.add(it) }
+                .toSet()
+            adapter.syncSelection(changedDomains)
             updateSummary(adapter.currentList)
         }
         binding.btnClearSelection.setOnClickListener {
+            val changedDomains = selectedDomains.toSet()
             selectedDomains.clear()
-            adapter.notifyDataSetChanged()
+            adapter.syncSelection(changedDomains)
             updateSummary(adapter.currentList)
         }
         binding.btnAddSelected.setOnClickListener {
@@ -83,7 +90,7 @@ class SuspiciousDomainsActivity : BaseActivity() {
         }
         binding.btnAddRecommended.setOnClickListener {
             val recommended = adapter.currentList.filter {
-                RuleRepository.isHighConfidenceSuspiciousDomain(
+                it.domain !in addedDomains && RuleRepository.isHighConfidenceSuspiciousDomain(
                     domain = it.domain,
                     vendor = it.lastVendor,
                     novelHits = it.novelHits,
@@ -115,9 +122,17 @@ class SuspiciousDomainsActivity : BaseActivity() {
 
     private fun loadSamples() {
         lifecycleScope.launch {
-            allSamples = withContext(Dispatchers.Default) {
-                RuleRepository.getSuspiciousDomainSamples(applicationContext)
+            val snapshot = withContext(Dispatchers.Default) {
+                val samples = RuleRepository.getSuspiciousDomainSamples(applicationContext)
+                val added = samples.asSequence()
+                    .map { it.domain }
+                    .filter { RuleRepository.hasMatchingRule(applicationContext, it) }
+                    .toSet()
+                samples to added
             }
+            allSamples = snapshot.first
+            addedDomains = snapshot.second
+            selectedDomains.removeAll(addedDomains)
             applyFilters()
         }
     }
@@ -130,25 +145,28 @@ class SuspiciousDomainsActivity : BaseActivity() {
                 sample.lastAppName.lowercase().contains(query) ||
                 sample.lastVendor.lowercase().contains(query)
             if (!matchesQuery) return@filter false
-            if (binding.checkOnlyNovelApps.isChecked && sample.novelHits <= 0) return@filter false
-            val alreadyAdded = RuleRepository.hasMatchingRule(this, sample.domain)
+            val isNovelSample = sample.novelHits > 0 || RuleRepository.isNovelVendor(sample.lastVendor)
+            if (binding.checkOnlyNovelApps.isChecked && !isNovelSample) return@filter false
+            val alreadyAdded = sample.domain in addedDomains
             if (binding.checkOnlyUnadded.isChecked && alreadyAdded) return@filter false
             if (binding.checkOnlyAdded.isChecked && !alreadyAdded) return@filter false
             true
         }
         adapter.submitList(filtered)
+        binding.emptyText.text = if (allSamples.isEmpty()) "暂无可疑域名" else "当前筛选条件下暂无结果"
         binding.emptyText.visibility = if (filtered.isEmpty()) View.VISIBLE else View.GONE
         updateSummary(filtered)
     }
 
     private fun addDomains(domains: List<String>) {
-        if (domains.isEmpty()) {
+        val pendingDomains = domains.distinct().filter { it !in addedDomains }
+        if (pendingDomains.isEmpty()) {
             Toast.makeText(this, "当前没有可添加的域名", Toast.LENGTH_SHORT).show()
             return
         }
         lifecycleScope.launch {
             val added = withContext(Dispatchers.Default) {
-                RuleRepository.addRules(applicationContext, domains, RuleSource.MANUAL)
+                RuleRepository.addRules(applicationContext, pendingDomains, RuleSource.MANUAL)
             }
             if (added.isNotEmpty()) {
                 hasChanges = true
@@ -165,7 +183,36 @@ class SuspiciousDomainsActivity : BaseActivity() {
     }
 
     private fun updateSummary(visible: List<RuleRepository.SuspiciousDomainSample>) {
-        binding.selectionSummary.text = "已选择 ${selectedDomains.size} 项，可选 ${allSamples.size} 项，当前可见 ${visible.size} 项"
+        val selectableVisibleCount = visible.count { it.domain !in addedDomains }
+        val recommendedVisibleCount = visible.count {
+            it.domain !in addedDomains && RuleRepository.isHighConfidenceSuspiciousDomain(
+                domain = it.domain,
+                vendor = it.lastVendor,
+                novelHits = it.novelHits,
+                count = it.count,
+                appName = it.lastAppName,
+                dnsHits = it.dnsHits,
+                aliasHits = it.aliasHits,
+                tlsSniHits = it.tlsSniHits,
+                httpHits = it.httpHits,
+                pathHits = it.pathHits,
+                redirectHits = it.redirectHits,
+                appSignalHits = it.appSignalHits,
+                vendorSignalHits = it.vendorSignalHits,
+                confidenceBoost = it.confidenceBoost,
+                refererDomain = it.refererDomain
+            )
+        }
+        val novelVisibleCount = visible.count { it.novelHits > 0 || RuleRepository.isNovelVendor(it.lastVendor) }
+        binding.selectionSummary.text = "已选择 ${selectedDomains.size} 项，可选 ${selectableVisibleCount} 项，当前可见 ${visible.size} 项，推荐 ${recommendedVisibleCount} 项，小说专项 ${novelVisibleCount} 项"
+        binding.btnSelectVisible.isEnabled = selectableVisibleCount > 0
+        binding.btnSelectVisible.alpha = if (selectableVisibleCount > 0) 1f else 0.6f
+        binding.btnClearSelection.isEnabled = selectedDomains.isNotEmpty()
+        binding.btnClearSelection.alpha = if (selectedDomains.isNotEmpty()) 1f else 0.6f
+        binding.btnAddSelected.isEnabled = selectedDomains.isNotEmpty()
+        binding.btnAddSelected.alpha = if (selectedDomains.isNotEmpty()) 1f else 0.6f
+        binding.btnAddRecommended.isEnabled = recommendedVisibleCount > 0
+        binding.btnAddRecommended.alpha = if (recommendedVisibleCount > 0) 1f else 0.6f
     }
 
     companion object {
@@ -189,12 +236,29 @@ class SuspiciousDomainsActivity : BaseActivity() {
         private val onToggle: (RuleRepository.SuspiciousDomainSample, Boolean) -> Unit,
         private val onAddSingle: (RuleRepository.SuspiciousDomainSample) -> Unit
     ) : ListAdapter<RuleRepository.SuspiciousDomainSample, SuspiciousDomainAdapter.ViewHolder>(DIFF) {
+        fun syncSelection(changedDomains: Set<String>) {
+            if (changedDomains.isEmpty()) return
+            currentList.forEachIndexed { index, item ->
+                if (item.domain in changedDomains) {
+                    notifyItemChanged(index, SELECTION_PAYLOAD)
+                }
+            }
+        }
+
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
             return ViewHolder(ItemSuspiciousDomainBinding.inflate(LayoutInflater.from(parent.context), parent, false))
         }
 
         override fun onBindViewHolder(holder: ViewHolder, position: Int) {
             holder.bind(getItem(position))
+        }
+
+        override fun onBindViewHolder(holder: ViewHolder, position: Int, payloads: MutableList<Any>) {
+            if (payloads.contains(SELECTION_PAYLOAD)) {
+                holder.bindSelectionState(getItem(position))
+            } else {
+                super.onBindViewHolder(holder, position, payloads)
+            }
         }
 
         inner class ViewHolder(private val binding: ItemSuspiciousDomainBinding) : RecyclerView.ViewHolder(binding.root) {
@@ -218,19 +282,30 @@ class SuspiciousDomainsActivity : BaseActivity() {
                 )
                 binding.domainText.text = item.domain
                 binding.countText.text = "评分 $score，命中 ${item.count} 次，小说专项 ${item.novelHits} 次，最近 ${dateFormat.format(Date(item.lastSeenAt))}"
-                val added = RuleRepository.hasMatchingRule(this@SuspiciousDomainsActivity, item.domain)
+                val added = item.domain in addedDomains
                 binding.statusText.text = "最近应用：${item.lastAppName.ifBlank { "未知" }} | 厂商：${item.lastVendor} | ${if (added) "已添加" else "未添加"}"
-                binding.selectBox.setOnCheckedChangeListener(null)
-                binding.selectBox.isChecked = isSelected(item)
-                binding.selectBox.setOnCheckedChangeListener { _, checked -> onToggle(item, checked) }
+                bindSelectionState(item)
                 binding.root.setOnClickListener { binding.selectBox.toggle() }
                 binding.actionButton.text = if (added) "已添加" else "单条添加"
                 binding.actionButton.isEnabled = !added
                 binding.actionButton.setOnClickListener { onAddSingle(item) }
+            }
+
+            fun bindSelectionState(item: RuleRepository.SuspiciousDomainSample) {
+                val added = item.domain in addedDomains
+                binding.selectBox.setOnCheckedChangeListener(null)
+                binding.selectBox.isChecked = isSelected(item)
+                binding.selectBox.setOnCheckedChangeListener { _, checked -> onToggle(item, checked) }
+                binding.selectBox.isEnabled = !added
+                binding.root.isEnabled = true
             }
         }
     }
 
     private val Int.dp: Int
         get() = (this * resources.displayMetrics.density).toInt()
+
+    private companion object {
+        private const val SELECTION_PAYLOAD = "selection"
+    }
 }

@@ -65,6 +65,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private var cachedRulesRef: List<BlockRule> = emptyList()
     private var cachedRulesSignature: Int = 0
     private var cachedGroupedRules = linkedMapOf<String, List<CachedRuleEntry>>()
+    private val selectedRulesById = linkedMapOf<String, BlockRule>()
     private val remoteTimeFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -82,21 +83,27 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             onGroupClick = { vendor -> toggleGroup(vendor) },
             onGroupLongPress = { vendor ->
                 val ctx = context ?: return@RuleListAdapter
-                val ids = getGroupedRules(ctx)[vendor].orEmpty().map { it.rule.id }
-                enterSelection(ids)
+                val rules = getGroupedRules(ctx)[vendor].orEmpty().map { it.rule }
+                enterSelection(rules)
             },
             onDomainClick = { item ->
                 if (selectionMode) {
-                    toggleSelection(item.rule.id)
+                    toggleSelection(item.rule)
                 } else {
                     showRuleActions(item.rule)
                 }
             },
             onDomainLongPress = { item ->
-                enterSelection(setOf(item.rule.id))
+                enterSelection(listOf(item.rule))
             },
             onSelectionChanged = { item, checked ->
-                if (checked) selectedIds += item.rule.id else selectedIds -= item.rule.id
+                if (checked) {
+                    selectedIds += item.rule.id
+                    selectedRulesById[item.rule.id] = item.rule
+                } else {
+                    selectedIds -= item.rule.id
+                    selectedRulesById.remove(item.rule.id)
+                }
                 updateSelectionUi()
             }
         )
@@ -142,7 +149,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         binding.btnFilter.setOnClickListener { deduplicateRules() }
         binding.btnRuleSources.setOnClickListener { showImpactNormalNetworkDialog() }
         binding.btnSelectAll.setOnClickListener { selectAllVisible() }
-        binding.btnDeleteSelected.setOnClickListener { confirmDelete(selectedIds) }
+        binding.btnDeleteSelected.setOnClickListener { confirmDelete(selectedRulesById.values) }
         binding.btnCancelSelection.setOnClickListener { exitSelection() }
         binding.inputSearch.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -782,10 +789,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         binding.btnDeleteSelected.text = if (filteredSelectionMode) "删除筛出项" else "删除所选"
     }
 
-    private fun enterSelection(initialIds: Collection<String>) {
+    private fun enterSelection(initialRules: Collection<BlockRule>) {
         selectionMode = true
         filteredSelectionMode = false
-        selectedIds += initialIds
+        initialRules.forEach { rule ->
+            selectedIds += rule.id
+            selectedRulesById[rule.id] = rule
+        }
         refreshList()
     }
 
@@ -793,6 +803,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         selectionMode = true
         filteredSelectionMode = true
         selectedIds.clear()
+        selectedRulesById.clear()
         selectedIds += initialIds
         refreshList()
     }
@@ -801,30 +812,39 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         selectionMode = false
         filteredSelectionMode = false
         selectedIds.clear()
+        selectedRulesById.clear()
         refreshList()
     }
 
-    private fun toggleSelection(id: String) {
-        if (!selectedIds.add(id)) selectedIds.remove(id)
+    private fun toggleSelection(rule: BlockRule) {
+        if (!selectedIds.add(rule.id)) {
+            selectedIds.remove(rule.id)
+            selectedRulesById.remove(rule.id)
+        } else {
+            selectedRulesById[rule.id] = rule
+        }
         refreshList()
     }
 
     private fun selectAllVisible() {
-        visibleDomainIds().forEach { selectedIds += it }
+        visibleRules().forEach { rule ->
+            selectedIds += rule.id
+            selectedRulesById[rule.id] = rule
+        }
         refreshList()
     }
 
-    private fun confirmDelete(ids: Set<String>) {
-        val snapshot = ids.toSet()
+    private fun confirmDelete(rules: Collection<BlockRule>) {
+        val snapshot = rules.distinctBy { it.id.ifBlank { it.domain } }
         if (snapshot.isEmpty()) return
         val dialogContext = safeDialogActivity() ?: return
         try {
-            MaterialAlertDialogBuilder(dialogContext, R.style.ThemeOverlay_HanFeng_Dialog)
+            createDialogBuilder(dialogContext)
                 .setTitle("确认删除")
                 .setMessage("确定删除这 ${snapshot.size} 条规则吗？删除后无法恢复。")
                 .setPositiveButton("删除") { _, _ ->
                     val actionContext = context ?: return@setPositiveButton
-                    val removedCount = RuleRepository.removeRulesByIds(actionContext, snapshot)
+                    val removedCount = RuleRepository.removeRules(actionContext, snapshot)
                     LogRepository.append(actionContext, "Requested remove=${snapshot.size} actualRemoved=$removedCount")
                     if (removedCount <= 0) {
                         Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
@@ -871,27 +891,38 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun openSuspiciousDomainsPage() {
         val host = activity as? MainActivity ?: return
-        try {
-            if (RuleRepository.getSuspiciousDomainSamples(host).isEmpty()) {
-                Toast.makeText(host, "当前没有需要分析的疑似广告域名", Toast.LENGTH_SHORT).show()
-                return
+        viewLifecycleOwner.lifecycleScope.launch {
+            runCatching {
+                withContext(Dispatchers.Default) {
+                    RuleRepository.getSuspiciousDomainSamples(host.applicationContext)
+                }
+            }.onSuccess { samples ->
+                val currentHost = activity as? MainActivity ?: return@onSuccess
+                if (!isAdded) return@onSuccess
+                if (samples.isEmpty()) {
+                    Toast.makeText(currentHost, "当前没有需要分析的疑似广告域名", Toast.LENGTH_SHORT).show()
+                    return@onSuccess
+                }
+                suspiciousDomainsLauncher.launch(SuspiciousDomainsActivity.createIntent(currentHost))
+            }.onFailure {
+                val currentHost = activity as? MainActivity ?: host
+                LogRepository.append(currentHost, "Open suspicious domains page failed: ${it.message ?: it.javaClass.simpleName}\nStack: ${it.stackTraceToString()}")
+                if (isAdded) {
+                    Toast.makeText(currentHost, "打开分析页面失败：${it.message}", Toast.LENGTH_LONG).show()
+                }
             }
-            suspiciousDomainsLauncher.launch(SuspiciousDomainsActivity.createIntent(host))
-        } catch (e: Exception) {
-            LogRepository.append(host, "Open suspicious domains page failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
-            Toast.makeText(host, "打开分析页面失败：${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
     private fun showRuleActions(rule: BlockRule) {
         val dialogContext = safeDialogActivity() ?: return
         try {
-            MaterialAlertDialogBuilder(dialogContext, R.style.ThemeOverlay_HanFeng_Dialog)
+            createDialogBuilder(dialogContext)
                 .setTitle(rule.domain)
                 .setItems(arrayOf("手动分类", "删除规则")) { _, which ->
                     when (which) {
                         0 -> showVendorPicker(rule)
-                        1 -> confirmDelete(setOf(rule.id))
+                        1 -> confirmDelete(listOf(rule))
                     }
                 }
                 .show()
@@ -905,7 +936,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val dialogContext = safeDialogActivity() ?: return
         val options = RuleRepository.availableVendors(dialogContext)
         runCatching {
-            MaterialAlertDialogBuilder(dialogContext, R.style.ThemeOverlay_HanFeng_Dialog)
+            createDialogBuilder(dialogContext)
                 .setTitle("选择厂商分组")
                 .setItems((options + "新建分组").toTypedArray()) { _, which ->
                     if (which == options.size) {
@@ -933,7 +964,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             setHintTextColor(ContextCompat.getColor(dialogContext, R.color.hf_text_secondary))
             setPadding(24, 20, 24, 20)
         }
-        val dialog = MaterialAlertDialogBuilder(dialogContext, R.style.ThemeOverlay_HanFeng_Dialog)
+        val dialog = createDialogBuilder(dialogContext)
             .setTitle("新建分组")
             .setView(input)
             .setPositiveButton("保存", null)
@@ -1024,7 +1055,11 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     return@launch
                 }
                 val displayCandidates = candidates.take(180)
-                val ids = displayCandidates.map { it.rule.id }.toMutableSet()
+                val selectedRules = linkedMapOf<String, BlockRule>().apply {
+                    displayCandidates.forEach { candidate ->
+                        put(candidate.rule.id, candidate.rule)
+                    }
+                }
                 val items = displayCandidates.map { candidate ->
                     val domain = candidate.rule.domain.ifBlank { "(未识别域名)" }
                     val reason = candidate.reasons.joinToString("；")
@@ -1036,24 +1071,34 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 } else {
                     "影响正常网络"
                 }
-                MaterialAlertDialogBuilder(ctx, R.style.ThemeOverlay_HanFeng_Dialog)
+                createDialogBuilder(ctx)
                     .setTitle(title)
                     .setMultiChoiceItems(items, checked) { _, which, isChecked ->
-                        val id = displayCandidates.getOrNull(which)?.rule?.id ?: return@setMultiChoiceItems
-                        if (isChecked) ids += id else ids -= id
+                        val rule = displayCandidates.getOrNull(which)?.rule ?: return@setMultiChoiceItems
+                        if (isChecked) {
+                            selectedRules[rule.id] = rule
+                        } else {
+                            selectedRules.remove(rule.id)
+                        }
                     }
                     .setPositiveButton("删除所选") { _, _ ->
-                        val actionContext = context ?: return@setPositiveButton
-                        if (ids.isEmpty()) {
+                        val actionContext = safeContext() ?: ctx
+                        if (selectedRules.isEmpty()) {
                             Toast.makeText(actionContext, "请至少选择一条规则", Toast.LENGTH_SHORT).show()
                             return@setPositiveButton
                         }
-                        val removedCount = RuleRepository.removeRulesByIds(actionContext, ids)
-                        LogRepository.append(actionContext, "Requested remove impact-network candidates=${ids.size} actualRemoved=$removedCount")
+                        val removedCount = RuleRepository.removeRules(actionContext, selectedRules.values)
+                        LogRepository.append(actionContext, "Requested remove impact-network candidates=${selectedRules.size} actualRemoved=$removedCount")
+                        if (removedCount <= 0) {
+                            Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动兼容，请重试一次", Toast.LENGTH_SHORT).show()
+                            invalidateRuleListCache()
+                            refreshListSoon()
+                            return@setPositiveButton
+                        }
                         Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
                         invalidateRuleListCache()
                         refreshListSoon()
-                        reloadVpnIfRunning(removedCount > 0)
+                        reloadVpnIfRunning(true)
                     }
                     .setNegativeButton("保留全部", null)
                     .show()
@@ -1235,12 +1280,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         }
     }
 
-    private fun visibleDomainIds(): List<String> {
+    private fun visibleRules(): List<BlockRule> {
         val ctx = context ?: return emptyList()
         val grouped = getGroupedRules(ctx)
         val query = searchQuery.lowercase()
         return if (query.isEmpty()) {
-            grouped.values.asSequence().flatten().map { it.rule.id }.take(500).toList()
+            grouped.values.asSequence().flatten().map { it.rule }.take(500).toList()
         } else {
             grouped.values.asSequence()
                 .flatten()
@@ -1250,7 +1295,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         it.keywordLower?.contains(query) == true ||
                         it.regexLower?.contains(query) == true
                 }
-                .map { it.rule.id }
+                .map { it.rule }
                 .take(500)
                 .toList()
         }

@@ -21,6 +21,7 @@ import com.HanFeng.databinding.ActivityRemoteRuleSourcesBinding
 import com.HanFeng.model.RemoteRuleSourceConfig
 import com.HanFeng.service.AdBlockVpnService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -29,6 +30,8 @@ class RemoteRuleSourcesActivity : BaseActivity() {
 
     private lateinit var binding: ActivityRemoteRuleSourcesBinding
     private var allSources: List<RemoteRuleSourceConfig> = emptyList()
+    private var loadSourcesJob: Job? = null
+    private var loadSourcesVersion = 0
     private val adapter = RemoteRuleSourceListAdapter(
         onToggle = { source -> toggleSource(source) },
         onSync = { source -> syncSources(source.id, manual = true) },
@@ -62,8 +65,16 @@ class RemoteRuleSourcesActivity : BaseActivity() {
     }
 
     private fun loadSources() {
-        allSources = RuleRepository.getRemoteRuleSources(this)
-        applyFilter(binding.searchInput.text?.toString().orEmpty())
+        val requestVersion = ++loadSourcesVersion
+        loadSourcesJob?.cancel()
+        loadSourcesJob = lifecycleScope.launch {
+            val sources = withContext(Dispatchers.Default) {
+                RuleRepository.getRemoteRuleSources(applicationContext)
+            }
+            if (requestVersion != loadSourcesVersion || isFinishing || isDestroyed) return@launch
+            allSources = sources
+            applyFilter(binding.searchInput.text?.toString().orEmpty())
+        }
     }
 
     private fun applyFilter(keyword: String) {
@@ -166,46 +177,56 @@ class RemoteRuleSourcesActivity : BaseActivity() {
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle(if (source == null) "添加规则源" else "编辑规则源")
             .setView(container)
-            .setPositiveButton(if (source == null) "添加" else "保存") { _, _ ->
+            .setPositiveButton(if (source == null) "添加" else "保存", null)
+            .setNegativeButton("取消", null)
+            .show()
+            .also { dialog ->
+                dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val name = nameInput.text?.toString().orEmpty().trim()
                 val url = urlInput.text?.toString().orEmpty().trim()
                 when {
                     name.isBlank() -> {
                         Toast.makeText(this, "请输入规则源名称", Toast.LENGTH_SHORT).show()
-                        showSourceEditorDialog(source)
                     }
                     url.isBlank() -> {
                         Toast.makeText(this, "请输入规则源地址", Toast.LENGTH_SHORT).show()
-                        showSourceEditorDialog(source)
                     }
                     !url.startsWith("http://") && !url.startsWith("https://") -> {
                         Toast.makeText(this, "规则源地址格式不正确", Toast.LENGTH_SHORT).show()
-                        showSourceEditorDialog(source)
                     }
-                    RuleRepository.getRemoteRuleSources(this).any {
-                        it.url.equals(url, ignoreCase = true) && it.id != source?.id
-                    } -> {
-                        Toast.makeText(this, "这个规则源地址已经存在", Toast.LENGTH_SHORT).show()
-                    }
-                    source == null -> addRemoteRuleSource(name, url)
                     else -> {
-                        val oldUrl = source.url.trim()
-                        val updated = source.copy(name = name, url = url, lastError = null)
-                        RuleRepository.updateRemoteRuleSource(this, updated)
-                        loadSources()
-                        if (!source.enabled) {
-                            Toast.makeText(this, "规则源已更新，当前处于停用状态", Toast.LENGTH_SHORT).show()
-                        } else if (!oldUrl.equals(url, ignoreCase = true)) {
-                            Toast.makeText(this, "规则源地址已更新，正在重新拉取", Toast.LENGTH_SHORT).show()
-                            syncSources(source.id, manual = true)
-                        } else {
-                            Toast.makeText(this, "规则源已更新", Toast.LENGTH_SHORT).show()
+                        lifecycleScope.launch {
+                            val duplicated = withContext(Dispatchers.Default) {
+                                RuleRepository.getRemoteRuleSources(applicationContext).any {
+                                    it.url.equals(url, ignoreCase = true) && it.id != source?.id
+                                }
+                            }
+                            if (duplicated) {
+                                Toast.makeText(this@RemoteRuleSourcesActivity, "这个规则源地址已经存在", Toast.LENGTH_SHORT).show()
+                                return@launch
+                            }
+                            if (source == null) {
+                                addRemoteRuleSource(name, url)
+                            } else {
+                                val oldUrl = source.url.trim()
+                                val updated = source.copy(name = name, url = url, lastError = null)
+                                RuleRepository.updateRemoteRuleSource(this@RemoteRuleSourcesActivity, updated)
+                                loadSources()
+                                if (!source.enabled) {
+                                    Toast.makeText(this@RemoteRuleSourcesActivity, "规则源已更新，当前处于停用状态", Toast.LENGTH_SHORT).show()
+                                } else if (!oldUrl.equals(url, ignoreCase = true)) {
+                                    Toast.makeText(this@RemoteRuleSourcesActivity, "规则源地址已更新，正在重新拉取", Toast.LENGTH_SHORT).show()
+                                    syncSources(source.id, manual = true)
+                                } else {
+                                    Toast.makeText(this@RemoteRuleSourcesActivity, "规则源已更新", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            dialog.dismiss()
                         }
                     }
                 }
             }
-            .setNegativeButton("取消", null)
-            .show()
+            }
     }
 
     private fun addRemoteRuleSource(name: String, url: String) {
@@ -233,39 +254,44 @@ class RemoteRuleSourcesActivity : BaseActivity() {
                 .show()
             return
         }
-        val sourceRules = RuleRepository.getRulesForRemoteSource(this, source.id)
-        val sampleText = sourceRules.take(8).joinToString("\n") { rule -> "- ${rule.domain}" }
-        val message = buildString {
-            append("规则源：")
-            append(source.name)
-            append("\n地址：")
-            append(source.url)
-            append("\n\n当前已同步规则：")
-            append(sourceRules.size)
-            append(" 条")
-            if (sampleText.isNotBlank()) {
-                append("\n\n规则示例：\n")
-                append(sampleText)
+        lifecycleScope.launch {
+            val sourceRules = withContext(Dispatchers.Default) {
+                RuleRepository.getRulesForRemoteSource(applicationContext, source.id)
             }
-            append("\n\n请选择删除方式。")
+            if (isFinishing || isDestroyed) return@launch
+            val sampleText = sourceRules.take(8).joinToString("\n") { rule -> "- ${rule.domain}" }
+            val message = buildString {
+                append("规则源：")
+                append(source.name)
+                append("\n地址：")
+                append(source.url)
+                append("\n\n当前已同步规则：")
+                append(sourceRules.size)
+                append(" 条")
+                if (sampleText.isNotBlank()) {
+                    append("\n\n规则示例：\n")
+                    append(sampleText)
+                }
+                append("\n\n请选择删除方式。")
+            }
+            androidx.appcompat.app.AlertDialog.Builder(this@RemoteRuleSourcesActivity)
+                .setTitle("删除规则源")
+                .setMessage(message)
+                .setPositiveButton("删除规则源和规则") { _, _ ->
+                    val removedCount = RuleRepository.removeRulesForRemoteSource(this@RemoteRuleSourcesActivity, source.id)
+                    RuleRepository.removeRemoteRuleSource(this@RemoteRuleSourcesActivity, source.id)
+                    loadSources()
+                    reloadVpnIfRunning(removedCount > 0)
+                    Toast.makeText(this@RemoteRuleSourcesActivity, "已删除规则源，并移除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
+                }
+                .setNeutralButton("只删规则源") { _, _ ->
+                    RuleRepository.removeRemoteRuleSource(this@RemoteRuleSourcesActivity, source.id)
+                    loadSources()
+                    Toast.makeText(this@RemoteRuleSourcesActivity, "规则源已删除，规则已保留", Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("取消", null)
+                .show()
         }
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("删除规则源")
-            .setMessage(message)
-            .setPositiveButton("删除规则源和规则") { _, _ ->
-                val removedCount = RuleRepository.removeRulesForRemoteSource(this, source.id)
-                RuleRepository.removeRemoteRuleSource(this, source.id)
-                loadSources()
-                reloadVpnIfRunning(removedCount > 0)
-                Toast.makeText(this, "已删除规则源，并移除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
-            }
-            .setNeutralButton("只删规则源") { _, _ ->
-                RuleRepository.removeRemoteRuleSource(this, source.id)
-                loadSources()
-                Toast.makeText(this, "规则源已删除，规则已保留", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("取消", null)
-            .show()
     }
 
     private fun showWhitelistConflictDialog(

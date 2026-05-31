@@ -1879,6 +1879,27 @@ object RuleRepository {
         return removedCount
     }
 
+    fun removeRules(context: Context, rules: Collection<BlockRule>): Int {
+        if (rules.isEmpty()) return 0
+        val normalizedIds = rules.asSequence()
+            .map { it.id.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        val identityKeys = rules.asSequence()
+            .map(::buildRuleIdentityKey)
+            .toSet()
+        if (normalizedIds.isEmpty() && identityKeys.isEmpty()) return 0
+        val current = getRules(context)
+        val remaining = current.filterNot { rule ->
+            normalizedIds.contains(rule.id.trim()) || identityKeys.contains(buildRuleIdentityKey(rule))
+        }
+        val removedCount = current.size - remaining.size
+        if (removedCount > 0) {
+            save(context, remaining)
+        }
+        return removedCount
+    }
+
     fun isBlocked(
         context: Context,
         domain: String,
@@ -2298,7 +2319,16 @@ object RuleRepository {
     fun getImpactNormalNetworkCandidates(context: Context): List<RemoteRuleRemovalCandidate> {
         return getRules(context)
             .asSequence()
-            .mapNotNull { rule -> explainImpactNormalNetworkCandidate(context, rule) }
+            .mapNotNull { rule ->
+                runCatching { explainImpactNormalNetworkCandidate(context, rule) }
+                    .onFailure {
+                        LogRepository.append(
+                            context,
+                            "Skip impact-normal-network candidate domain=${rule.domain} reason=${it.message ?: it.javaClass.simpleName}"
+                        )
+                    }
+                    .getOrNull()
+            }
             .distinctBy { buildRuleIdentityKey(it.rule) }
             .sortedBy { it.rule.domain }
             .toList()

@@ -33,6 +33,8 @@ class WhitelistActivity : BaseActivity() {
     private lateinit var binding: ActivityWhitelistBinding
     private var batchUpdating = false
     private var pendingReloadJob: Job? = null
+    private var loadAppsJob: Job? = null
+    private var loadAppsVersion = 0
     private var allApps: List<InstalledApp> = emptyList()
     private val mode by lazy { intent.getStringExtra(EXTRA_MODE) ?: MODE_WHITELIST }
     private val coexistMode by lazy { mode == MODE_COEXIST }
@@ -52,7 +54,7 @@ class WhitelistActivity : BaseActivity() {
             if (checked) "已加入白名单并立即生效" else "已移出白名单并立即生效"
         }
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-        loadApps()
+        updateAppSelection(app.packageName, checked)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -95,17 +97,19 @@ class WhitelistActivity : BaseActivity() {
 
     private fun loadApps() {
         binding.loadingOverlay.isVisible = true
-        lifecycleScope.launch {
+        val requestVersion = ++loadAppsVersion
+        loadAppsJob?.cancel()
+        loadAppsJob = lifecycleScope.launch {
             val apps = runCatching {
                 withContext(Dispatchers.Default) {
-                    WhitelistRepository.loadInstalledApps(this@WhitelistActivity, prioritizeCoexist = coexistMode)
+                    WhitelistRepository.loadInstalledApps(applicationContext, prioritizeCoexist = coexistMode)
                 }
             }.getOrElse {
                 binding.loadingOverlay.isVisible = false
                 Toast.makeText(this@WhitelistActivity, "应用列表加载失败", Toast.LENGTH_SHORT).show()
                 return@launch
             }
-            if (isFinishing || isDestroyed) return@launch
+            if (requestVersion != loadAppsVersion || isFinishing || isDestroyed) return@launch
             allApps = apps
             applyFilter(binding.searchInput.text?.toString().orEmpty())
             binding.loadingOverlay.isVisible = false
@@ -149,14 +153,42 @@ class WhitelistActivity : BaseActivity() {
             base += updatedPackages
             WhitelistRepository.replacePackages(this, base)
         }
+        updateVisibleSelections(updatedPackages)
         scheduleVpnReload()
-        loadApps()
         Toast.makeText(this, if (invert) "已对当前可见应用执行反选" else "已更新当前可见应用选择", Toast.LENGTH_SHORT).show()
     }
 
     override fun onDestroy() {
+        loadAppsJob?.cancel()
         pendingReloadJob?.cancel()
         super.onDestroy()
+    }
+
+    private fun updateAppSelection(packageName: String, checked: Boolean) {
+        allApps = allApps.map { app ->
+            if (app.packageName != packageName) {
+                app
+            } else if (coexistMode) {
+                app.copy(coexistSelected = checked)
+            } else {
+                app.copy(whitelisted = checked)
+            }
+        }
+        applyFilter(binding.searchInput.text?.toString().orEmpty())
+    }
+
+    private fun updateVisibleSelections(updatedPackages: Set<String>) {
+        val visiblePackageNames = adapter.currentList.mapTo(hashSetOf()) { it.packageName }
+        allApps = allApps.map { app ->
+            if (app.packageName !in visiblePackageNames) {
+                app
+            } else if (coexistMode) {
+                app.copy(coexistSelected = app.packageName in updatedPackages)
+            } else {
+                app.copy(whitelisted = app.packageName in updatedPackages)
+            }
+        }
+        applyFilter(binding.searchInput.text?.toString().orEmpty())
     }
 
     private fun scheduleVpnReload() {

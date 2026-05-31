@@ -3,6 +3,10 @@ package com.HanFeng.ui
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.view.View
 import android.widget.Button
 import android.widget.ImageView
@@ -23,6 +27,14 @@ import com.HanFeng.service.AdBlockVpnService
 class HomeFragment : Fragment(R.layout.fragment_home) {
     private val uiHandler = Handler(Looper.getMainLooper())
     private val statusRefreshRunnable = Runnable { updateAllStatus() }
+    private val vpnStatusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AdBlockVpnService.ACTION_STATUS_CHANGED) {
+                updateAllStatus()
+            }
+        }
+    }
+    private var vpnStatusReceiverRegistered = false
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         val activity = requireActivity() as MainActivity
@@ -66,13 +78,39 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
 
     override fun onResume() {
         super.onResume()
+        registerVpnStatusReceiverIfNeeded()
         updateAllStatus()
+    }
+
+    override fun onPause() {
+        unregisterVpnStatusReceiver()
+        super.onPause()
     }
 
     override fun onDestroyView() {
         view?.findViewById<Switch>(R.id.switchHttpDecrypt)?.setOnCheckedChangeListener(null)
+        unregisterVpnStatusReceiver()
         uiHandler.removeCallbacksAndMessages(null)
         super.onDestroyView()
+    }
+
+    private fun registerVpnStatusReceiverIfNeeded() {
+        val ctx = context ?: return
+        if (vpnStatusReceiverRegistered) return
+        val filter = IntentFilter(AdBlockVpnService.ACTION_STATUS_CHANGED)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            ctx.registerReceiver(vpnStatusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            ctx.registerReceiver(vpnStatusReceiver, filter)
+        }
+        vpnStatusReceiverRegistered = true
+    }
+
+    private fun unregisterVpnStatusReceiver() {
+        val ctx = context ?: return
+        if (!vpnStatusReceiverRegistered) return
+        runCatching { ctx.unregisterReceiver(vpnStatusReceiver) }
+        vpnStatusReceiverRegistered = false
     }
 
     private fun updateAllStatus() {

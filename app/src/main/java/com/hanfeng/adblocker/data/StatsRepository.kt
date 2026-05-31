@@ -250,7 +250,7 @@ object StatsRepository {
             todayBlocked = todayBlocked.get(),
             totalBlocked = totalBlocked.get(),
             dnsBlocked = dnsBlocked.get(),
-            httpBlocked = mitmBlocked.get(),
+            mitmBlocked = mitmBlocked.get(),
             requestTotal = requestTotal.get(),
             responseTotal = responseTotal.get(),
             bytesSaved = bytesSaved.get()

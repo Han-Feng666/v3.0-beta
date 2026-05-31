@@ -286,7 +286,8 @@ object CertificateAuthorityManager {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
             val relativePath = "Download/$DOWNLOAD_SUBDIR"
-            val targetUri = findExistingDownloadUri(context, fileName, relativePath)
+            val existingUris = findExistingDownloadUris(context, fileName, relativePath)
+            val targetUri = existingUris.firstOrNull()
                 ?: resolver.insert(
                     MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                     android.content.ContentValues().apply {
@@ -298,6 +299,9 @@ object CertificateAuthorityManager {
                 ?: return "下载/$DOWNLOAD_SUBDIR/$fileName"
             resolver.openOutputStream(targetUri, "wt")?.use { output ->
                 output.write(bytes)
+            }
+            existingUris.drop(1).forEach { duplicateUri ->
+                runCatching { resolver.delete(duplicateUri, null, null) }
             }
             "下载/$DOWNLOAD_SUBDIR/$fileName"
         } else {
@@ -311,12 +315,19 @@ object CertificateAuthorityManager {
         }
     }
 
-    private fun findExistingDownloadUri(context: Context, fileName: String, relativePath: String): Uri? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+    private fun findExistingDownloadUris(context: Context, fileName: String, relativePath: String): List<Uri> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptyList()
         val resolver = context.contentResolver
-        val projection = arrayOf(MediaStore.Downloads._ID)
-        val selection = "${MediaStore.Downloads.DISPLAY_NAME}=? AND ${MediaStore.Downloads.RELATIVE_PATH}=?"
-        val selectionArgs = arrayOf(fileName, relativePath)
+        val projection = arrayOf(MediaStore.Downloads._ID, MediaStore.Downloads.DATE_MODIFIED)
+        val normalizedPath = if (relativePath.endsWith('/')) relativePath else "$relativePath/"
+        val selection = buildString {
+            append("${MediaStore.Downloads.DISPLAY_NAME}=? AND (")
+            append("${MediaStore.Downloads.RELATIVE_PATH}=? OR ")
+            append("${MediaStore.Downloads.RELATIVE_PATH}=?")
+            append(')')
+        }
+        val selectionArgs = arrayOf(fileName, relativePath, normalizedPath)
+        val matches = mutableListOf<Pair<Long, Long>>()
         resolver.query(
             MediaStore.Downloads.EXTERNAL_CONTENT_URI,
             projection,
@@ -324,12 +335,15 @@ object CertificateAuthorityManager {
             selectionArgs,
             null
         )?.use { cursor ->
-            if (cursor.moveToFirst()) {
+            while (cursor.moveToNext()) {
                 val id = cursor.getLong(0)
-                return Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id.toString())
+                val modifiedAt = cursor.getLong(1)
+                matches += id to modifiedAt
             }
         }
-        return null
+        return matches
+            .sortedByDescending { it.second }
+            .map { (id, _) -> Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id.toString()) }
     }
 
     private fun buildLeafAlias(hostName: String): String = "leaf_${hostName.replace(Regex("[^a-z0-9._-]"), "_")}"

@@ -5,6 +5,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.TextView
+import androidx.recyclerview.widget.DiffUtil
+import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.HanFeng.R
 import com.HanFeng.model.RemoteRuleSourceConfig
@@ -14,13 +16,10 @@ class RemoteRuleSourceListAdapter(
     private val onSync: (RemoteRuleSourceConfig) -> Unit,
     private val onEdit: (RemoteRuleSourceConfig) -> Unit,
     private val onDelete: (RemoteRuleSourceConfig) -> Unit
-) : RecyclerView.Adapter<RemoteRuleSourceListAdapter.ViewHolder>() {
-
-    private var items: List<RemoteRuleSourceConfig> = emptyList()
+) : ListAdapter<RemoteRuleSourceConfig, RemoteRuleSourceListAdapter.ViewHolder>(DiffCallback) {
 
     fun submit(list: List<RemoteRuleSourceConfig>) {
-        items = list
-        notifyDataSetChanged()
+        submitList(list)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
@@ -29,10 +28,8 @@ class RemoteRuleSourceListAdapter(
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        holder.bind(items[position])
+        holder.bind(getItem(position))
     }
-
-    override fun getItemCount(): Int = items.size
 
     inner class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val title = itemView.findViewById<TextView>(R.id.sourceTitle)
@@ -62,6 +59,18 @@ class RemoteRuleSourceListAdapter(
             sync.setOnClickListener { onSync(item) }
             edit.setOnClickListener { onEdit(item) }
             delete.setOnClickListener { onDelete(item) }
+        }
+    }
+
+    private companion object {
+        val DiffCallback = object : DiffUtil.ItemCallback<RemoteRuleSourceConfig>() {
+            override fun areItemsTheSame(oldItem: RemoteRuleSourceConfig, newItem: RemoteRuleSourceConfig): Boolean {
+                return oldItem.id == newItem.id
+            }
+
+            override fun areContentsTheSame(oldItem: RemoteRuleSourceConfig, newItem: RemoteRuleSourceConfig): Boolean {
+                return oldItem == newItem
+            }
         }
     }
 }

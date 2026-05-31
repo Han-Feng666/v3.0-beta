@@ -92,7 +92,8 @@ class SettingsActivity : BaseActivity() {
     private fun updateShizukuActionState() {
         val shizukuEnabled = AppSettingsRepository.isShizukuEnabled(this)
         val status = if (shizukuEnabled) ShizukuRepository.getStatus(this) else null
-        val serviceHealthy = if (shizukuEnabled && status?.installed == true && status.binderAlive) {
+        val baseReady = status?.let { it.installed && it.binderAlive } == true
+        val serviceHealthy = if (shizukuEnabled && baseReady) {
             if (ShizukuAdControlRepository.isServiceAlive()) {
                 true
             } else {
@@ -102,8 +103,8 @@ class SettingsActivity : BaseActivity() {
             false
         }
         val shizukuReady = status?.let { it.installed && it.binderAlive && (it.permissionGranted || serviceHealthy) } == true
-        btnShizukuAdControl.isEnabled = shizukuEnabled && shizukuReady
-        btnShizukuAdControlBatch.isEnabled = shizukuEnabled && shizukuReady
+        btnShizukuAdControl.isEnabled = shizukuEnabled && baseReady
+        btnShizukuAdControlBatch.isEnabled = shizukuEnabled && baseReady
         btnShizukuAdControl.alpha = if (btnShizukuAdControl.isEnabled) 1f else 0.55f
         btnShizukuAdControlBatch.alpha = if (btnShizukuAdControlBatch.isEnabled) 1f else 0.55f
         textShizukuStatus.text = buildShizukuStatusText(shizukuEnabled, shizukuReady, serviceHealthy, status)
@@ -147,14 +148,24 @@ class SettingsActivity : BaseActivity() {
                 ShizukuAdControlRepository.queryPackageStatus(this, packageName).installed
             }
             .toSet()
-        val presets = basePresets.sortedWith(
+        val presets = basePresets
+            .filter { it.packageName in installedPackages }
+            .sortedWith(
             compareBy<ShizukuAdControlCatalog.Preset> { it.packageName !in installedPackages }
                 .thenBy { it.category }
                 .thenBy { it.title }
         )
+        if (presets.isEmpty()) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("暂无可治理项目")
+                .setMessage("当前设备上还没有识别到已安装的系统推广项。请先确认 Shizuku 服务已连接，再重试。")
+                .setPositiveButton("我知道了", null)
+                .show()
+            return
+        }
         MaterialAlertDialogBuilder(this)
             .setTitle("选择治理项")
-            .setMessage("已安装 ${installedPackages.size} 项，未安装 ${presets.size - installedPackages.size} 项。已安装项会优先排在前面显示。")
+            .setMessage("已识别到 ${presets.size} 个已安装治理项。")
             .setItems(buildPresetLabels(presets, installedPackages).toTypedArray()) { _, which ->
                 showPresetActionDialog(presets[which])
             }
@@ -249,28 +260,37 @@ class SettingsActivity : BaseActivity() {
                 !disabledStatus.suspended &&
                 ShizukuAdControlRepository.suspendPackage(this, packageName) &&
                 ShizukuAdControlRepository.queryPackageStatus(this, packageName).suspended
+            val refreshedStatus = ShizukuAdControlRepository.queryPackageStatus(this, packageName)
             val succeeded = when (mode) {
                 BatchAdControlMode.SMART_GOVERN,
                 BatchAdControlMode.BLOCK_NOTIFICATIONS,
                 BatchAdControlMode.ALLOW_NOTIFICATIONS -> requested
                 BatchAdControlMode.DISABLE -> {
-                    requested && isDisabledState(status.enabledState)
+                    requested && isDisabledState(refreshedStatus.enabledState)
                 }
                 BatchAdControlMode.ENABLE -> {
                     requested && (
-                        status.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
-                        status.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                        refreshedStatus.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
+                        refreshedStatus.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
                     )
                 }
-                BatchAdControlMode.SUSPEND -> requested && status.suspended
-                BatchAdControlMode.UNSUSPEND -> requested && !status.suspended
+                BatchAdControlMode.SUSPEND -> requested && refreshedStatus.suspended
+                BatchAdControlMode.UNSUSPEND -> requested && !refreshedStatus.suspended
             }
             if (succeeded) {
                 operated += displayName
             } else if (suspendFallbackSucceeded) {
                 degradedToSuspend += displayName
             } else {
-                failed += displayName
+                val statusSuffix = buildString {
+                    append("状态=")
+                    append(refreshedStatus.enabledLabel)
+                    append('/')
+                    append(if (refreshedStatus.suspended) "suspended" else "active")
+                    append('/')
+                    append(if (refreshedStatus.alive) "service-ok" else "service-missing")
+                }
+                failed += "$displayName（$statusSuffix）"
             }
         }
         val actionLabel = when (mode) {
