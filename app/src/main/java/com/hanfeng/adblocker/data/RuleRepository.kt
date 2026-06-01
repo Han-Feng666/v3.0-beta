@@ -40,6 +40,41 @@ object RuleRepository {
             url = "https://raw.githubusercontent.com/Han-Feng666/-/d11cb99275785735906c58e3d2c6ebede1819097/%E8%A7%84%E5%88%99.txt",
             authorId = "Han-Feng666",
             enabled = true
+        ),
+        RemoteRuleSourceConfig(
+            id = "easylist",
+            name = "EasyList",
+            url = "https://easylist.to/easylist/easylist.txt",
+            authorId = "easylist",
+            enabled = true
+        ),
+        RemoteRuleSourceConfig(
+            id = "easyprivacy",
+            name = "EasyPrivacy",
+            url = "https://easylist.to/easylist/easyprivacy.txt",
+            authorId = "easylist",
+            enabled = true
+        ),
+        RemoteRuleSourceConfig(
+            id = "oisd-big",
+            name = "oisd big",
+            url = "https://big.oisd.nl/",
+            authorId = "oisd",
+            enabled = true
+        ),
+        RemoteRuleSourceConfig(
+            id = "easylist-china",
+            name = "EasyList China",
+            url = "https://easylist-downloads.adblockplus.org/easylistchina.txt",
+            authorId = "easylist",
+            enabled = true
+        ),
+        RemoteRuleSourceConfig(
+            id = "stevenblack-hosts",
+            name = "StevenBlack hosts",
+            url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+            authorId = "StevenBlack",
+            enabled = false
         )
     )
     
@@ -1715,7 +1750,7 @@ object RuleRepository {
     }
 
     fun isBuiltInRemoteRuleSource(sourceId: String): Boolean {
-        return sourceId.trim() == BUILT_IN_RULE_SOURCE_ID
+        return defaultRemoteRuleSources.any { it.id == sourceId.trim() }
     }
 
     fun getRulesForRemoteSource(context: Context, sourceId: String): List<BlockRule> {

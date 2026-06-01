@@ -153,6 +153,7 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var mitmCertificateInstalled = false
     @Volatile private var shizukuConnectionOwnerReady = false
     @Volatile private var shizukuAdControlReady = false
+    @Volatile private var shizukuStrictAppAdBlockEnabled = false
     @Volatile private var localProxyCoexistConfig = LocalProxyCoexistConfig()
     @Volatile private var localProxyTargetPackages: Set<String> = emptySet()
     @Volatile private var localProxyReachable: Boolean? = null
@@ -1019,10 +1020,20 @@ class AdBlockVpnService : VpnService() {
             if (isBlocked) {
                 output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
                 StatsRepository.recordBlockedDns(this, vendor, appName, 512)
+                logDecisionOnce(
+                    key = "dns-block:${question.domain}:${question.qType}:${appName}",
+                    message = "Blocked DNS domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
+                    minIntervalMillis = 20_000L
+                )
                 return
             }
 
             StatsRepository.recordRequest(this, vendor, appName)
+            logDecisionOnce(
+                key = "dns-pass:${question.domain}:${question.qType}:${appName}",
+                message = "Passed DNS domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
+                minIntervalMillis = 30_000L
+            )
             RuleRepository.reportUnknownVendorIfNeeded(
                 context = this,
                 vendor = vendor,
@@ -1366,13 +1377,18 @@ class AdBlockVpnService : VpnService() {
         val matchedRule = domainContext.matchedRule
         val vendor = domainContext.vendor
         if (!shouldTreatAsTrackedAdTarget(target.domain, appName, vendor, matchedRule, includeProtectedNovelUrl = false, includeForceNovelQuic = false)) {
+            logDecisionOnce(
+                key = "http-pass:${target.domain}:$ip:${info.sourcePort}",
+                message = "Passed HTTP connection domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source}",
+                minIntervalMillis = 30_000L
+            )
             return false
         }
         // 需要拦截
         StatsRepository.recordBlockedMitm(this, vendor, appName, 50 * 1024)
         LogRepository.append(
             this,
-            "Blocked HTTP connection domain=${target.domain} ip=$ip app=$appName vendor=$vendor source=${target.source} via=http-decrypt-entry"
+            "Blocked HTTP connection domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source} via=http-decrypt-entry"
         )
         return true
     }
@@ -1528,13 +1544,18 @@ class AdBlockVpnService : VpnService() {
                 StatsRepository.recordBlockedMitm(this, vendor, appName, 64 * 1024)
                 LogRepository.append(
                     this,
-                    "Blocked HTTPS connection at SYN domain=${target.domain} ip=$ip app=$appName vendor=$vendor source=${target.source} via=https-decrypt-entry"
+                    "Blocked HTTPS connection at SYN domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source} via=https-decrypt-entry"
                 )
                 synchronized(httpsProxyFlowCache) {
                     httpsProxyFlowCache.remove(flowKey)
                 }
                 return
             }
+            logDecisionOnce(
+                key = "https-pass-syn:${target.domain}:$ip:${info.sourcePort}",
+                message = "Passed HTTPS SYN domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source}",
+                minIntervalMillis = 30_000L
+            )
         }
         
         val cooldownReason = HttpsMitmRepository.getActiveBypassReason(this, target.domain)
@@ -3322,7 +3343,8 @@ class AdBlockVpnService : VpnService() {
         return DomainDecisionContext(
             appName = appName,
             matchedRule = matchedRule,
-            vendor = vendor
+            vendor = vendor,
+            reason = if (matchedRule != null) "matched-rule:${matchedRule.id.take(8)}" else explainDomainDecisionReason(domain, appName, vendor)
         )
     }
 
@@ -3345,7 +3367,32 @@ class AdBlockVpnService : VpnService() {
         includeProtectedNovelUrl: Boolean = true,
         includeForceNovelQuic: Boolean = true
     ): Boolean {
-        return matchedRule != null
+        if (matchedRule != null) return true
+        if (!shizukuStrictAppAdBlockEnabled) return false
+
+        val normalizedDomain = domain.trim().lowercase()
+        if (normalizedDomain.isBlank()) return false
+        if (RuleRepository.isWhitelistedDomain(normalizedDomain)) return false
+        if (RuleRepository.isSensitiveAuthDomain(normalizedDomain)) return false
+        if (RuleRepository.shouldProtectMediaTraffic(normalizedDomain)) return false
+        if (RuleRepository.shouldProtectBusinessTraffic(normalizedDomain)) return false
+
+        val novelSignals = evaluateNovelBlockingSignals(
+            domain = normalizedDomain,
+            appName = appName,
+            vendor = vendor,
+            includeProtectedNovelUrl = includeProtectedNovelUrl,
+            includeForceNovelQuic = includeForceNovelQuic
+        )
+        if (novelSignals.aggressiveNovelBlock || novelSignals.forcedNovelQuicBlock || novelSignals.protectedNovelUrlBlock) {
+            return true
+        }
+
+        val aggressiveApp = RuleRepository.isAggressiveAdAppHint(appName)
+        if (!aggressiveApp) return false
+        if (RuleRepository.shouldForcePushRecommendInspection(normalizedDomain, appName, vendor)) return true
+        if (RuleRepository.looksLikeAdSdkInfraDomain(normalizedDomain, vendor)) return true
+        return false
     }
 
     private fun evaluateNovelBlockingSignals(
@@ -3797,8 +3844,26 @@ class AdBlockVpnService : VpnService() {
         return DomainDecisionContext(
             appName = appName,
             matchedRule = matchedRule,
-            vendor = vendor
+            vendor = vendor,
+            reason = if (matchedRule != null) "matched-rule:${matchedRule.id.take(8)}" else explainDomainDecisionReason(domain, appName, vendor)
         )
+    }
+
+    private fun explainDomainDecisionReason(domain: String, appName: String, vendor: String): String {
+        val normalizedDomain = domain.trim().lowercase()
+        if (normalizedDomain.isBlank()) return "empty-domain"
+        if (RuleRepository.isWhitelistedDomain(normalizedDomain)) return "whitelist-domain"
+        if (RuleRepository.isSensitiveAuthDomain(normalizedDomain)) return "sensitive-auth-domain"
+        if (RuleRepository.shouldProtectMediaTraffic(normalizedDomain)) return "protected-media-domain"
+        if (RuleRepository.shouldProtectBusinessTraffic(normalizedDomain)) return "protected-business-domain"
+        if (!shizukuStrictAppAdBlockEnabled) return "pass"
+        if (RuleRepository.shouldAggressivelyBlockForNovelApp(this, normalizedDomain, appName, vendor)) return "shizuku-novel-aggressive"
+        if (RuleRepository.shouldForceNovelQuicBlock(normalizedDomain, appName, vendor)) return "shizuku-novel-quic"
+        if (RuleRepository.shouldForcePushRecommendInspection(normalizedDomain, appName, vendor)) return "shizuku-push-recommend"
+        if (RuleRepository.looksLikeAdSdkInfraDomain(normalizedDomain, vendor) && RuleRepository.isAggressiveAdAppHint(appName)) {
+            return "shizuku-sdk-infra"
+        }
+        return "pass"
     }
 
     private fun isProtectedTrafficDomain(domain: String): Boolean {
@@ -3809,7 +3874,8 @@ class AdBlockVpnService : VpnService() {
     private data class DomainDecisionContext(
         val appName: String,
         val matchedRule: BlockRule?,
-        val vendor: String
+        val vendor: String,
+        val reason: String
     )
 
     private data class NovelBlockingSignals(
@@ -4217,6 +4283,8 @@ class AdBlockVpnService : VpnService() {
             ShizukuRepository.canAttemptUserService(this)
         shizukuAdControlReady = ShizukuAdControlRepository.isReady(this) &&
             ShizukuRepository.canUseEnhancedMode(this)
+        shizukuStrictAppAdBlockEnabled = shizukuAdControlReady &&
+            AppSettingsRepository.isShizukuStrictAppAdBlockEnabled(this)
         localProxyCoexistConfig = WhitelistRepository.getLocalProxyCoexistConfig(this)
         localProxyTargetPackages = WhitelistRepository.getLocalProxyTargetPackages(this)
         lightweightPassThroughMode = RuleRepository.getRuleCount(this) == 0 &&

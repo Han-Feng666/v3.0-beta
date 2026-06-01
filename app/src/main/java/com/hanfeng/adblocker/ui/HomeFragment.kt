@@ -55,10 +55,8 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         }
         toggle.setOnClickListener {
             activity.requestToggleVpn()
-            updateAllStatus()
             uiHandler.removeCallbacks(statusRefreshRunnable)
-            uiHandler.postDelayed(statusRefreshRunnable, 300)
-            uiHandler.postDelayed(statusRefreshRunnable, 1200)
+            uiHandler.postDelayed(statusRefreshRunnable, 450)
         }
         view.findViewById<Button>(R.id.btnGuide).setOnClickListener { activity.showGuideDialog() }
         view.findViewById<Button>(R.id.btnWhitelist).setOnClickListener { activity.openWhitelist() }
@@ -200,14 +198,15 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
             httpDecryptSwitch.isChecked = FeatureSettingsRepository.isHttpDecryptEnabled(ctx)
             httpDecryptSwitch.setOnCheckedChangeListener { _, isChecked ->
                 val activity = activity as? MainActivity ?: return@setOnCheckedChangeListener
+                val previousChecked = !isChecked
                 FeatureSettingsRepository.setHttpDecryptEnabled(ctx, isChecked)
                 activity.onHttpDecryptSettingChanged(isChecked) { success ->
                     val currentView = view ?: return@onHttpDecryptSettingChanged
                     if (!isAdded) return@onHttpDecryptSettingChanged
                     if (!success) {
-                        FeatureSettingsRepository.setHttpDecryptEnabled(ctx, false)
+                        FeatureSettingsRepository.setHttpDecryptEnabled(ctx, previousChecked)
                         httpDecryptSwitch.setOnCheckedChangeListener(null)
-                        httpDecryptSwitch.isChecked = false
+                        httpDecryptSwitch.isChecked = previousChecked
                         attachHttpDecryptSwitchListener()
                         currentView.findViewById<TextView>(R.id.textHomeStatus)?.let(::updateStatusText)
                         return@onHttpDecryptSettingChanged

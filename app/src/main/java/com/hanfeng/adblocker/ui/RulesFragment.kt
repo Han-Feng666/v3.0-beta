@@ -931,6 +931,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private fun resolveSelectedRules(): List<BlockRule> {
         val ctx = context ?: return emptyList()
         if (selectedIds.isEmpty()) return emptyList()
+        if (selectedRulesById.isNotEmpty()) {
+            val snapshot = selectedIds.mapNotNull(selectedRulesById::get)
+            if (snapshot.size == selectedIds.size) {
+                return snapshot
+            }
+        }
         val currentRules = getGroupedRules(ctx).values.flatten().map { it.rule }
         return currentRules.filter { it.id in selectedIds }
     }
@@ -1301,20 +1307,30 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val ctx = context ?: return emptyList()
         val grouped = getGroupedRules(ctx)
         val query = searchQuery.lowercase()
-        return if (query.isEmpty()) {
-            grouped.values.asSequence().flatten().map { it.rule }.take(500).toList()
-        } else {
-            grouped.values.asSequence()
-                .flatten()
-                .filter {
-                    it.domainLower.contains(query) ||
-                        it.vendorLower.contains(query) ||
-                        it.keywordLower?.contains(query) == true ||
-                        it.regexLower?.contains(query) == true
+        val expandedSnapshot = expandedGroups.toSet()
+        val autoExpand = query.isNotEmpty()
+        return buildList {
+            grouped.forEach { (vendor, groupRules) ->
+                val vendorLower = groupRules.firstOrNull()?.vendorLower ?: vendor.lowercase()
+                val matchesVendor = query.isEmpty() || vendorLower.contains(query)
+                val filteredRules = if (query.isEmpty()) {
+                    groupRules
+                } else {
+                    groupRules.filter {
+                        it.domainLower.contains(query) ||
+                            it.vendorLower.contains(query) ||
+                            it.keywordLower?.contains(query) == true ||
+                            it.regexLower?.contains(query) == true
+                    }
                 }
-                .map { it.rule }
-                .take(500)
-                .toList()
+                if (filteredRules.isEmpty() && !matchesVendor) return@forEach
+                val visibleRules = when {
+                    autoExpand -> filteredRules
+                    expandedSnapshot.contains(vendor) -> filteredRules
+                    else -> emptyList()
+                }
+                visibleRules.take(500).forEach { add(it.rule) }
+            }
         }
     }
 

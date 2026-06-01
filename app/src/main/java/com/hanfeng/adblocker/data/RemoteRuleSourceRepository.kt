@@ -114,7 +114,7 @@ object RemoteRuleSourceRepository {
             readTimeout = READ_TIMEOUT_MILLIS
             requestMethod = "GET"
             instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "HanFeng/5.8.4-beta")
+            setRequestProperty("User-Agent", "HanFeng/5.9.7-beta")
         }
         val responseCode = connection.responseCode
         if (responseCode !in 200..299) {

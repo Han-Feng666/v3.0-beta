@@ -12,8 +12,8 @@ import rikka.shizuku.Shizuku
 
 object ShizukuAdControlRepository {
     private const val BIND_RETRY_INTERVAL_MILLIS = 1500L
-    private const val BIND_WAIT_TIMEOUT_MILLIS = 120L
-    private const val BIND_WAIT_STEP_MILLIS = 20L
+    private const val BIND_WAIT_TIMEOUT_MILLIS = 1500L
+    private const val BIND_WAIT_STEP_MILLIS = 40L
     private const val BIND_STALE_TIMEOUT_MILLIS = 3000L
     @Volatile private var service: IAdControlService? = null
     @Volatile private var binding = false
@@ -131,6 +131,22 @@ object ShizukuAdControlRepository {
         if (normalized.isBlank()) return false
         val result = getService(context)?.enablePackage(normalized) == true
         LogRepository.append(context, "Shizuku enable package package=$normalized success=$result")
+        return result
+    }
+
+    fun disableComponent(context: Context, componentName: String): Boolean {
+        val normalized = componentName.trim()
+        if (normalized.isBlank()) return false
+        val result = getService(context)?.disableComponent(normalized) == true
+        LogRepository.append(context, "Shizuku disable component component=$normalized success=$result")
+        return result
+    }
+
+    fun enableComponent(context: Context, componentName: String): Boolean {
+        val normalized = componentName.trim()
+        if (normalized.isBlank()) return false
+        val result = getService(context)?.enableComponent(normalized) == true
+        LogRepository.append(context, "Shizuku enable component component=$normalized success=$result")
         return result
     }
 

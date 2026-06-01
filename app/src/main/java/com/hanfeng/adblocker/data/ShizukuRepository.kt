@@ -35,10 +35,8 @@ object ShizukuRepository {
     fun getStatus(context: Context): Status {
         val baseStatus = readBaseStatus(context)
         val serviceUid = if (baseStatus.binderAlive) runCatching { Shizuku.getUid() }.getOrNull() else null
-        val userServiceReachable = baseStatus.installed && baseStatus.binderAlive && runCatching {
-            ShizukuAdControlRepository.ensureBound(context)
-            ShizukuAdControlRepository.checkServiceHealth(context)
-        }.getOrDefault(false)
+        val userServiceReachable = baseStatus.installed && baseStatus.binderAlive &&
+            ShizukuAdControlRepository.isServiceAlive()
         val runningMode = when {
             !baseStatus.installed -> "未安装"
             !baseStatus.binderAlive -> "未启动"
@@ -57,10 +55,7 @@ object ShizukuRepository {
         val status = readBaseStatus(context)
         if (!status.installed || !status.binderAlive) return false
         if (status.permissionGranted) return true
-        return runCatching {
-            ShizukuAdControlRepository.ensureBound(context)
-            ShizukuAdControlRepository.checkServiceHealth(context)
-        }.getOrDefault(false)
+        return ShizukuAdControlRepository.isServiceAlive()
     }
 
     fun canAttemptUserService(context: Context): Boolean {

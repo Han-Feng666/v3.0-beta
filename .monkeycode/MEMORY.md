@@ -93,6 +93,28 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 当前版本号使用 `5.8.4-beta`，同时同步提升 `versionCode`，保证安装覆盖和界面版本展示一致。
   - 涉及版本展示或对外标识的位置，如 `build.gradle.kts`、首页版本文案、规则源请求 `User-Agent`，需要保持一致。
 
+[当前版本展示要求 5.9.7]
+- Date: 2026-06-01
+- Context: 用户要求把当前版本改成 5.9.7
+- Instructions:
+  - 当前版本号使用 `5.9.7`，同时同步提升 `versionCode`，保证安装覆盖和界面版本展示一致。
+  - 涉及版本展示或对外标识的位置，如 `build.gradle.kts`、首页版本文案、规则源请求 `User-Agent`，需要保持一致。
+
+[当前版本展示要求 5.9.7-beta]
+- Date: 2026-06-01
+- Context: 用户要求把当前版本改成 5.9.7-beta，并同步当前代码到仓库
+- Instructions:
+  - 当前版本号使用 `5.9.7-beta`，同时同步提升 `versionCode`，保证安装覆盖和界面版本展示一致。
+  - 涉及版本展示或对外标识的位置，如 `build.gradle.kts`、首页版本文案、规则源请求 `User-Agent`，需要保持一致。
+
+[本地构建依赖 Android SDK]
+- Date: 2026-06-01
+- Context: Agent 在执行“检查并修复优化 app 里的所有功能”时发现
+- Category: 环境配置
+- Instructions:
+  - 本项目执行 `./gradlew :app:assembleDebug` 依赖本机 Android SDK，可通过 `ANDROID_HOME` 或项目根目录 `local.properties` 中的 `sdk.dir` 指定。
+  - 当前工作区若缺少 Android SDK 路径，Gradle 会直接在依赖解析前失败，后续代码修复需要先补齐 SDK 环境再做完整编译验证。
+
 [小说专项观测链路]
 - Date: 2026-04-24
 - Context: Agent 在执行“继续补小说 App 域名库并做专项观测”时发现
@@ -160,6 +182,30 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - 后续增强优先把现有已接入的 `VPN`、`HTTP decrypt`、`QUERY_ALL_PACKAGES`、`Shizuku` 等能力真正用满，用于提升连接归属识别、应用级规则命中、小说强拦判断和解密路由准确率。
   - 权限利用优先聚焦在提升拦截准确率和覆盖率，保持现有界面与授权边界不变。
+
+[Shizuku 应用级强拦联动]
+- Date: 2026-06-01
+- Context: Agent 在执行“把 Shizuku 的权限用满并对全流量更精准拦广告”时发现
+- Category: 排错调试
+- Instructions:
+  - `AdBlockVpnService` 适合把 `Shizuku` 连接归属结果直接用于热路径决策，只对已识别高风险应用启用更积极的广告基础设施域名拦截。
+  - 应用级强拦需要继续保留白名单、鉴权域名、媒体主业务和业务核心域保护，避免把更强的归属识别扩展成误杀正常流量。
+
+[默认规则源与原因日志链路]
+- Date: 2026-06-01
+- Context: Agent 在执行“继续补组件级治理、默认规则源和命中原因展示”时发现
+- Category: 工作流协作
+- Instructions:
+  - 远程规则源默认集合适合内置 `寒枫规则`、`EasyList`、`EasyPrivacy`、`oisd big`、`EasyList China`，其中体量更大的补充源可默认关闭，由用户按需开启。
+  - VPN 热路径里的 DNS、HTTP、HTTPS 决策适合统一生成 `reason` 字段，再由日志面板和后续界面直接复用，避免各处各写一套原因文案。
+
+[组件治理候选发现方式]
+- Date: 2026-06-01
+- Context: Agent 在执行“继续补组件级治理体验”时发现
+- Category: 排错调试
+- Instructions:
+  - `SettingsActivity` 适合先读取目标包的 `Activity`、`Receiver`、`Service` 清单，再按 `splash`、`push`、`recommend`、`ad` 等关键词给组件打分，优先展示高相关候选组件。
+  - 组件治理对外操作格式适合统一使用 `package/class` 形式，方便直接复用 `pm disable-user` 和 `pm enable` 链路。
 
 [规则源疑似正常规则需先展示再删除]
 - Date: 2026-05-29

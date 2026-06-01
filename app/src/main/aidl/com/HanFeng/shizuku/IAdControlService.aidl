@@ -6,6 +6,8 @@ interface IAdControlService {
     boolean allowPackageNotifications(String packageName);
     boolean disablePackage(String packageName);
     boolean enablePackage(String packageName);
+    boolean disableComponent(String componentName);
+    boolean enableComponent(String componentName);
     boolean suspendPackage(String packageName);
     boolean unsuspendPackage(String packageName);
     boolean uninstallPackageForUser(String packageName, int userId);

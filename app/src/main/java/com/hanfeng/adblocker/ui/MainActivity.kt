@@ -68,6 +68,7 @@ class MainActivity : BaseActivity() {
             pendingVpnStartAfterPermission = false
             FeatureSettingsRepository.setAdBlockEnabled(this, false)
             AdBlockVpnService.isRunning = false
+            refreshHomeStatus()
             Toast.makeText(this, "未授予 VPN 权限，无法开启拦截", Toast.LENGTH_SHORT).show()
         }
     }
@@ -88,6 +89,7 @@ class MainActivity : BaseActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setupMainContent(savedInstanceState)
+        requestNotificationPermissionIfNeeded()
         scheduleRemoteRuleSync()
         scheduleSuspiciousDomainPrompt()
     }
@@ -114,7 +116,7 @@ class MainActivity : BaseActivity() {
         if (!isTabletLandscape) {
             pager?.adapter = MainPagerAdapter(this)
             pager?.offscreenPageLimit = 1
-            pager?.currentItem = 0
+            pager?.currentItem = 1
             return
         }
         if (savedInstanceState != null) return
@@ -151,6 +153,7 @@ class MainActivity : BaseActivity() {
                 LogRepository.append(this, "VPN prepare failed: ${it.message ?: it.javaClass.simpleName}")
                 FeatureSettingsRepository.setAdBlockEnabled(this, false)
                 AdBlockVpnService.isRunning = false
+                refreshHomeStatus()
                 Toast.makeText(this, "无法申请 VPN 权限", Toast.LENGTH_SHORT).show()
             }
     }
@@ -439,9 +442,17 @@ class MainActivity : BaseActivity() {
     }
 
     private fun refreshHomeStatus() {
-        supportFragmentManager.fragments.forEach { fragment ->
+        refreshHomeStatus(supportFragmentManager.fragments)
+    }
+
+    private fun refreshHomeStatus(fragments: List<androidx.fragment.app.Fragment>) {
+        fragments.forEach { fragment ->
             if (fragment is HomeFragment && fragment.isAdded) {
                 fragment.refreshStatusFromHost()
+            }
+            val childFragments = fragment.childFragmentManager.fragments
+            if (childFragments.isNotEmpty()) {
+                refreshHomeStatus(childFragments)
             }
         }
     }

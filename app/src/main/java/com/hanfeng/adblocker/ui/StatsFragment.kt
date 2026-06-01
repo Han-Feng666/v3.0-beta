@@ -89,6 +89,7 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
         addStatCard("DNS 总拦截", dashboard.dnsBlocked.toString())
         addStatCard("MITM 总拦截", dashboard.mitmBlocked.toString())
         addStatCard("请求总数", dashboard.requestTotal.toString())
+        addStatCard("响应总数", dashboard.responseTotal.toString())
         addStatCard("累计节省流量", formatBytes(dashboard.bytesSaved))
 
         binding.leftColumn.removeAllViews()

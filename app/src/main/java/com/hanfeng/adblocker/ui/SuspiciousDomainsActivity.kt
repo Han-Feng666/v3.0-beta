@@ -185,6 +185,7 @@ class SuspiciousDomainsActivity : BaseActivity() {
     }
 
     private fun updateSummary(visible: List<RuleRepository.SuspiciousDomainSample>) {
+        val actionableSelectedCount = selectedDomains.count { it !in addedDomains }
         val selectableVisibleCount = visible.count { it.domain !in addedDomains }
         val recommendedVisibleCount = visible.count {
             it.domain !in addedDomains && RuleRepository.isHighConfidenceSuspiciousDomain(
@@ -206,13 +207,13 @@ class SuspiciousDomainsActivity : BaseActivity() {
             )
         }
         val novelVisibleCount = visible.count { it.novelHits > 0 || RuleRepository.isNovelVendor(it.lastVendor) }
-        binding.selectionSummary.text = "已选择 ${selectedDomains.size} 项，可选 ${selectableVisibleCount} 项，当前可见 ${visible.size} 项，推荐 ${recommendedVisibleCount} 项，小说专项 ${novelVisibleCount} 项"
+        binding.selectionSummary.text = "已选择 ${actionableSelectedCount} 项，可选 ${selectableVisibleCount} 项，当前可见 ${visible.size} 项，推荐 ${recommendedVisibleCount} 项，小说专项 ${novelVisibleCount} 项"
         binding.btnSelectVisible.isEnabled = selectableVisibleCount > 0
         binding.btnSelectVisible.alpha = if (selectableVisibleCount > 0) 1f else 0.6f
-        binding.btnClearSelection.isEnabled = selectedDomains.isNotEmpty()
-        binding.btnClearSelection.alpha = if (selectedDomains.isNotEmpty()) 1f else 0.6f
-        binding.btnAddSelected.isEnabled = selectedDomains.isNotEmpty()
-        binding.btnAddSelected.alpha = if (selectedDomains.isNotEmpty()) 1f else 0.6f
+        binding.btnClearSelection.isEnabled = actionableSelectedCount > 0
+        binding.btnClearSelection.alpha = if (actionableSelectedCount > 0) 1f else 0.6f
+        binding.btnAddSelected.isEnabled = actionableSelectedCount > 0
+        binding.btnAddSelected.alpha = if (actionableSelectedCount > 0) 1f else 0.6f
         binding.btnAddRecommended.isEnabled = recommendedVisibleCount > 0
         binding.btnAddRecommended.alpha = if (recommendedVisibleCount > 0) 1f else 0.6f
     }
@@ -287,9 +288,20 @@ class SuspiciousDomainsActivity : BaseActivity() {
                 binding.domainText.text = item.domain
                 binding.countText.text = "评分 $score，命中 ${item.count} 次，小说专项 ${item.novelHits} 次，最近 ${dateFormat.format(Date(item.lastSeenAt))}"
                 val added = item.domain in addedDomains
-                binding.statusText.text = "最近应用：${item.lastAppName.ifBlank { "未知" }} | 厂商：${item.lastVendor} | ${if (added) "已添加" else "未添加"}"
+                val reasonHints = buildReasonHints(item)
+                binding.statusText.text = buildString {
+                    append("最近应用：${item.lastAppName.ifBlank { "未知" }} | 厂商：${item.lastVendor} | ${if (added) "已添加" else "未添加"}")
+                    if (reasonHints.isNotBlank()) {
+                        append("\n线索：")
+                        append(reasonHints)
+                    }
+                }
                 bindSelectionState(item)
-                binding.root.setOnClickListener { binding.selectBox.toggle() }
+                binding.root.setOnClickListener {
+                    if (!added) {
+                        binding.selectBox.toggle()
+                    }
+                }
                 binding.actionButton.text = if (added) "已添加" else "单条添加"
                 binding.actionButton.isEnabled = !added
                 binding.actionButton.setOnClickListener { onAddSingle(item) }
@@ -302,6 +314,17 @@ class SuspiciousDomainsActivity : BaseActivity() {
                 binding.selectBox.setOnCheckedChangeListener { _, checked -> onToggle(item, checked) }
                 binding.selectBox.isEnabled = !added
                 binding.root.isEnabled = true
+            }
+
+            private fun buildReasonHints(item: RuleRepository.SuspiciousDomainSample): String {
+                val hints = mutableListOf<String>()
+                item.lastPathHint.takeIf { it.isNotBlank() }?.let { hints += "path=${it.take(48)}" }
+                item.refererDomain.takeIf { it.isNotBlank() }?.let { hints += "referer=$it" }
+                if (item.tlsSniHits > 0) hints += "SNI=${item.tlsSniHits}"
+                if (item.httpHits > 0) hints += "HTTP=${item.httpHits}"
+                if (item.redirectHits > 0) hints += "Redirect=${item.redirectHits}"
+                if (item.aliasHits > 0) hints += "CNAME=${item.aliasHits}"
+                return hints.joinToString(" | ")
             }
         }
     }

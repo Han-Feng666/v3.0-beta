@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.result.contract.ActivityResultContracts
 
+// Legacy forwarding entry kept for old links and historical activity names.
 class LegacySuspiciousDomainsActivity : BaseActivity() {
     private val forwardLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         setResult(result.resultCode, result.data)

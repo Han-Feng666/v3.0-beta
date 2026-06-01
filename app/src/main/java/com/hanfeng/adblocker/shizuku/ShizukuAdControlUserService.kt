@@ -56,6 +56,28 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
         )
     }
 
+    override fun disableComponent(componentName: String): Boolean {
+        val normalized = componentName.trim()
+        if (normalized.isBlank()) return false
+        return runShellCommandWithFallback(
+            listOf(
+                listOf("pm", "disable-user", "--user", "0", normalized),
+                listOf("cmd", "package", "disable-user", "--user", "0", normalized)
+            )
+        )
+    }
+
+    override fun enableComponent(componentName: String): Boolean {
+        val normalized = componentName.trim()
+        if (normalized.isBlank()) return false
+        return runShellCommandWithFallback(
+            listOf(
+                listOf("pm", "enable", normalized),
+                listOf("cmd", "package", "enable", normalized)
+            )
+        )
+    }
+
     override fun suspendPackage(packageName: String): Boolean {
         return runShellCommandWithFallback(
             listOf(
