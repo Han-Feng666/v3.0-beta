@@ -15,6 +15,7 @@ object HttpsDecryptRouteRepository {
         val type = object : TypeToken<List<RouteEntry>>() {}.type
         val json = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_ROUTES, "[]") ?: "[]"
         return gson.fromJson<List<RouteEntry>>(json, type)
+            ?.mapNotNull(::sanitizeRouteEntry)
             ?.filter { it.ip.isNotBlank() && it.prefixLength in 0..128 }
             ?.sortedBy { it.ip }
             ?: emptyList()
@@ -49,7 +50,9 @@ object HttpsDecryptRouteRepository {
         val type = object : TypeToken<List<RouteEntry>>() {}.type
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val json = prefs.getString(KEY_ROUTES, "[]") ?: "[]"
-        val current = gson.fromJson<List<RouteEntry>>(json, type) ?: emptyList()
+        val current = gson.fromJson<List<RouteEntry>>(json, type)
+            ?.mapNotNull(::sanitizeRouteEntry)
+            ?: emptyList()
         val now = System.currentTimeMillis()
         val filtered = current.filter { it.expiresAt > now && it.ip.isNotBlank() && it.prefixLength in 0..128 }
         if (filtered.size == current.size) return false
@@ -66,6 +69,17 @@ object HttpsDecryptRouteRepository {
             .edit()
             .putString(KEY_ROUTES, gson.toJson(routes))
             .apply()
+    }
+
+    private fun sanitizeRouteEntry(route: RouteEntry?): RouteEntry? {
+        route ?: return null
+        val ip = route.ip.trim()
+        if (ip.isEmpty()) return null
+        return route.copy(
+            ip = ip,
+            domain = route.domain.trim(),
+            vendor = route.vendor.trim()
+        )
     }
 
     private fun routeKey(ip: String, prefixLength: Int): String = "$ip/$prefixLength"

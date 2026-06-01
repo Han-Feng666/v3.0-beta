@@ -156,7 +156,9 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var localProxyCoexistConfig = LocalProxyCoexistConfig()
     @Volatile private var localProxyTargetPackages: Set<String> = emptySet()
     @Volatile private var localProxyReachable: Boolean? = null
+    @Volatile private var lightweightPassThroughMode = false
     @Volatile private var networkCallbackRegistered = false
+    @Volatile private var lastForegroundNotificationRefreshAt = 0L
     private var connectivityNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private val handledDnsHosts by lazy(LazyThreadSafetyMode.NONE) {
         setOf(localDnsV4, localDnsV6).mapNotNull { host ->
@@ -568,6 +570,7 @@ class AdBlockVpnService : VpnService() {
         mitmCertificateInstalled = false
         shizukuConnectionOwnerReady = false
         shizukuAdControlReady = false
+        lightweightPassThroughMode = false
         localProxyTargetPackages = emptySet()
         localProxyReachable = null
         pendingLocalProxyProbeJob?.cancel()
@@ -598,6 +601,7 @@ class AdBlockVpnService : VpnService() {
         dnsSocketPool.forEach { (_, socket) -> socket.close() }
         dnsSocketPool.clear()
         lastUnderlyingNetworkRefreshAt = 0L
+        lastForegroundNotificationRefreshAt = 0L
     }
 
     private fun buildInterface(): ParcelFileDescriptor? {
@@ -611,6 +615,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun buildInterfaceInternal(stableMode: Boolean): ParcelFileDescriptor? {
+        val localProxyFullCapture = shouldCaptureFullTrafficForLocalProxy()
         val builder = Builder()
             .setSession(getString(R.string.app_name))
             .setMtu(1500)
@@ -630,7 +635,14 @@ class AdBlockVpnService : VpnService() {
             builder.allowFamily(OsConstants.AF_INET6)
         }
 
-        if (!stableMode) {
+        if (localProxyFullCapture) {
+            runCatching {
+                builder.addRoute("0.0.0.0", 0)
+                builder.addRoute("::", 0)
+            }.onFailure {
+                LogRepository.append(this, "Enable local proxy full-capture routes failed: ${it.message ?: it.javaClass.simpleName}")
+            }
+        } else if (!stableMode) {
             blockedIpNetworks.forEach { network ->
                 runCatching {
                     builder.addRoute(network.routeAddress, network.prefixLength)
@@ -683,7 +695,9 @@ class AdBlockVpnService : VpnService() {
             )
         }
 
-        if (stableMode) {
+        if (localProxyFullCapture) {
+            LogRepository.append(this, "VPN established with local proxy full-capture routes")
+        } else if (stableMode) {
             LogRepository.append(this, "VPN established with stable fallback mode")
         } else {
             LogRepository.append(this, "VPN established with targeted routes only")
@@ -915,6 +929,11 @@ class AdBlockVpnService : VpnService() {
 
     private fun handlePacket(packet: ByteArray, length: Int, output: FileOutputStream) {
         val info = PacketCodec.parse(packet, length) ?: return
+        val isUdp = info.protocol == OsConstants.IPPROTO_UDP
+        val isTcp = info.protocol == OsConstants.IPPROTO_TCP
+        if (lightweightPassThroughMode && !(isUdp && info.destinationPort == 53)) {
+            return
+        }
         findBlockedIpNetwork(info.destinationAddress)?.let { network ->
             return
         }
@@ -945,8 +964,6 @@ class AdBlockVpnService : VpnService() {
             )
             return
         }
-        val isUdp = info.protocol == OsConstants.IPPROTO_UDP
-        val isTcp = info.protocol == OsConstants.IPPROTO_TCP
         if (isUdp && info.destinationPort == 53) {
             if (!shouldHandleDns(info.destinationAddress)) {
                 logDecisionOnce(
@@ -957,6 +974,20 @@ class AdBlockVpnService : VpnService() {
             }
 
             val question = DnsMessageParser.parseQuestion(info.payload) ?: return
+
+            if (lightweightPassThroughMode) {
+                StatsRepository.recordRequest(this, "System", "系统")
+                readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
+                    output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
+                    return
+                }
+                val upstreamResponse = queryUpstreamDns(info.payload)?.response
+                    ?: readStaleCachedDnsResponse(question, info.payload)
+                    ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
+                cacheDnsResponse(question, upstreamResponse)
+                output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
+                return
+            }
 
             // App 启动核心域名快速放行（避免冷加载开销，只针对少数关键域名）
             if (RuleRepository.criticalStartupDomains.contains(question.domain)) {
@@ -1150,7 +1181,7 @@ class AdBlockVpnService : VpnService() {
         val vendor = domainContext.vendor
         val matchedRule = domainContext.matchedRule
         val bypassReason = HttpsMitmRepository.getActiveBypassReason(this, domain)
-        val shouldForceTcpFallback = httpDecryptEnabled && httpsTarget != null && bypassReason == null
+        val shouldForceTcpFallback = httpDecryptEnabled && httpsTarget != null && matchedRule != null && bypassReason == null
         if (matchedRule == null && !shouldForceTcpFallback) return false
 
         val reason = when {
@@ -1194,6 +1225,7 @@ class AdBlockVpnService : VpnService() {
         if (info.protocol != OsConstants.IPPROTO_TCP) return false
         val config = localProxyCoexistConfig
         if (!config.enabled) return false
+        if (localProxyReachable != true) return false
         val port = config.port ?: return false
         if (port !in 1..65535) return false
         if (localProxyTargetPackages.isEmpty()) return false
@@ -4166,8 +4198,13 @@ class AdBlockVpnService : VpnService() {
 
     private fun refreshForegroundNotification() {
         val manager = getSystemService(NotificationManager::class.java) ?: return
+        val now = System.currentTimeMillis()
+        if (foregroundShown && now - lastForegroundNotificationRefreshAt < FOREGROUND_NOTIFICATION_REFRESH_MIN_INTERVAL_MILLIS) {
+            return
+        }
         runCatching {
             manager.notify(NOTIFICATION_ID, buildNotification())
+            lastForegroundNotificationRefreshAt = now
         }.onFailure {
             LogRepository.append(this, "Refresh foreground notification failed: ${it.message ?: it.javaClass.simpleName}")
         }
@@ -4182,6 +4219,9 @@ class AdBlockVpnService : VpnService() {
             ShizukuRepository.canUseEnhancedMode(this)
         localProxyCoexistConfig = WhitelistRepository.getLocalProxyCoexistConfig(this)
         localProxyTargetPackages = WhitelistRepository.getLocalProxyTargetPackages(this)
+        lightweightPassThroughMode = RuleRepository.getRuleCount(this) == 0 &&
+            !httpDecryptEnabled &&
+            !localProxyCoexistConfig.enabled
     }
 
     private fun probeLocalProxyCoexistAsync() {
@@ -4255,6 +4295,10 @@ class AdBlockVpnService : VpnService() {
         }
     }
 
+    private fun shouldCaptureFullTrafficForLocalProxy(): Boolean {
+        return localProxyCoexistConfig.enabled && localProxyTargetPackages.isNotEmpty()
+    }
+
     companion object {
         const val ACTION_START = "com.HanFeng.START"
         const val ACTION_STOP = "com.HanFeng.STOP"
@@ -4276,6 +4320,7 @@ class AdBlockVpnService : VpnService() {
         private const val HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS = 1_500L
         private const val HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS = 250L
         private const val UNDERLYING_NETWORK_REFRESH_MIN_INTERVAL_MILLIS = 1_500L
+        private const val FOREGROUND_NOTIFICATION_REFRESH_MIN_INTERVAL_MILLIS = 3_000L
         private const val OWNER_UID_FAILURE_TTL_MILLIS = 60_000L
         private const val HTTPS_BRIDGE_CONNECT_TIMEOUT_MILLIS = 4_000
         private const val MAX_BUFFERED_CLIENT_SEGMENTS = 32

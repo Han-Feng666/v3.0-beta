@@ -17,6 +17,20 @@
 - 统计页中的 `MITM 总拦截` 只统计证书解密后真实命中的增强过滤结果。
 - 系统推广治理和一键治理已安装推广项依赖 Shizuku，用于处理系统推广包、负一屏推荐、浏览器推荐、主题壁纸推荐等系统级推广来源。
 
+## 兼容性与旧数据迁移说明
+
+- 当前版本会在读取本地已保存规则时，自动兼容历史版本遗留的空字段数据。
+- 兼容字段包括：`denyallow`、`appPackages`、`destinationPorts`、`sourcePorts`、`removeParams`、`removeParamRegexes`。
+- 如果旧版本导入过带 `null` 集合字段的规则，本版本会自动回退为 `emptySet()`，规则页可直接恢复正常打开和刷新。
+- HTTP 解密路由、HTTPS 解密路由和本地代理共存配置在读取时也会自动清洗空白和异常值，降低升级后因历史脏数据导致闪退的风险。
+
+## 规则导入增强说明
+
+- 当前版本增强了对混杂格式、结构化规则、规则片段拼接行和部分脏格式输入的容错处理。
+- `removeparam=` 现在支持精确参数名和正则参数名两种形式。
+- `redirect`、`redirect-rule`、`csp`、`app=`、`src-port=`、`dst-port=`、`domain=`、`denyallow=` 等修饰符会在可安全落地时保留到运行态规则。
+- 规则归一化后会自动补齐去空白、去无关注释和去策略尾缀，减少公开规则源因为格式噪声导致的漏导入。
+
 ### 1. 纯域名
 
 支持示例：
@@ -72,6 +86,7 @@ tracker.example.org
 - `ANY` 会被视为不限制记录类型
 - `badfilter` 当前用于关闭已导入的同域名规则或对应记录类型规则
 - 额外支持的高频修饰符：`app=` `src-port=` `dst-port=` `path=` `domain=` `denyallow=` `removeparam=` `csp=` `urlblock` `first-party` `1p` `third-party` `3p`
+- `removeparam=` 额外支持 `/regex/` 形式的参数名正则
 - `first-party` / `1p` 与 `third-party` / `3p` 当前主要在 URL/MITM 请求上下文匹配中生效
 
 ### 5. dnsmasq 风格域名规则

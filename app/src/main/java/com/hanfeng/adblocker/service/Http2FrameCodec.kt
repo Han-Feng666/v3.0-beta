@@ -91,6 +91,32 @@ object Http2FrameCodec {
         return headersFrame + dataFrame
     }
 
+    fun buildSyntheticResponseFrames(
+        streamId: Int,
+        status: Int = 200,
+        contentType: String,
+        body: ByteArray,
+        extraHeaders: List<Pair<String, String>> = emptyList()
+    ): ByteArray {
+        val headers = mutableListOf(
+            HpackDecoder.HeaderField(":status", status.toString()),
+            HpackDecoder.HeaderField("content-length", body.size.toString()),
+            HpackDecoder.HeaderField("content-type", contentType)
+        )
+        extraHeaders.forEach { (name, value) ->
+            headers += HpackDecoder.HeaderField(name, value)
+        }
+        val headerBlock = HpackEncoder.encodeLiteralHeadersWithoutIndexing(headers)
+        val headersFrame = buildHeadersFrame(streamId = streamId, headerBlock = headerBlock, endStream = false)
+        val dataFrame = buildFrame(
+            type = 0x0,
+            flags = 0x1,
+            streamId = streamId,
+            payload = body
+        )
+        return headersFrame + dataFrame
+    }
+
     fun buildRstStreamFrame(streamId: Int, errorCode: Int = 0x8): ByteArray {
         val payload = byteArrayOf(
             ((errorCode ushr 24) and 0xFF).toByte(),

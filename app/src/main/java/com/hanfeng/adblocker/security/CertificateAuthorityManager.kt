@@ -44,6 +44,7 @@ object CertificateAuthorityManager {
     private const val CERT_FILE_NAME = "HanFeng.p12"
     private const val CERT_PUBLIC_FILE_NAME = "HanFeng.cer"
     private const val DOWNLOAD_SUBDIR = "HanFeng"
+    private val legacyCertificateNames = setOf("HanFeng.cer")
     private val bcProvider by lazy(LazyThreadSafetyMode.NONE) { BouncyCastleProvider() }
     private val leafCertCache = ConcurrentHashMap<String, GeneratedLeafCertificate>(512, 0.75f, 16)
 
@@ -266,26 +267,42 @@ object CertificateAuthorityManager {
                 context = context,
                 fileName = "HanFeng.crt",
                 mimeType = "application/x-x509-ca-cert",
-                bytes = sourceFile.readBytes()
+                bytes = sourceFile.readBytes(),
+                cleanupFileNames = legacyCertificateNames
+            )
+        }.getOrNull()
+    }
+
+    fun exportBinaryFileToDownloads(context: Context, fileName: String, mimeType: String, bytes: ByteArray, cleanupFileNames: Set<String> = emptySet()): String? {
+        return runCatching {
+            writeToDownloadSubdir(
+                context = context,
+                fileName = fileName,
+                mimeType = mimeType,
+                bytes = bytes,
+                cleanupFileNames = cleanupFileNames
             )
         }.getOrNull()
     }
 
     fun exportTextFileToDownloads(context: Context, fileName: String, content: String): String? {
-        return runCatching {
-            writeToDownloadSubdir(
-                context = context,
-                fileName = fileName,
-                mimeType = "text/plain",
-                bytes = content.toByteArray()
-            )
-        }.getOrNull()
+        return exportBinaryFileToDownloads(
+            context = context,
+            fileName = fileName,
+            mimeType = "text/plain",
+            bytes = content.toByteArray()
+        )
     }
 
-    private fun writeToDownloadSubdir(context: Context, fileName: String, mimeType: String, bytes: ByteArray): String {
+    private fun writeToDownloadSubdir(context: Context, fileName: String, mimeType: String, bytes: ByteArray, cleanupFileNames: Set<String> = emptySet()): String {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
             val relativePath = "Download/$DOWNLOAD_SUBDIR"
+            cleanupFileNames.forEach { legacyName ->
+                findExistingDownloadUris(context, legacyName, relativePath).forEach { duplicateUri ->
+                    runCatching { resolver.delete(duplicateUri, null, null) }
+                }
+            }
             val existingUris = findExistingDownloadUris(context, fileName, relativePath)
             val targetUri = existingUris.firstOrNull()
                 ?: resolver.insert(
@@ -307,6 +324,11 @@ object CertificateAuthorityManager {
         } else {
             val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             val targetDir = File(downloadDir, DOWNLOAD_SUBDIR).apply { mkdirs() }
+            cleanupFileNames.forEach { legacyName ->
+                if (legacyName != fileName) {
+                    runCatching { File(targetDir, legacyName).delete() }
+                }
+            }
             val targetFile = File(targetDir, fileName)
             FileOutputStream(targetFile).use { output: OutputStream ->
                 output.write(bytes)

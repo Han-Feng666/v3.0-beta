@@ -45,6 +45,11 @@
             android:exported="false" />
 
         <activity
+            android:name="com.HanFeng.ui.ImpactNormalNetworkActivity"
+            android:excludeFromRecents="true"
+            android:exported="false" />
+
+        <activity
             android:name="com.HanFeng.ui.GuideActivity"
             android:excludeFromRecents="true"
             android:exported="false" />
@@ -82,6 +87,20 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="vpn-ad-block" />
         </service>
+
+        <service
+            android:name="com.HanFeng.shizuku.ShizukuAdControlUserService"
+            android:enabled="true"
+            android:exported="false"
+            android:process=":shizuku_ad_control"
+            tools:ignore="Instantiatable" />
+
+        <service
+            android:name="com.HanFeng.shizuku.ConnectionOwnerUserService"
+            android:enabled="true"
+            android:exported="false"
+            android:process=":shizuku_conn_owner"
+            tools:ignore="Instantiatable" />
 
         <receiver
             android:name="com.HanFeng.service.VpnAutoRestartReceiver"

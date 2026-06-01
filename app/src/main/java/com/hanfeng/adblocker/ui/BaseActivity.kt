@@ -3,7 +3,6 @@ package com.HanFeng.ui
 import android.os.Bundle
 import android.os.Build
 import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.ProcessLifecycleOwner
 import com.HanFeng.data.AppSettingsRepository
 
 open class BaseActivity : AppCompatActivity() {
@@ -19,16 +18,9 @@ open class BaseActivity : AppCompatActivity() {
         applyHideBackgroundPolicy(AppSettingsRepository.isHideBackgroundEnabled(this))
     }
 
-    override fun onStop() {
-        super.onStop()
-        if (!AppSettingsRepository.isHideBackgroundEnabled(this) || isChangingConfigurations || isFinishing) return
-        window.decorView.post {
-            val appStillInForeground = ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(
-                androidx.lifecycle.Lifecycle.State.STARTED
-            )
-            if (!appStillInForeground && !isFinishing && !isDestroyed) {
-                finishAndRemoveTask()
-            }
-        }
+    override fun onResume() {
+        super.onResume()
+        applyHideBackgroundPolicy(AppSettingsRepository.isHideBackgroundEnabled(this))
     }
+
 }

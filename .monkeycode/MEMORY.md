@@ -79,6 +79,20 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - 当前版本号使用 `3.0-beta`，同时同步提升 `versionCode`，保证安装覆盖和界面版本展示一致。
 
+[当前版本展示要求 5.5.6-beta]
+- Date: 2026-05-31
+- Context: 用户要求把当前版本改成 5.5.6-beta
+- Instructions:
+  - 当前版本号使用 `5.5.6-beta`，同时同步提升 `versionCode`，保证安装覆盖和界面版本展示一致。
+  - 涉及版本展示或对外标识的位置，如 `build.gradle.kts`、首页版本文案、规则源请求 `User-Agent`，需要保持一致。
+
+[当前版本展示要求 5.8.4-beta]
+- Date: 2026-06-01
+- Context: 用户要求把当前版本改成 5.8.4-beta
+- Instructions:
+  - 当前版本号使用 `5.8.4-beta`，同时同步提升 `versionCode`，保证安装覆盖和界面版本展示一致。
+  - 涉及版本展示或对外标识的位置，如 `build.gradle.kts`、首页版本文案、规则源请求 `User-Agent`，需要保持一致。
+
 [小说专项观测链路]
 - Date: 2026-04-24
 - Context: Agent 在执行“继续补小说 App 域名库并做专项观测”时发现

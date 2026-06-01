@@ -127,7 +127,7 @@
                         android:id="@+id/textVersion"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="v5.0-beta"
+                        android:text="v5.8.4-beta"
                         android:textColor="@color/hf_text_secondary"
                         android:textSize="14sp" />
 

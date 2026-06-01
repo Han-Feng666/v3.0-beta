@@ -749,26 +749,32 @@ object HttpsTlsBridgeManager {
                                     "HTTP/2 data inspection host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} vendor=${dataInspection.vendor} suspiciousScore=${dataInspection.suspiciousScore} reasons=${dataInspection.suspiciousReasons.joinToString("|").ifBlank { "none" }} preview=${dataInspection.samplePreview.ifBlank { "none" }}"
                                 )
                                 if (!streamState.blockedByAction) {
+                                    val syntheticResponse = HttpMitmFilter.buildRedirectHttp2SyntheticResponse(
+                                        streamId = event.streamId,
+                                        contentType = dataInspection.contentType,
+                                        redirectResource = dataInspection.redirectResource,
+                                        cspValue = dataInspection.cspValue
+                                    ) ?: Http2FrameCodec.buildNeutralizedResponseFrames(
+                                        streamId = event.streamId,
+                                        contentType = streamState.lastHeaderInspection?.contentType
+                                    )
                                     streamState.blockedByAction = true
                                     streamState.lastActionDecision = HttpMitmFilter.Http2ActionDecision(
-                                        action = "response-data-candidate",
+                                        action = if (dataInspection.redirectResource.isNullOrBlank()) "response-data-candidate" else "response-data-redirect",
                                         confidence = dataInspection.confidence,
                                         shouldBlockCandidate = true,
                                         shouldSyntheticRespond = true
                                     )
                                     directives += Http2StreamDirective(
                                         streamId = event.streamId,
-                                        action = "response-data-candidate",
+                                        action = if (dataInspection.redirectResource.isNullOrBlank()) "response-data-candidate" else "response-data-redirect",
                                         confidence = dataInspection.confidence,
                                         sendRst = false,
-                                        syntheticResponse = Http2FrameCodec.buildNeutralizedResponseFrames(
-                                            streamId = event.streamId,
-                                            contentType = streamState.lastHeaderInspection?.contentType
-                                        )
+                                        syntheticResponse = syntheticResponse
                                     )
                                     LogRepository.append(
                                         context,
-                                        "HTTP/2 body-triggered block host=${session.host} flow=${session.flowKey} stream=${event.streamId} trigger=body confidence=${dataInspection.confidence} vendor=${dataInspection.vendor} reasons=${dataInspection.suspiciousReasons.joinToString("|").ifBlank { "none" }}"
+                                        "HTTP/2 body-triggered block host=${session.host} flow=${session.flowKey} stream=${event.streamId} trigger=body confidence=${dataInspection.confidence} vendor=${dataInspection.vendor} redirect=${dataInspection.redirectResource ?: "none"} reasons=${dataInspection.suspiciousReasons.joinToString("|").ifBlank { "none" }}"
                                     )
                                 }
                             }
@@ -856,24 +862,30 @@ object HttpsTlsBridgeManager {
                                     "HTTP/2 action decision host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} action=${decision.action} confidence=${decision.confidence} blockCandidate=${decision.shouldBlockCandidate}"
                                 )
                                 if (decision.shouldBlockCandidate) {
+                                    val syntheticResponse = if (decision.shouldSyntheticRespond) {
+                                        HttpMitmFilter.buildRedirectHttp2SyntheticResponse(
+                                            streamId = event.streamId,
+                                            contentType = decision.contentType ?: inspection?.contentType.orEmpty(),
+                                            redirectResource = decision.redirectResource,
+                                            cspValue = decision.cspValue
+                                        ) ?: Http2FrameCodec.buildNeutralizedResponseFrames(
+                                            streamId = event.streamId,
+                                            contentType = inspection?.contentType
+                                        )
+                                    } else {
+                                        null
+                                    }
                                     streamState.blockedByAction = true
                                     LogRepository.append(
                                         context,
-                                        "HTTP/2 header-triggered block host=${session.host} flow=${session.flowKey} stream=${event.streamId} trigger=header action=${decision.action} confidence=${decision.confidence} vendor=${inspection?.vendor ?: "none"} reasons=${inspection?.suspiciousReasons?.joinToString("|")?.ifBlank { "none" } ?: "none"}"
+                                        "HTTP/2 header-triggered block host=${session.host} flow=${session.flowKey} stream=${event.streamId} trigger=header action=${decision.action} confidence=${decision.confidence} vendor=${inspection?.vendor ?: "none"} redirect=${decision.redirectResource ?: "none"} reasons=${inspection?.suspiciousReasons?.joinToString("|")?.ifBlank { "none" } ?: "none"}"
                                     )
                                     directives += Http2StreamDirective(
                                         streamId = event.streamId,
                                         action = decision.action,
                                         confidence = decision.confidence,
                                         sendRst = !decision.shouldSyntheticRespond,
-                                        syntheticResponse = if (decision.shouldSyntheticRespond) {
-                                            Http2FrameCodec.buildNeutralizedResponseFrames(
-                                                streamId = event.streamId,
-                                                contentType = inspection?.contentType
-                                            )
-                                        } else {
-                                            null
-                                        }
+                                        syntheticResponse = syntheticResponse
                                     )
                                 }
                             }

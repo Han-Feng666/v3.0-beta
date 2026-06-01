@@ -24,8 +24,11 @@ data class BlockRule(
     val regexPattern: String? = null,
     val cosmeticSelector: String? = null,
     val cosmeticException: Boolean = false,
+    val exceptionRule: Boolean = false,
     val removeParams: Set<String> = emptySet(),
+    val removeParamRegexes: Set<String> = emptySet(),
     val cspValue: String? = null,
+    val redirectResource: String? = null,
     val remoteSourceId: String? = null
 )
 

@@ -12,8 +12,8 @@ import rikka.shizuku.Shizuku
 
 object ShizukuConnectionOwnerRepository {
     private const val BIND_RETRY_INTERVAL_MILLIS = 1500L
-    private const val BIND_WAIT_TIMEOUT_MILLIS = 350L
-    private const val BIND_WAIT_STEP_MILLIS = 25L
+    private const val BIND_WAIT_TIMEOUT_MILLIS = 120L
+    private const val BIND_WAIT_STEP_MILLIS = 20L
     private const val BIND_STALE_TIMEOUT_MILLIS = 3000L
     @Volatile private var service: IConnectionOwnerService? = null
     @Volatile private var binding = false

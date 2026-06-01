@@ -132,7 +132,7 @@ object WhitelistRepository {
             ?: return LocalProxyCoexistConfig()
         return runCatching {
             gson.fromJson(json, LocalProxyCoexistConfig::class.java)
-        }.getOrNull() ?: LocalProxyCoexistConfig()
+        }.getOrNull()?.sanitize() ?: LocalProxyCoexistConfig()
     }
 
     fun saveLocalProxyCoexistConfig(context: Context, config: LocalProxyCoexistConfig) {
@@ -294,6 +294,17 @@ object WhitelistRepository {
                 token !in commonPackageSegments &&
                 token.any(Char::isLetter)
         }
+    }
+
+    private fun LocalProxyCoexistConfig.sanitize(): LocalProxyCoexistConfig {
+        return copy(
+            host = host.trim().ifEmpty { "127.0.0.1" },
+            controllerPackageName = controllerPackageName?.trim()?.ifEmpty { null },
+            remarks = remarks?.trim()?.ifEmpty { null },
+            detectedAppLabel = detectedAppLabel?.trim()?.ifEmpty { null },
+            detectedPackageName = detectedPackageName?.trim()?.ifEmpty { null },
+            detectionSource = detectionSource?.trim()?.ifEmpty { null }
+        )
     }
 
     private val commonPackageSegments = setOf(

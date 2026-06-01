@@ -18,7 +18,8 @@ object HttpMitmFilter {
         "json-ad-content", "novel-field-cluster", "media-field-cluster", "feed-ad-cluster", "banner-ad-cluster",
         "reader-ad-cluster", "comment-ad-path", "comment-ad-cluster", "comment-ad-extended", "comment-ad-float-extended",
         "comment-ad-flow-extended", "comment-ad-insert-extended", "coolapk-comment-ad-extended", "comment-ad-material-extended",
-        "comment-ad-popup-extended", "push-recommend-material-extended", "message-center-card-ad-extended", "gdt-sdk-ad-extended",
+        "comment-ad-popup-extended", "comment-commerce-path", "comment-commerce-ad-extended", "comment-gdt-commerce-ad-extended",
+        "push-recommend-material-extended", "message-center-card-ad-extended", "gdt-sdk-ad-extended",
         "ali-sdk-ad-extended", "shortvideo-sdk-ad-extended", "video-ad-cluster", "feed-ad-extended",
         "push-recommend-ad-extended", "message-center-ad-material-extended", "sign-task-benefit-ad-extended",
         "reader-sign-benefit-ad-extended", "reader-page-ad-extended", "reader-page-ad-material-extended",
@@ -257,6 +258,30 @@ object HttpMitmFilter {
         "mvad", "mvads", "openalliance", "hwads", "ads-drcn", "iflytekad", "atanx", "simba.taobao",
         "magneticengine", "kuaibusiness", "qtadx", "ubix", "ubixad", "ubixio", "ubixai", "ubiadx",
         "zghd", "zhghd", "hxltad", "adintl", "qxm", "qxmad", "qxmads", "52qumao"
+    )
+    private val pangleAndGdtHostSignals = listOf(
+        "pangolin-sdk-toutiao", "pangle", "pangolin", "gromore", "csj", "oceanengine",
+        "gdt.qq", "e.qq", "gdtimg", "youlianghui", "guangdiantong"
+    )
+    private val pangleAndGdtPathSignals = listOf(
+        "/union/sdk", "/sdk/union", "/ad/get", "/ad/fetch", "/ad/dispatch", "/ad/request",
+        "/material/list", "/creative/list", "/placement/list", "/sdk/config", "/waterfall", "/mediation",
+        "/auction", "/bidding", "/reward/video", "/open_screen", "/splash", "/launch", "/startup"
+    )
+    private val pangleAndGdtBodySignals = listOf(
+        "\"pangle\"", "\"pangolin\"", "\"gromore\"", "\"csj\"", "\"gdt\"", "\"youlianghui\"",
+        "\"guangdiantong\"", "\"adslot\"", "\"slotid\"", "\"placement_id\"", "\"waterfall\"",
+        "\"mediation\"", "\"bidding_token\"", "\"auction_id\"", "\"ecpm\"", "\"material_url\"",
+        "\"click_url\"", "\"show_url\"", "\"playable\"", "\"endcard\""
+    )
+    private val commentCommerceAdSignals = listOf(
+        "\"shop\"", "\"mall\"", "\"store\"", "\"goods\"", "\"product\"", "\"sku\"",
+        "\"ecom\"", "\"ecommerce\"", "\"commerce\"", "\"douyin_shop\"", "\"shop_card\"",
+        "\"mall_card\"", "\"goods_card\"", "\"product_card\"", "\"promotion_card\"", "\"ad_card\""
+    )
+    private val commentCommercePathSignals = listOf(
+        "shop", "mall", "store", "goods", "product", "sku", "ecom", "commerce",
+        "promotion_card", "promo_card", "ad_card", "goods_card", "product_card", "shop_card", "mall_card"
     )
     private val suspiciousQueryKeywords = listOf(
         "ad", "ads", "adid", "adunit", "adslot", "placement", "promo", "promotion", "splash", "reward", "preload", "tracker", "creative", "material", "template", "ecpm", "playable", "endcard", "launch", "startup", "interstitial", "popup", "openad", "bottomad",
@@ -695,6 +720,7 @@ object HttpMitmFilter {
         } else {
             directives.removeParams
         }
+        val removeParamRegexes = directives.removeParamRegexes
         val headerLines = text.substring(0, headerEnd).split("\r\n")
         if (headerLines.isEmpty()) return chunk
         var changed = false
@@ -713,7 +739,7 @@ object HttpMitmFilter {
         if (directives.cspValue != null) {
             changed = true
         }
-        val requestLine = rewriteRequestLine(rewrittenHeaders.first(), removeParams)
+        val requestLine = rewriteRequestLine(rewrittenHeaders.first(), removeParams, removeParamRegexes)
         if (requestLine != rewrittenHeaders.first()) changed = true
         if (!changed) return chunk
         val body = text.substring(headerEnd + 4)
@@ -798,11 +824,12 @@ object HttpMitmFilter {
         } else {
             directives.removeParams
         }
-        if (removeParams.isEmpty() && directives.cspValue == null) return base
+        val removeParamRegexes = directives.removeParamRegexes
+        if (removeParams.isEmpty() && removeParamRegexes.isEmpty() && directives.cspValue == null) return base
         var changed = base.changed
         val rewritten = base.headers.map { header ->
             if (header.name == ":path") {
-                val updated = rewritePathOnly(header.value, removeParams)
+                val updated = rewritePathOnly(header.value, removeParams, removeParamRegexes)
                 if (updated != header.value) changed = true
                 HpackDecoder.HeaderField(header.name, updated)
             } else {
@@ -853,15 +880,16 @@ object HttpMitmFilter {
             ?.trim()
             ?.lowercase()
             ?: ""
-        val cosmeticSelectors = requestInspection?.let {
-            RuleRepository.getCosmeticSelectors(
+        val directives = requestInspection?.let {
+            RuleRepository.getRequestRewriteDirectives(
                 context = TlsMitmSessionManager.requireContext(),
                 host = it.host,
                 path = it.path,
                 appName = session.appName,
                 requestDomain = extractRequestDomain(it)
             )
-        }.orEmpty()
+        } ?: RuleRepository.RequestRewriteDirectives()
+        val cosmeticSelectors = directives.cosmeticSelectors
         reportSuspiciousRedirectDomain(
             host = normalizeAuthority(requestInspection?.host ?: session.host),
             location = location,
@@ -893,16 +921,21 @@ object HttpMitmFilter {
         }
         val body = decodeAscii(decodedBodyBytes) ?: return FilterResult.PassThrough(chunk, "binary-response-body")
         val neutralizeReason = inspectHttp1BodySignals(session, requestInspection, contentType, body, cosmeticSelectors)
+        val redirectBodyBytes = buildRedirectReplacementBody(contentType, directives.redirectResource)
+        if (redirectBodyBytes != null) {
+            val response = buildSyntheticResponse(statusLine, inferRedirectContentType(contentType, directives.redirectResource), redirectBodyBytes, directives.cspValue)
+            return FilterResult.Replaced(response, "redirect-resource-applied", chunk.size)
+        }
         if (neutralizeReason == null) {
-            if (contentType.contains("text/html") && cosmeticSelectors.isNotEmpty()) {
-                val injectedBodyBytes = buildInjectedHtmlBody(body, cosmeticSelectors)
-                val response = buildSyntheticResponse(statusLine, contentType, injectedBodyBytes)
+            if (contentType.contains("text/html") && (cosmeticSelectors.isNotEmpty() || !directives.cspValue.isNullOrBlank())) {
+                val injectedBodyBytes = buildInjectedHtmlBody(body, cosmeticSelectors, directives.cspValue)
+                val response = buildSyntheticResponse(statusLine, contentType, injectedBodyBytes, directives.cspValue)
                 return FilterResult.Replaced(response, "cosmetic-html-injected", chunk.size)
             }
             return FilterResult.PassThrough(chunk, "response-allowed")
         }
-        val replacementBodyBytes = buildReplacementBody(contentType, body, cosmeticSelectors)
-        val response = buildSyntheticResponse(statusLine, contentType, replacementBodyBytes)
+        val replacementBodyBytes = buildReplacementBody(contentType, body, cosmeticSelectors, directives.cspValue)
+        val response = buildSyntheticResponse(statusLine, contentType, replacementBodyBytes, directives.cspValue)
         return FilterResult.Replaced(response, neutralizeReason, chunk.size)
     }
 
@@ -971,6 +1004,7 @@ object HttpMitmFilter {
     ): Http2DataInspection? {
         if (incomingFragment.isEmpty()) return null
         if (headerInspection?.responseLike != true) return null
+        val context = TlsMitmSessionManager.requireContext()
         val combinedSample = appendSample(currentSample, incomingFragment, MAX_HTTP2_DATA_SAMPLE_BYTES)
         val contentType = headerInspection.contentType?.lowercase().orEmpty()
         val targetedContentType = contentType.contains("json") ||
@@ -980,9 +1014,15 @@ object HttpMitmFilter {
         if (contentType.isNotBlank() && !targetedContentType) {
             return null
         }
+        val directives = RuleRepository.getRequestRewriteDirectives(
+            context = context,
+            host = headerInspection.authority,
+            path = headerInspection.path.orEmpty(),
+            appName = session.appName,
+            requestDomain = extractRequestDomain(headerInspection)
+        )
         val decoded = decodeAscii(combinedSample) ?: return null
         val lowerBody = decoded.lowercase()
-        val context = TlsMitmSessionManager.requireContext()
         if (RuleRepository.shouldProtectMediaTraffic(headerInspection.authority)) return null
         if (RuleRepository.shouldProtectBusinessTraffic(headerInspection.authority)) return null
         val vendor = headerInspection.vendor.ifBlank {
@@ -1032,7 +1072,10 @@ object HttpMitmFilter {
             confidence = if (suspiciousScore >= 4) "high" else "medium",
             samplePreview = preview,
             vendor = vendor,
-            combinedSample = combinedSample
+            combinedSample = combinedSample,
+            redirectResource = directives.redirectResource,
+            cspValue = directives.cspValue,
+            contentType = contentType
         )
     }
 
@@ -1175,12 +1218,17 @@ object HttpMitmFilter {
         val cookieStrongKeyword = strongResponseAdKeywords.any(setCookie::contains)
         val locationRecommendCardHit = containsAny(location, "recommend_card", "promo_card", "ad_card")
         val locationMaterialHit = containsAny(location, "material_url", "landing_url")
+        val locationCommerceCardHit = containsAny(location, "shop_card", "mall_card", "goods_card", "product_card")
         val cookieMaterialHit = containsAny(setCookie, "ad_material", "material_url")
         val headerMaterialHit = locationMaterialHit || cookieMaterialHit
         val strongHeaderOrKeywordHit = locationStrongKeyword || cookieStrongKeyword
         val aggressiveAdApp = RuleRepository.isAggressiveAdAppHint(session.appName)
         if (RuleRepository.shouldAggressivelyBlockForNovelApp(context, host, session.appName, vendor)) {
             return "neutralized-novel-app-aggressive"
+        }
+        val pangleOrGdtHeaderTarget = pangleAndGdtHostSignals.any { host.contains(it) || lowerPath.contains(it) }
+        if (pangleOrGdtHeaderTarget && (headerMaterialHit || strongHeaderOrKeywordHit)) {
+            return "neutralized-pangle-gdt-header"
         }
         if (RuleRepository.shouldForcePushRecommendInspection(host, session.appName, vendor) &&
             (locationRecommendCardHit || headerMaterialHit) &&
@@ -1190,6 +1238,10 @@ object HttpMitmFilter {
         if (looksLikeCommentAdPath(lowerPath) &&
             (locationRecommendCardHit || headerMaterialHit || strongHeaderOrKeywordHit)) {
             return "neutralized-comment-ad-header"
+        }
+        if (looksLikeCommentCommerceAdPath(lowerPath) &&
+            (locationRecommendCardHit || locationCommerceCardHit || headerMaterialHit || strongHeaderOrKeywordHit || pangleOrGdtHeaderTarget)) {
+            return "neutralized-comment-commerce-ad-header"
         }
         if (pathInspection.strongSuspicious) {
             return "neutralized-strong-suspicious-path"
@@ -1297,10 +1349,15 @@ object HttpMitmFilter {
             val domesticSdkHits = domesticAdSdkKeywords.count { keyword ->
                 lowerBody.contains(keyword) || host.contains(keyword)
             }
+            val pangleAndGdtHits = pangleAndGdtBodySignals.count(lowerBody::contains) +
+                pangleAndGdtHostSignals.count { signal -> host.contains(signal) || requestInspection?.path?.lowercase()?.contains(signal) == true }
             val threshold = when {
                 isNovelApp -> HTTP1_NOVEL_RESPONSE_BLOCK_SCORE
                 mitmAggressive && domesticSdkHits >= 1 -> HTTP1_MITM_AGGRESSIVE_RESPONSE_BLOCK_SCORE
                 else -> HTTP1_RESPONSE_BLOCK_SCORE
+            }
+            if (pangleAndGdtHits >= 3 && (bodySignals.score >= 1 || domesticSdkHits >= 1)) {
+                return "neutralized-body-pangle-gdt-cluster"
             }
             if (domesticSdkHits >= 2 && bodySignals.score >= 2) {
                 return "neutralized-body-domestic-sdk-cluster"
@@ -1326,6 +1383,45 @@ object HttpMitmFilter {
             }
             if (bodyReasons.contains("novel-coin-reward") && (protectedNovelTarget || aggressiveNovelTarget)) {
                 return "neutralized-body-novel-coin-reward"
+            }
+            val commentAdMaterialHit = listOf(
+                "\"ad_material", "\"material_url", "\"landing_url", "\"click_url", "\"show_url", "\"deep_link"
+            ).any(lowerBody::contains)
+            val commentRecommendCardHit = listOf(
+                "\"recommend_card", "\"promotion_card", "\"discover_card", "\"ad_card", "\"promo_card"
+            ).any(lowerBody::contains)
+            val commentCommerceSignalHit = commentCommerceAdSignals.count(lowerBody::contains)
+            val commentCommerceCardHit = listOf(
+                "\"shop_card", "\"mall_card", "\"goods_card", "\"product_card", "\"douyin_shop"
+            ).any(lowerBody::contains)
+            val commentCommerceGdtHit = pangleAndGdtBodySignals.any(lowerBody::contains)
+            if ((bodyReasons.contains("comment-ad-extended") || bodyReasons.contains("comment-ad-flow-extended")) &&
+                (bodySignals.score >= 2 || commentAdMaterialHit || commentRecommendCardHit)) {
+                RuleRepository.reportUnknownVendorIfNeeded(
+                    context = context,
+                    vendor = vendor,
+                    domain = host,
+                    appName = session.appName,
+                    signal = RuleRepository.SuspiciousSignal.HTTP_FLOW,
+                    confidenceBoost = 2,
+                    matchedPathHint = requestInspection?.path,
+                    refererDomain = extractRequestDomain(requestInspection)
+                )
+                return "neutralized-body-comment-ad"
+            }
+            if ((bodyReasons.contains("comment-commerce-ad-extended") || bodyReasons.contains("comment-gdt-commerce-ad-extended")) &&
+                (commentCommerceSignalHit >= 2 || commentCommerceCardHit || commentCommerceGdtHit || commentAdMaterialHit)) {
+                RuleRepository.reportUnknownVendorIfNeeded(
+                    context = context,
+                    vendor = vendor,
+                    domain = host,
+                    appName = session.appName,
+                    signal = RuleRepository.SuspiciousSignal.HTTP_FLOW,
+                    confidenceBoost = 2,
+                    matchedPathHint = requestInspection?.path,
+                    refererDomain = extractRequestDomain(requestInspection)
+                )
+                return "neutralized-body-comment-commerce-ad"
             }
             if (bodySignals.score >= threshold) {
                 RuleRepository.reportUnknownVendorIfNeeded(
@@ -1400,6 +1496,10 @@ object HttpMitmFilter {
         return tokens.any(contentType::contains)
     }
 
+    private fun containsAny(value: String, vararg tokens: String): Boolean {
+        return tokens.any(value::contains)
+    }
+
     private fun looksLikeCommentAdPath(path: String): Boolean {
         if (path.isBlank()) return false
         val commentScene = path.contains("comment") || path.contains("reply") || path.contains("floor") || path.contains("post")
@@ -1415,6 +1515,13 @@ object HttpMitmFilter {
             path.contains("card")
     }
 
+    private fun looksLikeCommentCommerceAdPath(path: String): Boolean {
+        if (!looksLikeCommentAdPath(path)) return false
+        return commentCommercePathSignals.any(path::contains) ||
+            pangleAndGdtPathSignals.any(path::contains) ||
+            containsAny(path, "gdt", "guangdiantong", "youlianghui", "douyin", "shop", "mall")
+    }
+
     private fun buildCosmeticHtml(selectors: List<String>): String {
         if (selectors.isEmpty()) return "<html><body></body></html>"
         val css = selectors.joinToString(", ") { it }.take(4000)
@@ -1427,20 +1534,32 @@ object HttpMitmFilter {
         return "<style data-hanfeng-cosmetic=\"1\">$css { display: none !important; visibility: hidden !important; opacity: 0 !important; }</style>"
     }
 
-    private fun buildInjectedHtmlBody(originalBody: String, cosmeticSelectors: List<String>): ByteArray {
+    private fun buildInjectedHtmlBody(originalBody: String, cosmeticSelectors: List<String>, cspValue: String? = null): ByteArray {
         val styleTag = buildCosmeticStyleTag(cosmeticSelectors)
+        val cspMetaTag = buildCspMetaTag(cspValue)
         val injected = when {
             originalBody.contains("</head>", ignoreCase = true) -> {
-                originalBody.replaceFirst("</head>", "$styleTag$SCRIPTLET_INJECTION</head>", ignoreCase = true)
+                originalBody.replaceFirst("</head>", "$cspMetaTag$styleTag$SCRIPTLET_INJECTION</head>", ignoreCase = true)
             }
             originalBody.contains("<body", ignoreCase = true) -> {
-                "$styleTag$SCRIPTLET_INJECTION$originalBody"
+                "$cspMetaTag$styleTag$SCRIPTLET_INJECTION$originalBody"
             }
             else -> {
-                "<html><head>$styleTag$SCRIPTLET_INJECTION</head><body>$originalBody</body></html>"
+                "<html><head>$cspMetaTag$styleTag$SCRIPTLET_INJECTION</head><body>$originalBody</body></html>"
             }
         }
         return injected.toByteArray(StandardCharsets.UTF_8)
+    }
+
+    private fun buildCspMetaTag(cspValue: String?): String {
+        val value = cspValue?.trim().orEmpty()
+        if (value.isBlank()) return ""
+        val escaped = value
+            .replace("&", "&amp;")
+            .replace("\"", "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        return "<meta http-equiv=\"Content-Security-Policy\" content=\"$escaped\">"
     }
 
     private val SCRIPTLET_INJECTION = """<script>
@@ -1656,13 +1775,19 @@ object HttpMitmFilter {
         }
     }
 
-    private fun buildSyntheticResponse(statusLine: String, contentType: String, bodyBytes: ByteArray): ByteArray {
+    private fun buildSyntheticResponse(
+        statusLine: String,
+        contentType: String,
+        bodyBytes: ByteArray,
+        cspValue: String? = null
+    ): ByteArray {
         val actualStatusLine = if (statusLine.startsWith("HTTP/1.")) {
             "${statusLine.substringBefore(' ')} 200 OK"
         } else {
             "HTTP/1.1 200 OK"
         }
         val contentTypeValue = if (contentType.isBlank()) "text/plain; charset=utf-8" else contentType
+        val normalizedCsp = cspValue?.trim().orEmpty()
         val headerBytes = buildString {
             append(actualStatusLine).append("\r\n")
             append("Connection: close\r\n")
@@ -1671,6 +1796,9 @@ object HttpMitmFilter {
             append("Cache-Control: no-store\r\n")
             append("Pragma: no-cache\r\n")
             append("Expires: 0\r\n")
+            if (normalizedCsp.isNotBlank()) {
+                append("Content-Security-Policy: ").append(normalizedCsp).append("\r\n")
+            }
             append("X-HanFeng-Block: 1\r\n")
             append("\r\n")
         }.toByteArray(StandardCharsets.ISO_8859_1)
@@ -1710,6 +1838,7 @@ object HttpMitmFilter {
         if (lowerPath.isNotBlank() && RuleRepository.isUrlBlocked(context, normalizedHost, lowerPath, appName, requestDomain, destinationPort = destinationPort)) return cacheDeepInspectionDecision(cacheKey, true)
         if (pathInspection.strongSuspicious) return cacheDeepInspectionDecision(cacheKey, true)
         if (looksLikeCommentAdPath(lowerPath)) return cacheDeepInspectionDecision(cacheKey, true)
+        if (looksLikeCommentCommerceAdPath(lowerPath)) return cacheDeepInspectionDecision(cacheKey, true)
         // 游戏和社交 APP 核心服务跳过深度检查（提升性能，降低延迟）
         val lowerHost = normalizedHost.lowercase()
         if (RuleRepository.isGameCoreDomain(lowerHost)) return cacheDeepInspectionDecision(cacheKey, false)
@@ -1748,6 +1877,10 @@ object HttpMitmFilter {
             if (pathInspection.suspicious || adInfraRequestSignals.any { lowerPath.contains(it) }) {
                 return cacheDeepInspectionDecision(cacheKey, true)
             }
+        }
+        if (pangleAndGdtHostSignals.any { normalizedHost.contains(it) || lowerPath.contains(it) } &&
+            (pathInspection.suspicious || pangleAndGdtPathSignals.any { lowerPath.contains(it) })) {
+            return cacheDeepInspectionDecision(cacheKey, true)
         }
         if (lowerPath.isBlank()) return cacheDeepInspectionDecision(cacheKey, false)
         if (adInfraRequestSignals.any { lowerPath.contains(it) }) return cacheDeepInspectionDecision(cacheKey, true)
@@ -1825,20 +1958,77 @@ object HttpMitmFilter {
         return host?.let(::normalizeAuthority)
     }
 
-    private fun buildReplacementBody(contentType: String, originalBody: String, cosmeticSelectors: List<String>): ByteArray {
+    private fun buildReplacementBody(
+        contentType: String,
+        originalBody: String,
+        cosmeticSelectors: List<String>,
+        cspValue: String? = null
+    ): ByteArray {
         return when {
             contentType.contains("application/json") -> "{}".toByteArray(StandardCharsets.UTF_8)
             contentType.contains("javascript") -> "".toByteArray(StandardCharsets.UTF_8)
             contentType.contains("text/html") -> {
                 if (cosmeticSelectors.isEmpty()) {
-                    "<html><head>$SCRIPTLET_INJECTION</head><body></body></html>".toByteArray(StandardCharsets.UTF_8)
+                    "<html><head>${buildCspMetaTag(cspValue)}$SCRIPTLET_INJECTION</head><body></body></html>".toByteArray(StandardCharsets.UTF_8)
                 } else {
-                    buildInjectedHtmlBody(originalBody, cosmeticSelectors)
+                    buildInjectedHtmlBody(originalBody, cosmeticSelectors, cspValue)
                 }
             }
             contentType.contains("image") -> TRANSPARENT_1X1_GIF
             else -> "".toByteArray(StandardCharsets.UTF_8)
         }
+    }
+
+    private fun buildRedirectReplacementBody(contentType: String, redirectResource: String?): ByteArray? {
+        val resource = redirectResource?.trim()?.lowercase().orEmpty()
+        if (resource.isBlank()) return null
+        return when {
+            resource.contains("noopjs") || resource.contains("noop.js") || resource.contains("noop-script") -> {
+                "(()=>{})();".toByteArray(StandardCharsets.UTF_8)
+            }
+            resource.contains("1x1") || resource.contains("pixel") || resource.contains("transparent") || resource.contains("noopimage") -> {
+                TRANSPARENT_1X1_GIF
+            }
+            resource.contains("empty") && contentType.contains("html") -> {
+                "<html><head></head><body></body></html>".toByteArray(StandardCharsets.UTF_8)
+            }
+            resource.contains("empty") && contentType.contains("json") -> {
+                "{}".toByteArray(StandardCharsets.UTF_8)
+            }
+            resource.contains("empty") || resource.contains("nooptext") -> {
+                ByteArray(0)
+            }
+            else -> null
+        }
+    }
+
+    private fun inferRedirectContentType(originalContentType: String, redirectResource: String?): String {
+        val resource = redirectResource?.trim()?.lowercase().orEmpty()
+        return when {
+            resource.contains("noopjs") || resource.contains("noop.js") || resource.contains("noop-script") -> "application/javascript; charset=utf-8"
+            resource.contains("1x1") || resource.contains("pixel") || resource.contains("transparent") || resource.contains("noopimage") -> "image/gif"
+            resource.contains("empty") && originalContentType.contains("json") -> "application/json; charset=utf-8"
+            resource.contains("empty") && originalContentType.contains("html") -> "text/html; charset=utf-8"
+            originalContentType.isBlank() -> "text/plain; charset=utf-8"
+            else -> originalContentType
+        }
+    }
+
+    fun buildRedirectHttp2SyntheticResponse(streamId: Int, contentType: String, redirectResource: String?, cspValue: String? = null): ByteArray? {
+        val body = buildRedirectReplacementBody(contentType, redirectResource) ?: return null
+        val actualContentType = inferRedirectContentType(contentType, redirectResource)
+        return Http2FrameCodec.buildSyntheticResponseFrames(
+            streamId = streamId,
+            status = 200,
+            contentType = actualContentType,
+            body = body,
+            extraHeaders = buildList {
+                add("cache-control" to "no-store")
+                add("pragma" to "no-cache")
+                add("x-hanfeng-block" to "1")
+                cspValue?.trim()?.takeIf { it.isNotBlank() }?.let { add("content-security-policy" to it) }
+            }
+        )
     }
 
     private fun inspectAdBodySignals(lowerBody: String): BodySignalInspection {
@@ -1949,6 +2139,11 @@ object HttpMitmFilter {
             "\"comment_material", "\"reply_material", "\"floor_material", "\"comment_landing_url",
             "\"reply_landing_url", "\"comment_click_url", "\"reply_click_url", "\"comment_deep_link"
         )
+        val commentCommerceSceneHit = containsAny(
+            "\"comment_goods", "\"reply_goods", "\"floor_goods", "\"comment_product", "\"reply_product",
+            "\"comment_shop", "\"reply_shop", "\"floor_shop", "\"comment_mall", "\"reply_mall",
+            "\"goods_card", "\"product_card", "\"shop_card", "\"mall_card", "\"douyin_shop"
+        )
         val commentPopupSceneHit = containsAny(
             "\"comment_popup_ad", "\"reply_popup_ad", "\"floor_popup_ad", "\"comment_dialog_ad",
             "\"reply_dialog_ad", "\"comment_insert_popup"
@@ -1999,6 +2194,17 @@ object HttpMitmFilter {
             (adMaterialHit || deepLinkMaterialHit || recommendCardHit)) {
             score += 3
             reasons += "comment-ad-material-extended"
+        }
+        if (commentOrPostSceneHit && commentCommerceSceneHit &&
+            (recommendCardHit || adMaterialHit || deepLinkMaterialHit)) {
+            score += 4
+            reasons += "comment-commerce-ad-extended"
+        }
+        if (commentOrPostSceneHit && commentCommerceSceneHit &&
+            (adMaterialHit || deepLinkMaterialHit) &&
+            pangleAndGdtBodySignals.any(lowerBody::contains)) {
+            score += 4
+            reasons += "comment-gdt-commerce-ad-extended"
         }
         if (commentOrPostSceneHit && commentPopupSceneHit &&
             (adMaterialHit || deepLinkMaterialHit)) {
@@ -2330,6 +2536,9 @@ object HttpMitmFilter {
         }
         return normalized.contains("广告") ||
             normalized.contains("Pangle") ||
+            normalized.contains("Tencent Ads") ||
+            normalized.contains("Tencent Marketing") ||
+            normalized.contains("优量汇") ||
             normalized.contains("TopOn") ||
             normalized.contains("TradPlus") ||
             normalized.contains("Beizi") ||
@@ -2385,8 +2594,15 @@ object HttpMitmFilter {
         val lowerAccept = normalized["accept"]?.firstOrNull()?.lowercase().orEmpty()
         val pathInspection = inspectSuspiciousHttpPath(lowerPath)
         val context = TlsMitmSessionManager.requireContext()
-        fun containsAny(value: String, vararg tokens: String): Boolean = tokens.any(value::contains)
         val requestDomain = extractRequestDomain(referer)
+        val directives = RuleRepository.getRequestRewriteDirectives(
+            context = context,
+            host = lowerAuthority,
+            path = lowerPath,
+            appName = session.appName,
+            requestDomain = requestDomain
+        )
+        fun containsAny(value: String, vararg tokens: String): Boolean = tokens.any(value::contains)
         reportSuspiciousRedirectDomain(
             host = lowerAuthority,
             location = location,
@@ -2423,6 +2639,9 @@ object HttpMitmFilter {
         val domesticSdkHits = domesticAdSdkKeywords.count { keyword ->
             lowerAuthority.contains(keyword) || lowerPath.contains(keyword) || lowerReferer.contains(keyword) || lowerUserAgent.contains(keyword)
         }
+        val pangleAndGdtHits = pangleAndGdtHostSignals.count { signal ->
+            lowerAuthority.contains(signal) || lowerPath.contains(signal) || lowerReferer.contains(signal) || lowerLocation.contains(signal)
+        }
         if (RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(context, lowerAuthority, lowerPath, session.appName)) {
             suspiciousScore += 4
             reasons += "novel-protected-path"
@@ -2434,6 +2653,10 @@ object HttpMitmFilter {
         if (looksLikeCommentAdPath(lowerPath)) {
             suspiciousScore += 3
             reasons += "comment-ad-path"
+        }
+        if (looksLikeCommentCommerceAdPath(lowerPath)) {
+            suspiciousScore += 4
+            reasons += "comment-commerce-path"
         }
         if (pathInspection.rewardUnlock) {
             suspiciousScore += if (isNovelApp) 4 else 2
@@ -2471,6 +2694,20 @@ object HttpMitmFilter {
         if (domesticSdkHits > 0) {
             suspiciousScore += if (domesticSdkHits >= 2) 3 else 2
             reasons += "domestic-sdk-signal"
+        }
+        if (pangleAndGdtHits > 0 && (headerMaterialHit || pathMaterialHit || pathInspection.suspicious)) {
+            suspiciousScore += if (pangleAndGdtHits >= 2) 4 else 3
+            reasons += "pangle-gdt-signal"
+        }
+        if (looksLikeCommentCommerceAdPath(lowerPath) &&
+            (locationRecommendCardHit || headerMaterialHit || pathMaterialHit || pangleAndGdtHits > 0)) {
+            suspiciousScore += 4
+            reasons += "comment-commerce-ad-extended"
+        }
+        if (looksLikeCommentCommerceAdPath(lowerPath) && pangleAndGdtHits > 0 &&
+            (headerMaterialHit || pathMaterialHit || lowerLocation.contains("shop_card") || lowerLocation.contains("goods_card"))) {
+            suspiciousScore += 4
+            reasons += "comment-gdt-commerce-ad-extended"
         }
         // 小说 APP 激进拦截 - 增加权重
         if (RuleRepository.shouldAggressivelyBlockForNovelApp(context, lowerAuthority, session.appName, vendor)) {
@@ -2554,6 +2791,8 @@ object HttpMitmFilter {
             vendor = vendor,
             suspiciousScore = suspiciousScore,
             suspiciousReasons = reasons,
+            redirectResource = directives.redirectResource,
+            cspValue = directives.cspValue,
             requestLike = method != null && status == null,
             responseLike = status != null
         )
@@ -2573,15 +2812,25 @@ object HttpMitmFilter {
                 action = "allow",
                 confidence = "high",
                 shouldBlockCandidate = false,
-                shouldSyntheticRespond = false
+                shouldSyntheticRespond = false,
+                redirectResource = inspection.redirectResource,
+                cspValue = inspection.cspValue,
+                contentType = inspection.contentType
             )
         }
         val shouldBlock = shouldBlockHttp2ResponseFromHeaders(inspection, isNovelApp)
         return Http2ActionDecision(
-            action = if (shouldBlock) "block" else "monitor",
+            action = when {
+                shouldBlock && !inspection.redirectResource.isNullOrBlank() -> "response-header-redirect"
+                shouldBlock -> "block"
+                else -> "monitor"
+            },
             confidence = if (inspection.suspiciousScore >= 4) "high" else "medium",
             shouldBlockCandidate = shouldBlock,
-            shouldSyntheticRespond = shouldBlock && inspection.responseLike
+            shouldSyntheticRespond = shouldBlock && inspection.responseLike,
+            redirectResource = inspection.redirectResource,
+            cspValue = inspection.cspValue,
+            contentType = inspection.contentType
         )
     }
 
@@ -2743,11 +2992,11 @@ object HttpMitmFilter {
         return FeatureSettingsRepository.isHttpDecryptEnabled(context)
     }
 
-    private fun rewriteRequestLine(requestLine: String, removeParams: Set<String>): String {
-        if (removeParams.isEmpty()) return requestLine
+    private fun rewriteRequestLine(requestLine: String, removeParams: Set<String>, removeParamRegexes: Set<String>): String {
+        if (removeParams.isEmpty() && removeParamRegexes.isEmpty()) return requestLine
         val parts = requestLine.split(' ')
         if (parts.size < 2) return requestLine
-        val updatedPath = rewritePathOnly(parts[1], removeParams)
+        val updatedPath = rewritePathOnly(parts[1], removeParams, removeParamRegexes)
         if (updatedPath == parts[1]) return requestLine
         return buildString {
             append(parts[0]).append(' ').append(updatedPath)
@@ -2755,15 +3004,20 @@ object HttpMitmFilter {
         }
     }
 
-    private fun rewritePathOnly(path: String, removeParams: Set<String>): String {
-        if (removeParams.isEmpty() || !path.contains('?')) return path
+    private fun rewritePathOnly(path: String, removeParams: Set<String>, removeParamRegexes: Set<String> = emptySet()): String {
+        if ((removeParams.isEmpty() && removeParamRegexes.isEmpty()) || !path.contains('?')) return path
         val base = path.substringBefore('?')
         val fragment = path.substringAfter('#', "")
         val query = path.substringAfter('?', "").substringBefore('#')
         if (query.isBlank()) return path
+        val regexRules = removeParamRegexes.mapNotNull { pattern -> runCatching { Regex(pattern, RegexOption.IGNORE_CASE) }.getOrNull() }
         val filtered = query.split('&')
             .filter { it.isNotBlank() }
-            .filterNot { part -> removeParams.contains(part.substringBefore('=').trim().lowercase()) }
+            .filterNot { part ->
+                val key = part.substringBefore('=').trim()
+                val normalizedKey = key.lowercase()
+                removeParams.contains(normalizedKey) || regexRules.any { it.matches(key) || it.matches(normalizedKey) }
+            }
         val rebuilt = buildString {
             append(base)
             if (filtered.isNotEmpty()) append('?').append(filtered.joinToString("&"))
@@ -2816,6 +3070,8 @@ object HttpMitmFilter {
         val vendor: String,
         val suspiciousScore: Int,
         val suspiciousReasons: List<String>,
+        val redirectResource: String? = null,
+        val cspValue: String? = null,
         val requestLike: Boolean,
         val responseLike: Boolean
     )
@@ -2824,7 +3080,10 @@ object HttpMitmFilter {
         val action: String,
         val confidence: String,
         val shouldBlockCandidate: Boolean,
-        val shouldSyntheticRespond: Boolean = false
+        val shouldSyntheticRespond: Boolean = false,
+        val redirectResource: String? = null,
+        val cspValue: String? = null,
+        val contentType: String? = null
     )
 
     data class Http2HeaderRewriteResult(
@@ -2844,7 +3103,10 @@ object HttpMitmFilter {
         val confidence: String,
         val samplePreview: String,
         val vendor: String,
-        val combinedSample: ByteArray
+        val combinedSample: ByteArray,
+        val redirectResource: String? = null,
+        val cspValue: String? = null,
+        val contentType: String = ""
     )
 
     private data class BodySignalInspection(

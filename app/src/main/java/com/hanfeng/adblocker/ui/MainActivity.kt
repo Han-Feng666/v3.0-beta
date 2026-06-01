@@ -405,7 +405,7 @@ class MainActivity : BaseActivity() {
             }
             status.permissionGranted -> {
                 warmShizukuServices()
-                Toast.makeText(this, "Shizuku 已可用，后续会用于增强拦截能力", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Shizuku 已授权，增强服务会继续完成连接", Toast.LENGTH_SHORT).show()
                 refreshHomeStatus()
             }
             ShizukuRepository.requestPermission() -> {
@@ -455,6 +455,11 @@ class MainActivity : BaseActivity() {
     }
 
     fun shareLogs() {
+        val exportedPath = LogRepository.exportZipToDownloads(this)
+        if (!exportedPath.isNullOrBlank()) {
+            Toast.makeText(this, "日志已导出到 $exportedPath", Toast.LENGTH_LONG).show()
+            return
+        }
         val uri = LogRepository.exportZip(this)
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "application/zip"

@@ -174,10 +174,10 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
             !shizukuStatus.installed -> "未安装"
             !shizukuStatus.binderAlive -> "未启动"
             shizukuServiceReady && !shizukuStatus.permissionGranted -> "已连接 (${shizukuMode} / 兼容模式)"
-            !shizukuStatus.permissionStateKnown -> "权限状态异常"
-            !shizukuStatus.permissionGranted -> "未授权"
             shizukuServiceReady -> "已连接 (${shizukuMode})"
-            else -> "服务待绑定 (${shizukuMode})"
+            !shizukuStatus.permissionStateKnown -> "权限状态异常"
+            shizukuStatus.permissionGranted -> "已授权 (${shizukuMode}，服务连接中)"
+            else -> "服务连接中 (${shizukuMode})"
         }
         statusText.text = buildString {
             append("工作状态：")

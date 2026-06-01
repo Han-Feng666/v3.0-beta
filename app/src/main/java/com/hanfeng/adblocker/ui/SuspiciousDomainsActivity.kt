@@ -143,7 +143,9 @@ class SuspiciousDomainsActivity : BaseActivity() {
             val matchesQuery = query.isBlank() ||
                 sample.domain.lowercase().contains(query) ||
                 sample.lastAppName.lowercase().contains(query) ||
-                sample.lastVendor.lowercase().contains(query)
+                sample.lastVendor.lowercase().contains(query) ||
+                sample.refererDomain.lowercase().contains(query) ||
+                sample.lastPathHint.lowercase().contains(query)
             if (!matchesQuery) return@filter false
             val isNovelSample = sample.novelHits > 0 || RuleRepository.isNovelVendor(sample.lastVendor)
             if (binding.checkOnlyNovelApps.isChecked && !isNovelSample) return@filter false

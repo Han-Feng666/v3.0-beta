@@ -1,0 +1,252 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:paddingLeft="16dp"
+    android:paddingTop="8dp"
+    android:paddingRight="16dp"
+    android:paddingBottom="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="影响正常网络"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnBack"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:background="@drawable/bg_button"
+            android:backgroundTint="@null"
+            android:minWidth="64dp"
+            android:text="返回"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/summaryText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="将展示可能影响微信、支付、游戏、音乐和正常内容加载的规则。先查看原因，再决定保留或删除。"
+        android:textColor="@color/hf_text_secondary"
+        android:textSize="13sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnSelectAll"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_button"
+            android:backgroundTint="@null"
+            android:text="全选"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="1dp" />
+
+        <Button
+            android:id="@+id/btnClearSelection"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_button"
+            android:backgroundTint="@null"
+            android:text="清空选择"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary" />
+    </LinearLayout>
+
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnFilterAll"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:minWidth="72dp"
+                android:text="全部"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+
+            <Space
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnFilterHighRisk"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:minWidth="88dp"
+                android:text="高风险"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+
+            <Space
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnFilterRemote"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:minWidth="104dp"
+                android:text="远程规则源"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+
+            <Space
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnFilterSystem"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:minWidth="88dp"
+                android:text="系统业务"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+        </LinearLayout>
+    </HorizontalScrollView>
+
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnGroupNone"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:minWidth="88dp"
+                android:text="不分组"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+
+            <Space
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnGroupSource"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:minWidth="104dp"
+                android:text="按规则源"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+
+            <Space
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnGroupVendor"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:minWidth="88dp"
+                android:text="按厂商"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+
+            <Space
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnGroupBusiness"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:minWidth="104dp"
+                android:text="按业务类型"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+        </LinearLayout>
+    </HorizontalScrollView>
+
+    <Button
+        android:id="@+id/btnDeleteSelected"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_panel"
+        android:backgroundTint="@null"
+        android:text="删除当前所选规则"
+        android:textAllCaps="false"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="16sp" />
+
+    <TextView
+        android:id="@+id/emptyText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center"
+        android:text="当前没有识别到明显影响正常网络的规则"
+        android:textColor="@color/hf_text_secondary"
+        android:textSize="14sp"
+        android:visibility="gone" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/list"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="12dp"
+        android:layout_weight="1"
+        android:background="@drawable/bg_panel"
+        android:clipToPadding="false"
+        android:padding="8dp" />
+
+</LinearLayout>

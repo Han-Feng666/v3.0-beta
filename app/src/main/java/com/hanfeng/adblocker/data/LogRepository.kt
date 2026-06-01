@@ -22,7 +22,9 @@ import java.util.zip.ZipOutputStream
 object LogRepository {
     private const val LOG_DIR = "logs"
     private const val LOG_FILE = "adblock.log"
+    private const val LOG_EXPORT_FILE = "HanFeng-logs.zip"
     private const val LOG_CHANNEL_CAPACITY = 2048
+    private val legacyLogExportNames = setOf("hanfeng-adblock-logs.zip")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var logChannel = Channel<String>(capacity = LOG_CHANNEL_CAPACITY)
     private var writerJob: Job? = null
@@ -57,7 +59,6 @@ object LogRepository {
             droppedLogCount.incrementAndGet()
         }
         ensureWriterRunning()
-        ensureSnapshotExport(context.applicationContext)
     }
 
     private fun shouldDropNoisyLog(message: String): Boolean {
@@ -121,34 +122,22 @@ object LogRepository {
     fun exportZip(context: Context): android.net.Uri {
         val shareDir = File(context.cacheDir, "shared")
         shareDir.mkdirs()
-        val zipFile = File(shareDir, "hanfeng-adblock-logs.zip")
-        ZipOutputStream(FileOutputStream(zipFile)).use { zip ->
-            val entryFile = logFile(context)
-            if (entryFile.exists()) {
-                zip.putNextEntry(ZipEntry(entryFile.name))
-                zip.write(entryFile.readBytes())
-                zip.closeEntry()
-            }
-            val suspiciousDomainReport = RuleRepository.exportUnknownVendorSamples(context)
-            zip.putNextEntry(ZipEntry(String.format(Locale.US, "%s", "suspicious-domains.txt")))
-            zip.write(suspiciousDomainReport.toByteArray())
-            zip.closeEntry()
-        }
+        val zipFile = File(shareDir, LOG_EXPORT_FILE)
+        FileOutputStream(zipFile).use { output -> output.write(buildZipBytes(context)) }
         return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zipFile)
     }
 
-    private fun ensureSnapshotExport(context: Context) {
-        if (snapshotExportJob?.isActive == true) return
-        snapshotExportJob = scope.launch {
-            delay(180_000L)
-            runCatching {
-                append(context, "Auto log snapshot triggered after 180 seconds, overwrite previous file")
-                delay(300L)
-                val snapshot = buildLogSnapshot(context)
-                CertificateAuthorityManager.exportTextFileToDownloads(context, "日志文件.txt", snapshot)
-            }
-        }
+    fun exportZipToDownloads(context: Context): String? {
+        return CertificateAuthorityManager.exportBinaryFileToDownloads(
+            context = context,
+            fileName = LOG_EXPORT_FILE,
+            mimeType = "application/zip",
+            bytes = buildZipBytes(context),
+            cleanupFileNames = legacyLogExportNames
+        )
     }
+
+    private fun ensureSnapshotExport(context: Context) {}
 
     private fun buildLogSnapshot(context: Context): String {
         val logText = runCatching {
@@ -161,6 +150,24 @@ object LogRepository {
             append("\n\n")
         }
         return header + logText
+    }
+
+    private fun buildZipBytes(context: Context): ByteArray {
+        return java.io.ByteArrayOutputStream().use { byteStream ->
+            ZipOutputStream(byteStream).use { zip ->
+                val entryFile = logFile(context)
+                if (entryFile.exists()) {
+                    zip.putNextEntry(ZipEntry(entryFile.name))
+                    zip.write(entryFile.readBytes())
+                    zip.closeEntry()
+                }
+                val suspiciousDomainReport = RuleRepository.exportUnknownVendorSamples(context)
+                zip.putNextEntry(ZipEntry(String.format(Locale.US, "%s", "suspicious-domains.txt")))
+                zip.write(suspiciousDomainReport.toByteArray())
+                zip.closeEntry()
+            }
+            byteStream.toByteArray()
+        }
     }
 
     private fun logFile(context: Context): File = File(File(context.filesDir, LOG_DIR), LOG_FILE)

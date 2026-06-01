@@ -78,6 +78,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         }
     }
 
+    private val impactNormalNetworkLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            invalidateRuleListCache()
+            refreshList()
+        }
+    }
+
     private val adapter by lazy {
         RuleListAdapter(
             onGroupClick = { vendor -> toggleGroup(vendor) },
@@ -147,9 +154,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         binding.btnJoinGroup.setOnClickListener { openRemoteRuleSourcesPage() }
         binding.btnSuspiciousDomains.setOnClickListener { openSuspiciousDomainsPage() }
         binding.btnFilter.setOnClickListener { deduplicateRules() }
-        binding.btnRuleSources.setOnClickListener { showImpactNormalNetworkDialog() }
+        binding.btnRuleSources.setOnClickListener { openImpactNormalNetworkPage() }
         binding.btnSelectAll.setOnClickListener { selectAllVisible() }
-        binding.btnDeleteSelected.setOnClickListener { confirmDelete(selectedRulesById.values) }
+        binding.btnDeleteSelected.setOnClickListener { confirmDeleteSelectedRules() }
         binding.btnCancelSelection.setOnClickListener { exitSelection() }
         binding.inputSearch.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -326,7 +333,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     when (which) {
                         0 -> launchImportRulePicker()
                         1 -> openRemoteRuleSourcesPage()
-                        2 -> showImpactNormalNetworkDialog()
+                        2 -> openImpactNormalNetworkPage()
                     }
                 }
                 .show()
@@ -763,11 +770,15 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             }
             binding.selectionBar.isVisible = currentSelectionMode
             binding.selectionCount.text = if (filteredSelectionMode) {
-                "已筛出 ${selectedIds.size} 项，可取消勾选后点删除所选"
+                "已筛出 ${selectedIds.size} 项，可继续取消勾选后再删除"
             } else {
                 "已选择 ${selectedIds.size} 项"
             }
-            binding.btnDeleteSelected.text = if (filteredSelectionMode) "删除筛出项" else "删除所选"
+            binding.btnDeleteSelected.text = if (filteredSelectionMode) {
+                if (selectedIds.isEmpty()) "删除筛出项" else "删除筛出项（${selectedIds.size}）"
+            } else {
+                if (selectedIds.isEmpty()) "删除所选" else "删除所选（${selectedIds.size}）"
+            }
             adapter.submit(state.items)
         }
     }
@@ -782,11 +793,15 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         if (_binding == null) return
         binding.selectionBar.isVisible = selectionMode
         binding.selectionCount.text = if (filteredSelectionMode) {
-            "已筛出 ${selectedIds.size} 项，可取消勾选后点删除所选"
+            "已筛出 ${selectedIds.size} 项，可继续取消勾选后再删除"
         } else {
             "已选择 ${selectedIds.size} 项"
         }
-        binding.btnDeleteSelected.text = if (filteredSelectionMode) "删除筛出项" else "删除所选"
+        binding.btnDeleteSelected.text = if (filteredSelectionMode) {
+            if (selectedIds.isEmpty()) "删除筛出项" else "删除筛出项（${selectedIds.size}）"
+        } else {
+            if (selectedIds.isEmpty()) "删除所选" else "删除所选（${selectedIds.size}）"
+        }
     }
 
     private fun enterSelection(initialRules: Collection<BlockRule>) {
@@ -838,10 +853,53 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val snapshot = rules.distinctBy { it.id.ifBlank { it.domain } }
         if (snapshot.isEmpty()) return
         val dialogContext = safeDialogActivity() ?: return
+        val groupedBySource = snapshot.groupingBy { it.source.label }.eachCount().entries
+            .sortedByDescending { it.value }
+        val sourceSummary = groupedBySource.take(3).joinToString("，") { "${it.key} ${it.value} 条" }
+        val regexCount = snapshot.count { !it.regexPattern.isNullOrBlank() }
+        val cosmeticCount = snapshot.count { !it.cosmeticSelector.isNullOrBlank() }
+        val appScopedCount = snapshot.count { it.appPackages.isNotEmpty() }
+        val exceptionCount = snapshot.count { it.exceptionRule }
+        val preview = snapshot.take(8).joinToString("\n") { rule ->
+            val domain = rule.domain.ifBlank { "(未识别域名)" }
+            val tags = buildList {
+                add(rule.source.label)
+                if (rule.exceptionRule) add("例外")
+                if (!rule.regexPattern.isNullOrBlank()) add("正则")
+                if (!rule.cosmeticSelector.isNullOrBlank()) add("Cosmetic")
+                if (rule.appPackages.isNotEmpty()) add("App 定向")
+            }.joinToString("/")
+            "- $domain [$tags]"
+        }
+        val message = buildString {
+            append("将删除 ")
+            append(snapshot.size)
+            append(" 条规则，删除后会立即重载拦截规则。\n\n")
+            if (sourceSummary.isNotBlank()) {
+                append("来源分布：")
+                append(sourceSummary)
+                append("\n")
+            }
+            append("规则类型：")
+            append("普通 ")
+            append(snapshot.size - regexCount - cosmeticCount)
+            append(" 条")
+            if (regexCount > 0) append("，正则 $regexCount 条")
+            if (cosmeticCount > 0) append("，Cosmetic $cosmeticCount 条")
+            if (appScopedCount > 0) append("，App 定向 $appScopedCount 条")
+            if (exceptionCount > 0) append("，例外 $exceptionCount 条")
+            append("\n\n示例：\n")
+            append(preview)
+            if (snapshot.size > 8) {
+                append("\n其余 ")
+                append(snapshot.size - 8)
+                append(" 条已省略")
+            }
+        }
         try {
             createDialogBuilder(dialogContext)
                 .setTitle("确认删除")
-                .setMessage("确定删除这 ${snapshot.size} 条规则吗？删除后无法恢复。")
+                .setMessage(message)
                 .setPositiveButton("删除") { _, _ ->
                     val actionContext = context ?: return@setPositiveButton
                     val removedCount = RuleRepository.removeRules(actionContext, snapshot)
@@ -866,6 +924,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         }
     }
 
+    private fun confirmDeleteSelectedRules() {
+        confirmDelete(resolveSelectedRules())
+    }
+
+    private fun resolveSelectedRules(): List<BlockRule> {
+        val ctx = context ?: return emptyList()
+        if (selectedIds.isEmpty()) return emptyList()
+        val currentRules = getGroupedRules(ctx).values.flatten().map { it.rule }
+        return currentRules.filter { it.id in selectedIds }
+    }
+
     private fun deduplicateRules() {
         val actionContext = safeContext() ?: return
         try {
@@ -886,7 +955,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     }
 
     private fun filterNonAds() {
-        showImpactNormalNetworkDialog()
+        openImpactNormalNetworkPage()
+    }
+
+    private fun openImpactNormalNetworkPage() {
+        val host = activity as? MainActivity ?: return
+        impactNormalNetworkLauncher.launch(ImpactNormalNetworkActivity.createIntent(host))
     }
 
     private fun openSuspiciousDomainsPage() {
@@ -916,15 +990,26 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun showRuleActions(rule: BlockRule) {
         val dialogContext = safeDialogActivity() ?: return
+        val detail = buildString {
+            append("来源：")
+            append(rule.source.label)
+            append("\n厂商：")
+            append(rule.vendor)
+            if (rule.exceptionRule) append("\n类型：例外规则")
+            if (!rule.regexPattern.isNullOrBlank()) append("\n正则：${rule.regexPattern}")
+            if (!rule.keywordPattern.isNullOrBlank()) append("\n关键词：${rule.keywordPattern}")
+            if (!rule.pathPattern.isNullOrBlank()) append("\n路径：${rule.pathPattern}")
+            if (!rule.cosmeticSelector.isNullOrBlank()) append("\nCosmetic：${rule.cosmeticSelector}")
+            if (rule.appPackages.isNotEmpty()) append("\nApp 定向：${rule.appPackages.joinToString(", ")}")
+            if (rule.remoteSourceId != null) append("\n规则源 ID：${rule.remoteSourceId}")
+        }
         try {
             createDialogBuilder(dialogContext)
                 .setTitle(rule.domain)
-                .setItems(arrayOf("手动分类", "删除规则")) { _, which ->
-                    when (which) {
-                        0 -> showVendorPicker(rule)
-                        1 -> confirmDelete(listOf(rule))
-                    }
-                }
+                .setMessage(detail)
+                .setPositiveButton("手动分类") { _, _ -> showVendorPicker(rule) }
+                .setNeutralButton("删除规则") { _, _ -> confirmDelete(listOf(rule)) }
+                .setNegativeButton("关闭", null)
                 .show()
         } catch (e: Exception) {
             LogRepository.append(dialogContext, "Open rule action dialog failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
@@ -1040,74 +1125,6 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         return runCatching {
             contentResolver.openTypedAssetFileDescriptor(uri, mimeType, null)?.createInputStream()?.bufferedReader()?.use { it.readText() }
         }.getOrNull()
-    }
-
-    private fun showImpactNormalNetworkDialog() {
-        val ctx = safeDialogActivity() ?: return
-        viewLifecycleOwner.lifecycleScope.launch {
-            runCatching {
-                val candidates = withContext(Dispatchers.Default) {
-                    RuleRepository.getImpactNormalNetworkCandidates(ctx)
-                }
-                if (!isAdded || _binding == null) return@launch
-                if (candidates.isEmpty()) {
-                    Toast.makeText(ctx, "当前没有识别到明显影响正常网络的规则", Toast.LENGTH_SHORT).show()
-                    return@launch
-                }
-                val displayCandidates = candidates.take(180)
-                val selectedRules = linkedMapOf<String, BlockRule>().apply {
-                    displayCandidates.forEach { candidate ->
-                        put(candidate.rule.id, candidate.rule)
-                    }
-                }
-                val items = displayCandidates.map { candidate ->
-                    val domain = candidate.rule.domain.ifBlank { "(未识别域名)" }
-                    val reason = candidate.reasons.joinToString("；")
-                    "$domain\n$reason"
-                }.toTypedArray()
-                val checked = BooleanArray(displayCandidates.size) { true }
-                val title = if (candidates.size > displayCandidates.size) {
-                    "影响正常网络（仅显示前 ${displayCandidates.size} 条）"
-                } else {
-                    "影响正常网络"
-                }
-                createDialogBuilder(ctx)
-                    .setTitle(title)
-                    .setMultiChoiceItems(items, checked) { _, which, isChecked ->
-                        val rule = displayCandidates.getOrNull(which)?.rule ?: return@setMultiChoiceItems
-                        if (isChecked) {
-                            selectedRules[rule.id] = rule
-                        } else {
-                            selectedRules.remove(rule.id)
-                        }
-                    }
-                    .setPositiveButton("删除所选") { _, _ ->
-                        val actionContext = safeContext() ?: ctx
-                        if (selectedRules.isEmpty()) {
-                            Toast.makeText(actionContext, "请至少选择一条规则", Toast.LENGTH_SHORT).show()
-                            return@setPositiveButton
-                        }
-                        val removedCount = RuleRepository.removeRules(actionContext, selectedRules.values)
-                        LogRepository.append(actionContext, "Requested remove impact-network candidates=${selectedRules.size} actualRemoved=$removedCount")
-                        if (removedCount <= 0) {
-                            Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动兼容，请重试一次", Toast.LENGTH_SHORT).show()
-                            invalidateRuleListCache()
-                            refreshListSoon()
-                            return@setPositiveButton
-                        }
-                        Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
-                        invalidateRuleListCache()
-                        refreshListSoon()
-                        reloadVpnIfRunning(true)
-                    }
-                    .setNegativeButton("保留全部", null)
-                    .show()
-            }.onFailure {
-                val actionContext = safeContext() ?: return@onFailure
-                LogRepository.append(actionContext, "Open impact-normal-network dialog failed: ${it.message ?: it.javaClass.simpleName}\nStack: ${it.stackTraceToString()}")
-                Toast.makeText(actionContext, "影响正常网络页面打开失败，请重试", Toast.LENGTH_SHORT).show()
-            }
-        }
     }
 
     private suspend fun importAndAnalyzeRuleContent(uri: Uri, content: String) {
