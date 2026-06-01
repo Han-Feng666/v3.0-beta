@@ -19,6 +19,7 @@ import android.system.OsConstants
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import com.HanFeng.R
+import com.HanFeng.data.AppSettingsRepository
 import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.HttpsDecryptRouteRepository
 import com.HanFeng.data.HttpsMitmRepository
