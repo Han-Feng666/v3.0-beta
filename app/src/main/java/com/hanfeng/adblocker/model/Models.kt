@@ -27,6 +27,9 @@ data class BlockRule(
     val exceptionRule: Boolean = false,
     val removeParams: Set<String> = emptySet(),
     val removeParamRegexes: Set<String> = emptySet(),
+    val removeRequestHeaders: Set<String> = emptySet(),
+    val setRequestHeaders: Set<String> = emptySet(),
+    val replaceRules: Set<String> = emptySet(),
     val cspValue: String? = null,
     val redirectResource: String? = null,
     val remoteSourceId: String? = null

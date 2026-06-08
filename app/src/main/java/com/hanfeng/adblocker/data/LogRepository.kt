@@ -15,6 +15,7 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Locale
+import java.util.regex.Pattern
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -48,6 +49,9 @@ object LogRepository {
         "Accepted local HTTPS bridge client host=",
         "Connected local HTTPS bridge socket flow="
     )
+    private val blockedDomainPattern = Pattern.compile("Blocked [^\\n]* domain=([^\\s]+)")
+    private val passedDomainPattern = Pattern.compile("Passed [^\\n]* domain=([^\\s]+)")
+    private val appPattern = Pattern.compile(" app=([^\\n]+?)(?: vendor=| reason=| source=| route=| bypass=|$)")
 
     fun append(context: Context, message: String) {
         if (shouldDropNoisyLog(message)) return
@@ -137,6 +141,56 @@ object LogRepository {
         )
     }
 
+    fun getDomainDecisionEntries(context: Context): List<DomainDecisionEntry> {
+        val file = logFile(context)
+        if (!file.exists()) return emptyList()
+        val latestByKey = linkedMapOf<String, DomainDecisionEntry>()
+        try {
+            file.forEachLine { rawLine ->
+                val firstSpace = rawLine.indexOf(' ')
+                if (firstSpace <= 0) return@forEachLine
+                val timestamp = rawLine.substring(0, firstSpace).toLongOrNull() ?: return@forEachLine
+                val message = rawLine.substring(firstSpace + 1)
+                parseDomainDecision(timestamp, message)?.let { entry ->
+                    latestByKey["${entry.type}:${entry.domain}"] = entry
+                }
+            }
+        } catch (e: Exception) {
+            append(context, "getDomainDecisionEntries parse error: ${e.message ?: e.javaClass.simpleName}")
+        }
+        return latestByKey.values.sortedByDescending(DomainDecisionEntry::timestamp)
+    }
+
+    private fun parseDomainDecision(timestamp: Long, message: String): DomainDecisionEntry? {
+        val blockedMatcher = blockedDomainPattern.matcher(message)
+        if (blockedMatcher.find()) {
+            return DomainDecisionEntry(
+                timestamp = timestamp,
+                domain = blockedMatcher.group(1).orEmpty(),
+                type = DomainDecisionType.BLOCKED,
+                appName = extractAppName(message),
+                message = message
+            )
+        }
+        val passedMatcher = passedDomainPattern.matcher(message)
+        if (passedMatcher.find()) {
+            return DomainDecisionEntry(
+                timestamp = timestamp,
+                domain = passedMatcher.group(1).orEmpty(),
+                type = DomainDecisionType.ALLOWED,
+                appName = extractAppName(message),
+                message = message
+            )
+        }
+        return null
+    }
+
+    private fun extractAppName(message: String): String {
+        val matcher = appPattern.matcher(message)
+        if (!matcher.find()) return "未知应用"
+        return matcher.group(1).orEmpty().trim().ifBlank { "未知应用" }
+    }
+
     private fun ensureSnapshotExport(context: Context) {}
 
     private fun buildLogSnapshot(context: Context): String {
@@ -171,4 +225,29 @@ object LogRepository {
     }
 
     private fun logFile(context: Context): File = File(File(context.filesDir, LOG_DIR), LOG_FILE)
+
+    enum class DomainDecisionType {
+        BLOCKED,
+        ALLOWED
+    }
+
+    data class DomainDecisionEntry(
+        val timestamp: Long,
+        val domain: String,
+        val type: DomainDecisionType,
+        val appName: String,
+        val message: String
+    )
+
+    fun toggleDomainDecision(context: Context, domain: String, currentType: DomainDecisionType) {
+        val newType = if (currentType == DomainDecisionType.BLOCKED) DomainDecisionType.ALLOWED else DomainDecisionType.BLOCKED
+        val timestamp = System.currentTimeMillis()
+        val message = if (newType == DomainDecisionType.BLOCKED) {
+            "Blocked request host=$domain via manual-toggle app=user"
+        } else {
+            "Passed request host=$domain via manual-toggle app=user"
+        }
+        append(context, "[DecisionToggle] 域名 $domain 已从 ${if (currentType == DomainDecisionType.BLOCKED) "拦截" else "放行"} 切换为 ${if (newType == DomainDecisionType.BLOCKED) "拦截" else "放行"}")
+        append(context, message)
+    }
 }

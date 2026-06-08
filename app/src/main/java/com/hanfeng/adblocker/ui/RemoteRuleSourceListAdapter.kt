@@ -55,10 +55,34 @@ class RemoteRuleSourceListAdapter(
                 }
             }
             toggle.text = if (item.enabled) "停用" else "启用"
-            toggle.setOnClickListener { onToggle(item) }
-            sync.setOnClickListener { onSync(item) }
-            edit.setOnClickListener { onEdit(item) }
-            delete.setOnClickListener { onDelete(item) }
+            toggle.setOnClickListener { 
+                try {
+                    onToggle(item)
+                } catch (e: Exception) {
+                    android.widget.Toast.makeText(itemView.context, "操作失败：${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+            sync.setOnClickListener { 
+                try {
+                    onSync(item)
+                } catch (e: Exception) {
+                    android.widget.Toast.makeText(itemView.context, "同步失败：${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+            edit.setOnClickListener { 
+                try {
+                    onEdit(item)
+                } catch (e: Exception) {
+                    android.widget.Toast.makeText(itemView.context, "编辑失败：${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+            delete.setOnClickListener { 
+                try {
+                    onDelete(item)
+                } catch (e: Exception) {
+                    android.widget.Toast.makeText(itemView.context, "删除失败：${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 

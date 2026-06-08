@@ -2,8 +2,8 @@ package com.HanFeng.ui
 
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.view.KeyEvent
@@ -20,6 +20,7 @@ import android.app.Activity
 import android.content.ContentResolver
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
+import com.HanFeng.core.network.NetworkKernel
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
 import androidx.core.view.ViewCompat
@@ -37,8 +38,8 @@ import com.HanFeng.databinding.ItemRuleDomainBinding
 import com.HanFeng.model.BlockRule
 import com.HanFeng.model.RemoteRuleSourceConfig
 import com.HanFeng.model.RuleListItem
+import com.HanFeng.ui.SuspiciousDomainsActivity
 import com.HanFeng.model.RuleSource
-import com.HanFeng.service.AdBlockVpnService
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -67,6 +68,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private var cachedGroupedRules = linkedMapOf<String, List<CachedRuleEntry>>()
     private val selectedRulesById = linkedMapOf<String, BlockRule>()
     private val remoteTimeFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+
+    private fun showShortToast(message: String) {
+        context?.let { Toast.makeText(it, message, Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun String.lineCount(): Int = this.lineSequence().count()
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) importRuleFile(uri)
@@ -132,7 +139,8 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             )
             insets
         }
-        binding.ruleList.layoutManager = LinearLayoutManager(requireContext())
+        val context = context ?: return
+        binding.ruleList.layoutManager = LinearLayoutManager(context)
         binding.ruleList.adapter = adapter
         binding.ruleList.setHasFixedSize(true)
         binding.ruleList.itemAnimator = null
@@ -149,14 +157,14 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         }
         binding.btnPasteRule.setOnClickListener { pasteRuleInput() }
         binding.btnClearInput.setOnClickListener { clearRuleInput() }
-        binding.btnRuleActions.setOnClickListener { showRuleActionPanel() }
-        binding.btnTrafficCard.setOnClickListener { mainActivity?.openTrafficCardPage() }
+        binding.btnRuleActions.setOnClickListener { launchImportRulePicker() }
+        binding.btnDecisionDomains.setOnClickListener { openDecisionDomainsPage() }
         binding.btnJoinGroup.setOnClickListener { openRemoteRuleSourcesPage() }
         binding.btnSuspiciousDomains.setOnClickListener { openSuspiciousDomainsPage() }
         binding.btnFilter.setOnClickListener { deduplicateRules() }
         binding.btnRuleSources.setOnClickListener { openImpactNormalNetworkPage() }
         binding.btnSelectAll.setOnClickListener { selectAllVisible() }
-        binding.btnDeleteSelected.setOnClickListener { confirmDeleteSelectedRules() }
+        binding.btnDeleteSelected.setOnClickListener { deleteSelectedRulesDirectly() }
         binding.btnCancelSelection.setOnClickListener { exitSelection() }
         binding.inputSearch.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -175,6 +183,15 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun refreshListDelayed() {
         refreshListSoon(200L)
+    }
+
+    private fun openDecisionDomainsPage() {
+        val ctx = context ?: return
+        runCatching {
+            startActivity(DecisionDomainsActivity.createIntent(ctx))
+        }.onFailure {
+            Toast.makeText(ctx, "打开拦截与放行失败", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun refreshListSoon(delayMillis: Long = 60L) {
@@ -250,7 +267,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val ctx = safeContext() ?: return
         val rawInput = binding.inputRule.text?.toString().orEmpty()
         if (rawInput.isBlank()) {
-            Toast.makeText(ctx, "请先输入或粘贴域名/规则内容", Toast.LENGTH_SHORT).show()
+            showShortToast("请先输入或粘贴域名/规则内容")
+            return
+        }
+        val looksLikeRuleBatch = rawInput.contains('\n') ||
+            rawInput.contains("||") ||
+            rawInput.contains("@@") ||
+            rawInput.contains("^") ||
+            rawInput.contains("/") ||
+            rawInput.contains("$")
+        if (looksLikeRuleBatch) {
+            importManualRuleBatch(ctx, rawInput)
             return
         }
         val whitelistConflicts = RuleRepository.findWhitelistConflictsInManualInput(rawInput)
@@ -274,14 +301,53 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         handleManualRuleAddResult(ctx, added)
     }
 
+    private fun importManualRuleBatch(ctx: Context, rawInput: String) {
+        val report = RuleRepository.analyzeImportContent(ctx, rawInput)
+        if (report.safeRuleCount <= 0) {
+            showShortToast("未识别到可导入规则，建议改用导入规则按钮选择文件")
+            return
+        }
+        if (report.whitelistConflictRules > 0) {
+            showWhitelistConflictDialog(
+                title = "发现疑似白名单规则",
+                domains = report.sampleWhitelistConflictLines,
+                onContinue = {
+                    val imported = RuleRepository.importRules(ctx, rawInput, RuleSource.MANUAL, allowWhitelistDomains = true)
+                    handleManualRuleBatchImportResult(ctx, imported)
+                },
+                onDeleteWhitelistAndContinue = {
+                    val sanitizedInput = RuleRepository.removeWhitelistConflictLines(rawInput)
+                    val imported = RuleRepository.importRules(ctx, sanitizedInput, RuleSource.MANUAL)
+                    handleManualRuleBatchImportResult(ctx, imported)
+                }
+            )
+            return
+        }
+        val imported = RuleRepository.importRules(ctx, rawInput, RuleSource.MANUAL)
+        handleManualRuleBatchImportResult(ctx, imported)
+    }
+
+    private fun handleManualRuleBatchImportResult(ctx: Context, imported: Int) {
+        if (imported <= 0) {
+            showShortToast("未识别到可导入规则，或规则已存在")
+            return
+        }
+        binding.inputRule.setText("")
+        LogRepository.append(ctx, "Imported $imported manual batch rules")
+        showShortToast("已导入 $imported 条规则")
+        invalidateRuleListCache()
+        refreshListSoon()
+        reloadVpnIfRunning(true)
+    }
+
     private fun handleManualRuleAddResult(ctx: Context, added: List<BlockRule>) {
         if (added.isEmpty()) {
-            Toast.makeText(ctx, "未识别到可添加的有效域名，或规则已存在", Toast.LENGTH_SHORT).show()
+            showShortToast("未识别到可添加的有效域名，或规则已存在")
             return
         }
         binding.inputRule.setText("")
         LogRepository.append(ctx, "Added ${added.size} manual rules")
-        Toast.makeText(ctx, "已添加 ${added.size} 条规则", Toast.LENGTH_SHORT).show()
+        showShortToast("已添加 ${added.size} 条规则")
         invalidateRuleListCache()
         refreshListSoon()
         reloadVpnIfRunning(true)
@@ -289,27 +355,31 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun pasteRuleInput() {
         val ctx = safeContext() ?: return
-        val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        if (clipboard == null) {
+            showShortToast("系统剪贴板当前不可用")
+            return
+        }
         val text = clipboard.primaryClip?.let(::coerceClipText).orEmpty().trim()
         if (text.isBlank()) {
-            Toast.makeText(ctx, "剪贴板里没有可用内容", Toast.LENGTH_SHORT).show()
+            showShortToast("剪贴板里没有可用内容")
             return
         }
         val current = binding.inputRule.text?.toString().orEmpty().trim()
         val merged = if (current.isBlank()) text else "$current\n$text"
         binding.inputRule.setText(merged)
         binding.inputRule.setSelection(merged.length)
-        Toast.makeText(ctx, "已粘贴到输入框", Toast.LENGTH_SHORT).show()
+        showShortToast("已粘贴到输入框")
     }
 
     private fun clearRuleInput() {
         val ctx = safeContext() ?: return
         if (binding.inputRule.text.isNullOrBlank()) {
-            Toast.makeText(ctx, "输入框已经是空的", Toast.LENGTH_SHORT).show()
+            showShortToast("输入框已经是空的")
             return
         }
         binding.inputRule.setText("")
-        Toast.makeText(ctx, "已清空输入内容", Toast.LENGTH_SHORT).show()
+        showShortToast("已清空输入内容")
     }
 
     private fun coerceClipText(clipData: ClipData): String? {
@@ -329,14 +399,15 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         runCatching {
             createDialogBuilder(dialogContext)
                 .setTitle("规则工具")
-                .setItems(arrayOf("导入本地规则", "规则源管理", "影响正常网络")) { _, which ->
+                .setItems(arrayOf("导入本地规则", "规则源管理", "影响正常网络", "删除所有规则")) { _, which ->
                     when (which) {
                         0 -> launchImportRulePicker()
                         1 -> openRemoteRuleSourcesPage()
                         2 -> openImpactNormalNetworkPage()
+                        3 -> confirmDeleteAllRules()
                     }
                 }
-                .show()
+                .showSafely(dialogContext, "Show rule tools dialog failed")
         }.onFailure {
             val ctx = safeContext() ?: return@onFailure
             LogRepository.append(ctx, "Open rule tool panel failed: ${it.message ?: it.javaClass.simpleName}")
@@ -350,14 +421,19 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             importLauncher.launch(arrayOf("text/*", "application/octet-stream", "application/x-yaml", "application/yaml"))
         } catch (e: Exception) {
             val ctx = safeContext() ?: return
-            LogRepository.append(ctx, "Launch import picker failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
-            Toast.makeText(ctx, "无法打开文件选择器：${e.message}", Toast.LENGTH_SHORT).show()
+            LogRepository.append(ctx, "Launch import picker failed: ${e.message ?: e.javaClass.simpleName}")
+            showShortToast("无法打开文件选择器")
         }
     }
 
     private fun openRemoteRuleSourcesPage() {
         val ctx = safeContext() ?: return
-        startActivity(Intent(ctx, RemoteRuleSourcesActivity::class.java))
+        runCatching {
+            startActivity(Intent(ctx, RemoteRuleSourcesActivity::class.java))
+        }.onFailure {
+            LogRepository.append(ctx, "Open remote rule sources page failed: ${it.message ?: it.javaClass.simpleName}")
+            showShortToast("打开规则源页面失败")
+        }
     }
 
     private fun showRemoteRuleSourcesDialog() {
@@ -384,8 +460,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     sources.getOrNull(which)?.let(::showRemoteRuleSourceActions)
                 }
             }
-            val dialog = builder.show()
-            styleDialogButtons(dialog)
+            builder.showSafely(dialogContext, "Show remote rule sources dialog failed")?.let(::styleDialogButtons)
         }.onFailure {
             val ctx = safeContext() ?: return@onFailure
             LogRepository.append(ctx, "Open remote rule source dialog failed: ${it.message ?: it.javaClass.simpleName}\nStack: ${it.stackTraceToString()}")
@@ -417,11 +492,11 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     sources.getOrNull(which)?.let(::showRemoteRuleSourceActions)
                 }
             }
-            builder.show()
+            builder.showSafely(dialogContext, "Show remote rule sources fallback dialog failed")
         }.onFailure {
             val ctx = safeContext() ?: return@onFailure
-            LogRepository.append(ctx, "Open remote rule source dialog fallback failed: ${it.message ?: it.javaClass.simpleName}\nStack: ${it.stackTraceToString()}")
-            Toast.makeText(ctx, "规则源页面打开失败，请重启后重试", Toast.LENGTH_SHORT).show()
+            LogRepository.append(ctx, "Open remote rule source dialog fallback failed: ${it.message ?: it.javaClass.simpleName}")
+            showShortToast("规则源页面打开失败，请重启后重试")
         }
     }
 
@@ -476,8 +551,10 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     }
                 }
                 .setNegativeButton("关闭", null)
-                .show()
-            styleDialogButtons(dialog)
+                .showSafely(dialogContext, "Show remote rule source actions dialog failed")
+            if (dialog != null) {
+                styleDialogButtons(dialog)
+            }
         }.onFailure {
             val ctx = safeContext() ?: return@onFailure
             LogRepository.append(ctx, "Open remote rule source action dialog failed: ${it.message ?: it.javaClass.simpleName}\nStack: ${it.stackTraceToString()}")
@@ -505,7 +582,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 }
             }
             .setNegativeButton("取消", null)
-            .show()
+            .showSafely(dialogContext, "Show add remote rule source name dialog failed")
     }
 
     private fun showAddRemoteRuleSourceUrlDialog(name: String) {
@@ -537,7 +614,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 }
             }
             .setNegativeButton("取消", null)
-            .show()
+            .showSafely(dialogContext, "Show add remote rule source url dialog failed")
     }
 
     private fun addRemoteRuleSource(name: String, url: String) {
@@ -583,8 +660,23 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     RemoteRuleSourceRepository.syncEnabledSources(appContext, whitelistImportMode)
                 } else {
                     val source = RuleRepository.getRemoteRuleSources(appContext).firstOrNull { it.id == sourceId }
-                        ?: throw IllegalStateException("规则源不存在")
-                    listOf(RemoteRuleSourceRepository.syncSource(appContext, source, whitelistImportMode))
+                    if (source == null) {
+                        listOf(
+                            RemoteRuleSourceRepository.RemoteRuleSyncResult(
+                                source = RemoteRuleSourceConfig(
+                                    id = sourceId,
+                                    name = "未知规则源",
+                                    url = "",
+                                    enabled = false
+                                ),
+                                success = false,
+                                addedCount = 0,
+                                errorMessage = "规则源不存在，列表可能已经更新"
+                            )
+                        )
+                    } else {
+                        listOf(RemoteRuleSourceRepository.syncSource(appContext, source, whitelistImportMode))
+                    }
                 }
                 results
             }.onSuccess { results ->
@@ -666,7 +758,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 syncRemoteRuleSources(sourceId, manual, justAdded, RemoteRuleSourceRepository.WhitelistImportMode.REMOVE_CONFLICTS)
             }
             .setNegativeButton("取消", null)
-            .show()
+            .showSafely(dialogContext, "Show remote source whitelist conflict dialog failed")
     }
 
     private fun formatRemoteSourceSummary(source: RemoteRuleSourceConfig): String {
@@ -785,8 +877,8 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun reloadVpnIfRunning(shouldReload: Boolean) {
         val ctx = context ?: return
-        if (!shouldReload || !AdBlockVpnService.isRunning) return
-        ctx.startService(Intent(ctx, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+        if (!shouldReload) return
+        NetworkKernel.reloadIfRunning(ctx)
     }
 
     private fun updateSelectionUi() {
@@ -902,7 +994,11 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 .setMessage(message)
                 .setPositiveButton("删除") { _, _ ->
                     val actionContext = context ?: return@setPositiveButton
-                    val removedCount = RuleRepository.removeRules(actionContext, snapshot)
+                    val selectedIdsSnapshot = snapshot.asSequence()
+                        .map { it.id.trim() }
+                        .filter { it.isNotEmpty() }
+                        .toSet()
+                    val removedCount = RuleRepository.removeRules(actionContext, selectedIdsSnapshot, snapshot)
                     LogRepository.append(actionContext, "Requested remove=${snapshot.size} actualRemoved=$removedCount")
                     if (removedCount <= 0) {
                         Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
@@ -917,7 +1013,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     reloadVpnIfRunning(true)
                 }
                 .setNegativeButton("取消", null)
-                .show()
+                .showSafely(dialogContext, "Show rule delete confirmation dialog failed")
         } catch (e: Exception) {
             LogRepository.append(dialogContext, "Delete dialog failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
             Toast.makeText(dialogContext, "打开删除确认失败：${e.message}", Toast.LENGTH_LONG).show()
@@ -926,6 +1022,117 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun confirmDeleteSelectedRules() {
         confirmDelete(resolveSelectedRules())
+    }
+
+    private fun confirmDeleteAllRules() {
+        val ctx = context ?: return
+        val allRules = RuleRepository.getRules(ctx)
+        if (allRules.isEmpty()) {
+            Toast.makeText(ctx, "当前没有规则可删除", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val dialogContext = safeDialogActivity() ?: return
+        val sourceSummary = allRules.groupingBy { it.source.label }.eachCount().entries
+            .sortedByDescending { it.value }
+            .take(5)
+            .joinToString("，") { "${it.key} ${it.value} 条" }
+        val regexCount = allRules.count { !it.regexPattern.isNullOrBlank() }
+        val cosmeticCount = allRules.count { !it.cosmeticSelector.isNullOrBlank() }
+        val appScopedCount = allRules.count { it.appPackages.isNotEmpty() }
+        val exceptionCount = allRules.count { it.exceptionRule }
+        val preview = allRules.take(8).joinToString("\n") { rule ->
+            val domain = rule.domain.ifBlank { "(未识别域名)" }
+            val tags = buildList {
+                add(rule.source.label)
+                if (rule.exceptionRule) add("例外")
+                if (!rule.regexPattern.isNullOrBlank()) add("正则")
+                if (!rule.cosmeticSelector.isNullOrBlank()) add("Cosmetic")
+                if (rule.appPackages.isNotEmpty()) add("App 定向")
+            }.joinToString("/")
+            "- $domain [$tags]"
+        }
+        val message = buildString {
+            append("将删除全部 ")
+            append(allRules.size)
+            append(" 条规则，删除后无法恢复，请谨慎操作。\n\n")
+            if (sourceSummary.isNotBlank()) {
+                append("来源分布：")
+                append(sourceSummary)
+                append("\n")
+            }
+            append("规则类型：")
+            append("普通 ")
+            append(allRules.size - regexCount - cosmeticCount)
+            append(" 条")
+            if (regexCount > 0) append("，正则 $regexCount 条")
+            if (cosmeticCount > 0) append("，Cosmetic $cosmeticCount 条")
+            if (appScopedCount > 0) append("，App 定向 $appScopedCount 条")
+            if (exceptionCount > 0) append("，例外 $exceptionCount 条")
+            append("\n\n示例：\n")
+            append(preview)
+            if (allRules.size > 8) {
+                append("\n其余 ")
+                append(allRules.size - 8)
+                append(" 条已省略")
+            }
+            append("\n\n警告：此操作会清空所有规则，包括手动添加的规则和导入的规则。")
+        }
+        try {
+            createDialogBuilder(dialogContext)
+                .setTitle("确认删除所有规则")
+                .setMessage(message)
+                .setPositiveButton("删除全部") { _, _ ->
+                    val actionContext = context ?: return@setPositiveButton
+                    lifecycleScope.launch {
+                        val removedCount = withContext(Dispatchers.Default) {
+                            RuleRepository.removeAllRules(actionContext)
+                        }
+                        LogRepository.append(actionContext, "Requested removeAll actualRemoved=$removedCount")
+                        if (removedCount <= 0) {
+                            Toast.makeText(actionContext, "未删除任何规则，请重试一次", Toast.LENGTH_SHORT).show()
+                            invalidateRuleListCache()
+                            refreshListSoon()
+                            return@launch
+                        }
+                        Toast.makeText(actionContext, "已删除全部 $removedCount 条规则", Toast.LENGTH_LONG).show()
+                        invalidateRuleListCache()
+                        exitSelection()
+                        refreshListSoon()
+                        reloadVpnIfRunning(true)
+                    }
+                }
+                .setNegativeButton("取消", null)
+                .showSafely(dialogContext, "Show delete all rules confirmation dialog failed")
+        } catch (e: Exception) {
+            LogRepository.append(dialogContext, "Delete all dialog failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
+            Toast.makeText(dialogContext, "打开删除确认失败：${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun deleteSelectedRulesDirectly() {
+        val actionContext = context ?: return
+        val snapshot = resolveSelectedRules().distinctBy { it.id.ifBlank { it.domain } }
+        if (snapshot.isEmpty()) {
+            Toast.makeText(actionContext, "请至少选择一条规则", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val selectedIdsSnapshot = snapshot.asSequence()
+            .map { it.id.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        val removedCount = RuleRepository.removeRules(actionContext, selectedIdsSnapshot, snapshot)
+        LogRepository.append(actionContext, "Requested direct remove=${snapshot.size} actualRemoved=$removedCount")
+        if (removedCount <= 0) {
+            Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
+            invalidateRuleListCache()
+            refreshListSoon()
+            return
+        }
+        Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
+        invalidateRuleListCache()
+        exitSelection()
+        refreshListSoon()
+        reloadVpnIfRunning(true)
     }
 
     private fun resolveSelectedRules(): List<BlockRule> {
@@ -966,7 +1173,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun openImpactNormalNetworkPage() {
         val host = activity as? MainActivity ?: return
-        impactNormalNetworkLauncher.launch(ImpactNormalNetworkActivity.createIntent(host))
+        runCatching {
+            impactNormalNetworkLauncher.launch(ImpactNormalNetworkActivity.createIntent(host))
+        }.onFailure {
+            LogRepository.append(host, "Open impact normal network page failed: ${it.message ?: it.javaClass.simpleName}")
+            Toast.makeText(host, "打开影响正常网络页面失败", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun openSuspiciousDomainsPage() {
@@ -983,7 +1195,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     Toast.makeText(currentHost, "当前没有需要分析的疑似广告域名", Toast.LENGTH_SHORT).show()
                     return@onSuccess
                 }
-                suspiciousDomainsLauncher.launch(SuspiciousDomainsActivity.createIntent(currentHost))
+                runCatching {
+                    suspiciousDomainsLauncher.launch(SuspiciousDomainsActivity.createIntent(currentHost))
+                }.onFailure {
+                    LogRepository.append(currentHost, "Launch suspicious domains page failed: ${it.message ?: it.javaClass.simpleName}")
+                    Toast.makeText(currentHost, "打开分析页面失败", Toast.LENGTH_SHORT).show()
+                }
             }.onFailure {
                 val currentHost = activity as? MainActivity ?: host
                 LogRepository.append(currentHost, "Open suspicious domains page failed: ${it.message ?: it.javaClass.simpleName}\nStack: ${it.stackTraceToString()}")
@@ -1016,7 +1233,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 .setPositiveButton("手动分类") { _, _ -> showVendorPicker(rule) }
                 .setNeutralButton("删除规则") { _, _ -> confirmDelete(listOf(rule)) }
                 .setNegativeButton("关闭", null)
-                .show()
+                .showSafely(dialogContext, "Show rule actions dialog failed")
         } catch (e: Exception) {
             LogRepository.append(dialogContext, "Open rule action dialog failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
             Toast.makeText(dialogContext, "打开规则操作失败：${e.message}", Toast.LENGTH_LONG).show()
@@ -1038,7 +1255,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         refreshList()
                     }
                 }
-                .show()
+                .showSafely(dialogContext, "Show vendor picker dialog failed")
         }.onFailure {
             LogRepository.append(dialogContext, "Open vendor picker failed: ${it.message ?: it.javaClass.simpleName}")
             Toast.makeText(dialogContext, "打开分组选择失败", Toast.LENGTH_SHORT).show()
@@ -1055,12 +1272,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             setHintTextColor(ContextCompat.getColor(dialogContext, R.color.hf_text_secondary))
             setPadding(24, 20, 24, 20)
         }
-        val dialog = createDialogBuilder(dialogContext)
-            .setTitle("新建分组")
-            .setView(input)
-            .setPositiveButton("保存", null)
-            .setNegativeButton("取消", null)
-            .create()
+            val dialog = createDialogBuilder(dialogContext)
+                .setTitle("新建分组")
+                .setView(input)
+                .setPositiveButton("保存", null)
+                .setNegativeButton("取消", null)
+                .create()
         dialog.setOnShowListener {
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val vendor = input.text?.toString().orEmpty().trim()
@@ -1075,8 +1292,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             }
         }
         runCatching {
-            dialog.show()
-            styleDialogButtons(dialog)
+            dialog.showSafely(dialogContext, "Show create vendor dialog failed")?.let(::styleDialogButtons)
         }.onFailure {
             LogRepository.append(dialogContext, "Open create vendor dialog failed: ${it.message ?: it.javaClass.simpleName}")
             Toast.makeText(dialogContext, "打开新建分组失败", Toast.LENGTH_SHORT).show()
@@ -1086,21 +1302,24 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private fun importRuleFile(uri: Uri) {
         val ctx = safeContext() ?: return
         val appContext = ctx.applicationContext
+        LogRepository.append(appContext, "Import rule file requested: uri=$uri")
         viewLifecycleOwner.lifecycleScope.launch {
             runCatching {
                 val content = readRuleContent(appContext, uri)
                 if (content == null) {
+                    LogRepository.append(appContext, "Import rule file failed: unable to read content from URI")
                     safeContext()?.let {
-                        Toast.makeText(it, "读取规则文件失败", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(it, "读取规则文件失败：无法从选择的文件读取内容", Toast.LENGTH_LONG).show()
                     }
                     return@launch
                 }
+                LogRepository.append(appContext, "Import rule file succeeded: content length=${content.length}")
                 importAndAnalyzeRuleContent(uri, content)
-            }.onFailure {
-                LogRepository.append(appContext, "Import rule file failed: ${it.message ?: it.javaClass.simpleName}")
+            }.onFailure { e ->
+                LogRepository.append(appContext, "Import rule file failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
                 if (isAdded) {
-                    safeContext()?.let {
-                        Toast.makeText(it, "导入规则失败", Toast.LENGTH_SHORT).show()
+                    safeContext()?.let { ctx ->
+                        Toast.makeText(ctx, "导入规则失败：${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
                     }
                 }
             }
@@ -1109,21 +1328,53 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private suspend fun readRuleContent(context: android.content.Context, uri: Uri): String? {
         return withContext(Dispatchers.IO) {
+            LogRepository.append(context, "Reading rule content from URI: $uri")
             runCatching {
                 context.contentResolver.takePersistableUriPermission(
                     uri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
+                LogRepository.append(context, "Persistable URI permission granted")
+            }.onFailure {
+                LogRepository.append(context, "Failed to take persistable URI permission: ${it.message ?: it.javaClass.simpleName}")
             }
             val contentResolver = context.contentResolver
             val candidates = listOfNotNull(
                 runCatching {
-                    contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                }.getOrNull(),
-                readRuleContentFromTypedAsset(contentResolver, uri, "text/plain"),
-                readRuleContentFromTypedAsset(contentResolver, uri, "*/*")
+                    contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.also { content ->
+                        LogRepository.append(context, "Read content via openInputStream: length=${content?.length ?: 0}")
+                    }
+                }.getOrNull().also { result ->
+                    if (result != null) {
+                        LogRepository.append(context, "Successfully read content via openInputStream")
+                    }
+                },
+                runCatching {
+                    readRuleContentFromTypedAsset(contentResolver, uri, "text/plain").also { content ->
+                        LogRepository.append(context, "Read content via typedAsset text/plain: length=${content?.length ?: 0}")
+                    }
+                }.getOrNull().also { result ->
+                    if (result != null) {
+                        LogRepository.append(context, "Successfully read content via typedAsset text/plain")
+                    }
+                },
+                runCatching {
+                    readRuleContentFromTypedAsset(contentResolver, uri, "*/*").also { content ->
+                        LogRepository.append(context, "Read content via typedAsset */*: length=${content?.length ?: 0}")
+                    }
+                }.getOrNull().also { result ->
+                    if (result != null) {
+                        LogRepository.append(context, "Successfully read content via typedAsset */*")
+                    }
+                }
             )
-            candidates.firstOrNull { it.isNotBlank() }
+            val result = candidates.firstOrNull { it.isNotBlank() }
+            if (result == null && candidates.isNotEmpty()) {
+                LogRepository.append(context, "All read methods returned blank content")
+            } else if (result == null) {
+                LogRepository.append(context, "All read methods failed or returned null")
+            }
+            return@withContext result
         }
     }
 
@@ -1139,9 +1390,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private suspend fun importAndAnalyzeRuleContent(sourceLabel: String, sourceUri: Uri, content: String) {
         val appContext = context?.applicationContext ?: return
+        LogRepository.append(appContext, "Starting import analysis: content length=${content.length}, lines=${content.lineCount()}")
+        
+        if (!isAdded || _binding == null) return
+        Toast.makeText(context, "正在分析规则文件 (${content.length / 1024}KB)...", Toast.LENGTH_SHORT).show()
+        
         val report = withContext(Dispatchers.Default) {
             RuleRepository.analyzeImportContent(appContext, content)
         }
+        
+        LogRepository.append(appContext, "Analysis complete: totalLines=${report.totalLines}, safeRules=${report.safeRuleCount}, whitelistConflicts=${report.whitelistConflictRules}")
+        
         if (report.safeRuleCount <= 0) {
             if (!isAdded || _binding == null) return
             context?.let {
@@ -1149,6 +1408,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             }
             return
         }
+        
         if (report.whitelistConflictRules > 0) {
             if (!isAdded || _binding == null) return
             val host = safeDialogActivity() ?: return
@@ -1169,7 +1429,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         refreshListSoon()
                         reloadVpnIfRunning(true)
                         context?.let {
-                            Toast.makeText(it, "规则已导入，正在展示分析结果", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(it, "规则已导入 (${report.safeRuleCount}条)，正在展示分析结果", Toast.LENGTH_LONG).show()
                         }
                         openImportAnalysisPage(inventory, report, sourceLabel, sourceUri)
                     }
@@ -1194,7 +1454,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         refreshListSoon()
                         reloadVpnIfRunning(true)
                         context?.let {
-                            Toast.makeText(it, "已删除白名单候选，其余规则已导入", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(it, "已删除白名单候选，其余规则已导入", Toast.LENGTH_LONG).show()
                         }
                         openImportAnalysisPage(inventory, sanitizedReport, sourceLabel, sourceUri)
                     }
@@ -1203,19 +1463,23 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             )
             return
         }
+        
+        LogRepository.append(appContext, "Starting rule import: safeRules=${report.safeRuleCount}")
         withContext(Dispatchers.Default) {
             RuleRepository.importRules(appContext, content)
         }
+        LogRepository.append(appContext, "Rule import complete")
+        
         val inventory = withContext(Dispatchers.Default) {
             RuleRepository.getRuleInventory(appContext)
         }
         if (!isAdded || _binding == null) return
-        LogRepository.append(appContext, "Imported rules from $sourceLabel")
+        LogRepository.append(appContext, "Import successful: totalRules=${inventory.totalSupportedCount}")
         invalidateRuleListCache()
         refreshListSoon()
         reloadVpnIfRunning(true)
         context?.let {
-            Toast.makeText(it, "规则已导入，正在展示分析结果", Toast.LENGTH_SHORT).show()
+            Toast.makeText(it, "规则已导入 (${report.safeRuleCount}条)，正在展示分析结果", Toast.LENGTH_LONG).show()
         }
         openImportAnalysisPage(inventory, report, sourceLabel, sourceUri)
     }
@@ -1292,10 +1556,34 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             append("- 正则规则：${report.regexRules}\n")
             append("- 空行/注释：${report.blankOrCommentLines}\n")
             append("- 无法识别：${report.invalidRules}")
-            append("\n\n说明：\n")
-            append("1. 当前稳定支持：纯域名、Hosts、dnsmasq/SmartDNS/OpenWrt 域名规则、AdGuard/ABP 域名型规则、IP-CIDR、IP-CIDR6、携带 dst-port/src-port 的 IP 规则、域名加端口规则、*:41826\$network 这类端口专用规则。\n")
-            append("2. 当前增强支持：URL-KEYWORD、URL-REGEX、path=、部分 regex、部分请求上下文规则、部分应用上下文规则、部分 cosmetic 规则。此类规则通常依赖 MITM 增强过滤。\n")
-            append("3. 当前会跳过或部分跳过：复杂脚本、完整浏览器语义规则、远程脚本、复杂逻辑组合和无法安全降级的高级代理规则。")
+            append("\n\n支持的规则类型（24+ 种格式）：\n")
+            append("1. 纯域名：example.com\n")
+            append("2. Hosts: 0.0.0.0 ads.com / 127.0.0.1 tracker.com\n")
+            append("3. dnsmasq: address=/domain.com/0.0.0.0\n")
+            append("4. SmartDNS: address /domain.com/0.0.0.0 / ipset=/domain.com/adblock\n")
+            append("5. AdGuard/ABP: ||domain^ / ||domain^\$modifier / @@||whitelist^\n")
+            append("6. ABP 修饰符 (30+ 种): third-party/3p, first-party/1p, domain=, path=, removeparam=, csp=, redirect=, denyallow=, cookie=, header=, removeheader=, replace=, app=, dnstype=, urlblock, from, to, jsinject, network, blockipv6, blockipv4, dnsrewrite, generichide, ctag, client, mac, asn, important, match-case, badfilter, script, image 等\n")
+            append("7. IP-CIDR/IP-CIDR6: ip-cidr,192.168.1.0/24 / ip6-cidr,::1/128\n")
+            append("8. Clash: DOMAIN-SUFFIX,com / DOMAIN-KEYWORD,ad / IP-CIDR,...\n")
+            append("9. Surge: HOST-SUFFIX,com / HOST-KEYWORD,ad / IP-CIDR,...\n")
+            append("10. Loon: DOMAIN-SUFFIX,com / DOMAIN-KEYWORD,ad / ip-cidr,...\n")
+            append("11. Quantumult X: host example.com / ip-cidr 192.168.1.0/24 / host-keyword ad\n")
+            append("12. Shadowrocket: host-suffix,com / host-keyword,ad / url-regexp pattern\n")
+            append("13. V2Ray/Xray: domain:xxx / domainSuffix:xxx / ip:xxx / ipCIDR:xxx\n")
+            append("14. 域名 + 端口：example.com:8080\n")
+            append("15. 端口通配符：*:443\$network / *:80\$network\n")
+            append("16. 路径规则：domain.com/ads/* / api.com/v1/ad/*\n")
+            append("17. 关键词规则：*ad* / *tracker* / *analytics*\n")
+            append("18. 正则规则：/^https?:.*ad.*\\.example\\.com/ / /.*\\.(ads?|banner)\\..*/\n")
+            append("19. CSP 规则：domain##^csp:script-src 'self'\n")
+            append("20. CSS 规则：domain##.ad-banner / domain###sidebar-ads\n")
+            append("21. 复合规则：AND(domain.com, /ads/) / OR(ads1.com, ads2.com)\n")
+            append("22. 例外规则：@@||domain^ / @@0.0.0.0 whitelist.com\n")
+            append("23. 包名规则：package:com.example.app / ||ads.com^\$package=...\n")
+            append("24. 点前缀域名：.example.com（匹配所有子域名）\n")
+            append("25. IPv6 Hosts: 2001:db8::1 ads.example.com\n")
+            append("\n部分支持：redirect 类、removeparam 类、header 修改、replace 类、cookie 类规则（需 MITM 增强）\n")
+            append("会跳过：复杂脚本、远程脚本、://schema 规则、高级代理逻辑规则\n")
             if (report.vendorSummary.isNotEmpty()) {
                 append("\n\n可导入规则厂商分布：\n")
                 append(report.vendorSummary.joinToString("\n") { "- ${it.vendor}: ${it.count}" })
@@ -1371,7 +1659,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             .setPositiveButton("继续拦截") { _, _ -> onContinue() }
             .setNeutralButton("删除白名单后继续") { _, _ -> onDeleteWhitelistAndContinue() }
             .setNegativeButton("取消", null)
-            .show()
+            .showSafely(activityHost, "Show whitelist conflict dialog failed")
     }
 
     private data class RuleListState(

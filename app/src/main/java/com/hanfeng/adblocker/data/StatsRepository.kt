@@ -69,9 +69,9 @@ object StatsRepository {
     private var pendingFlushRunnable: Runnable? = null
     private val updateDispatchPending = AtomicBoolean(false)
     @Volatile private var lastUpdateDispatchAt = 0L
-    private const val UI_UPDATE_MIN_INTERVAL_MILLIS = 2500L
-    private const val FLUSH_DELAY_MILLIS = 45_000L
-    private const val FLUSH_EVENT_THRESHOLD = 80
+    private const val UI_UPDATE_MIN_INTERVAL_MILLIS = 5000L
+    private const val FLUSH_DELAY_MILLIS = 120_000L
+    private const val FLUSH_EVENT_THRESHOLD = 200
 
     private fun ensureInitialized(context: Context) {
         if (initialized) {
@@ -84,8 +84,7 @@ object StatsRepository {
             val today = dayFormatter.format(Date())
             val savedDate = prefs.getString(KEY_TODAY_DATE, null)
             if (savedDate != today) {
-                prefs.edit().putString(KEY_TODAY_DATE, today)
-                    .putInt(KEY_TODAY_BLOCKED, 0).apply()
+                writeTodayReset(prefs, today)
             }
             todayBlocked.set(prefs.getInt(KEY_TODAY_BLOCKED, 0))
             totalBlocked.set(prefs.getInt(KEY_TOTAL_BLOCKED, 0))
@@ -111,7 +110,7 @@ object StatsRepository {
         val prefs = prefs(context)
         val today = dayFormatter.format(Date())
         if (prefs.getString(KEY_TODAY_DATE, null) != today) {
-            prefs.edit().putString(KEY_TODAY_DATE, today).putInt(KEY_TODAY_BLOCKED, 0).apply()
+            writeTodayReset(prefs, today)
             // Reset in-memory day counter
             if (todayBlocked.get() > 0) {
                 todayBlocked.set(0)
@@ -131,54 +130,31 @@ object StatsRepository {
 
     fun recordBlockedResponse(context: Context, vendor: String, appName: String, bytesSaved: Long = 0) {
         ensureInitialized(context)
-        todayBlocked.incrementAndGet()
-        totalBlocked.incrementAndGet()
-        responseTotal.incrementAndGet()
-        this.bytesSaved.addAndGet(bytesSaved)
-        incrementMapInMemory(vendorBlockedMap, vendor)
-        incrementMapInMemory(vendorResponseMap, vendor)
-        incrementMapInMemory(appBlockedMap, appName)
-        incrementMapInMemory(appResponseMap, appName)
-        notifyUpdated()
-        scheduleFlush(context)
+        recordBlockedEvent(context, vendor, appName, bytesSaved)
     }
 
     fun recordBlockedDns(context: Context, vendor: String, appName: String, bytesSaved: Long = 0) {
         ensureInitialized(context)
-        todayBlocked.incrementAndGet()
-        totalBlocked.incrementAndGet()
+        recordBlockedEvent(context, vendor, appName, bytesSaved)
         dnsBlocked.incrementAndGet()
-        responseTotal.incrementAndGet()
-        this.bytesSaved.addAndGet(bytesSaved)
-        incrementMapInMemory(vendorBlockedMap, vendor)
-        incrementMapInMemory(vendorResponseMap, vendor)
-        incrementMapInMemory(appBlockedMap, appName)
-        incrementMapInMemory(appResponseMap, appName)
-        notifyUpdated()
-        scheduleFlush(context)
     }
 
     fun recordBlockedHttp(context: Context, vendor: String, appName: String, bytesSaved: Long = 0) {
         ensureInitialized(context)
-        todayBlocked.incrementAndGet()
-        totalBlocked.incrementAndGet()
+        recordBlockedEvent(context, vendor, appName, bytesSaved)
         httpBlocked.incrementAndGet()
-        responseTotal.incrementAndGet()
-        this.bytesSaved.addAndGet(bytesSaved)
-        incrementMapInMemory(vendorBlockedMap, vendor)
-        incrementMapInMemory(vendorResponseMap, vendor)
-        incrementMapInMemory(appBlockedMap, appName)
-        incrementMapInMemory(appResponseMap, appName)
-        notifyUpdated()
-        scheduleFlush(context)
     }
 
     fun recordBlockedMitm(context: Context, vendor: String, appName: String, bytesSaved: Long = 0) {
         ensureInitialized(context)
-        todayBlocked.incrementAndGet()
-        totalBlocked.incrementAndGet()
+        recordBlockedEvent(context, vendor, appName, bytesSaved)
         httpBlocked.incrementAndGet()
         mitmBlocked.incrementAndGet()
+    }
+
+    private fun recordBlockedEvent(context: Context, vendor: String, appName: String, bytesSaved: Long) {
+        todayBlocked.incrementAndGet()
+        totalBlocked.incrementAndGet()
         responseTotal.incrementAndGet()
         this.bytesSaved.addAndGet(bytesSaved)
         incrementMapInMemory(vendorBlockedMap, vendor)
@@ -215,7 +191,29 @@ object StatsRepository {
     private fun persistAll(context: Context) {
         dirtyEvents.set(0)
         val prefs = prefs(context)
-        val editor = prefs.edit()
+        val editor = prefs.edit().apply {
+            putCoreCounters(this)
+        }
+
+        putRankingMap(editor, KEY_VENDOR_BLOCKED, vendorBlockedMap)
+        putRankingMap(editor, KEY_VENDOR_REQUEST, vendorRequestMap)
+        putRankingMap(editor, KEY_VENDOR_RESPONSE, vendorResponseMap)
+        putRankingMap(editor, KEY_APP_BLOCKED, appBlockedMap)
+        putRankingMap(editor, KEY_APP_REQUEST, appRequestMap)
+        putRankingMap(editor, KEY_APP_RESPONSE, appResponseMap)
+
+        editor.apply()
+    }
+
+    private fun writeTodayReset(prefs: android.content.SharedPreferences, today: String) {
+        prefs.edit()
+            .putString(KEY_TODAY_DATE, today)
+            .putInt(KEY_TODAY_BLOCKED, 0)
+            .apply()
+    }
+
+    private fun putCoreCounters(editor: android.content.SharedPreferences.Editor) {
+        editor
             .putInt(KEY_TODAY_BLOCKED, todayBlocked.get())
             .putInt(KEY_TOTAL_BLOCKED, totalBlocked.get())
             .putInt(KEY_DNS_BLOCKED, dnsBlocked.get())
@@ -224,15 +222,6 @@ object StatsRepository {
             .putInt(KEY_REQUEST_TOTAL, requestTotal.get())
             .putInt(KEY_RESPONSE_TOTAL, responseTotal.get())
             .putLong(KEY_BYTES_SAVED, bytesSaved.get())
-
-            editor.putString(KEY_VENDOR_BLOCKED, gson.toJson(trimMap(vendorBlockedMap)))
-            editor.putString(KEY_VENDOR_REQUEST, gson.toJson(trimMap(vendorRequestMap)))
-            editor.putString(KEY_VENDOR_RESPONSE, gson.toJson(trimMap(vendorResponseMap)))
-            editor.putString(KEY_APP_BLOCKED, gson.toJson(trimMap(appBlockedMap)))
-            editor.putString(KEY_APP_REQUEST, gson.toJson(trimMap(appRequestMap)))
-            editor.putString(KEY_APP_RESPONSE, gson.toJson(trimMap(appResponseMap)))
-
-        editor.apply()
     }
 
     fun flushNow(context: Context) {
@@ -287,13 +276,19 @@ object StatsRepository {
         map.computeIfAbsent(finalName) { AtomicInteger(0) }.incrementAndGet()
     }
 
-    private fun trimMap(map: ConcurrentHashMap<String, AtomicInteger>): Map<String, Int> {
-        val sorted = map.entries.asSequence()
+    private fun sortedRankingEntries(map: ConcurrentHashMap<String, AtomicInteger>): List<Map.Entry<String, AtomicInteger>> {
+        return map.entries.asSequence()
             .sortedWith(
                 compareBy<Map.Entry<String, AtomicInteger>> { isFallbackName(it.key) }
                     .thenByDescending { it.value.get() }
                     .thenBy { it.key }
             )
+            .toList()
+    }
+
+    private fun trimMap(map: ConcurrentHashMap<String, AtomicInteger>): Map<String, Int> {
+        val sorted = sortedRankingEntries(map)
+            .asSequence()
             .take(MAX_RANKING_ENTRIES)
             .map { it.key to it.value.get() }
             .toList()
@@ -301,14 +296,18 @@ object StatsRepository {
     }
 
     private fun rankingFromMap(map: ConcurrentHashMap<String, AtomicInteger>): List<RankingEntry> {
-        return map.entries.asSequence()
-            .sortedWith(
-                compareBy<Map.Entry<String, AtomicInteger>> { isFallbackName(it.key) }
-                    .thenByDescending { it.value.get() }
-                    .thenBy { it.key }
-            )
+        return sortedRankingEntries(map)
+            .asSequence()
             .map { RankingEntry(it.key, it.value.get()) }
             .toList()
+    }
+
+    private fun putRankingMap(
+        editor: android.content.SharedPreferences.Editor,
+        key: String,
+        map: ConcurrentHashMap<String, AtomicInteger>
+    ) {
+        editor.putString(key, gson.toJson(trimMap(map)))
     }
 
     private fun readMapInto(context: Context, prefs: android.content.SharedPreferences, key: String, target: ConcurrentHashMap<String, AtomicInteger>) {

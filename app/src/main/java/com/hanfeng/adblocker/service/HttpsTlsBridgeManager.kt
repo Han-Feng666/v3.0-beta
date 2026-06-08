@@ -19,9 +19,7 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLParameters
 import javax.net.ssl.SSLServerSocket
-import javax.net.ssl.SSLServerSocketFactory
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 import com.HanFeng.service.HpackDecoder.HeaderField
 
 object HttpsTlsBridgeManager {
@@ -58,12 +56,11 @@ object HttpsTlsBridgeManager {
         bridges[session.flowKey]?.takeIf { !it.serverSocket.isClosed }?.let {
             return TlsMitmSessionManager.BridgeBinding(it.host, it.port)
         }
-        val factory = preparedContext.sslContext.serverSocketFactory as SSLServerSocketFactory
-        val serverSocket = factory.createServerSocket(
+        val serverSocket = preparedContext.sslContext.serverSocketFactory.createServerSocket(
             0,
             50,
             InetAddress.getByName(LOOPBACK_HOST)
-        ) as SSLServerSocket
+        ) as? SSLServerSocket ?: throw IOException("TLS server socket creation failed")
         serverSocket.needClientAuth = false
         serverSocket.useClientMode = false
         serverSocket.soTimeout = ACCEPT_TIMEOUT_MILLIS
@@ -156,14 +153,7 @@ object HttpsTlsBridgeManager {
             clientSocket.use { localTls ->
                 configureLocalTls(localTls, session.offeredAlpnProtocols, session.clientHelloSupportedTlsVersions)
                 localTls.startHandshake()
-                val rawUpstreamSocket = Socket()
-                rawUpstreamSocket.tcpNoDelay = true
-                if (!protectSocket(rawUpstreamSocket)) {
-                    LogRepository.append(context, "Protect upstream socket failed for HTTPS bridge host=${session.host}")
-                }
-                rawUpstreamSocket.connect(InetSocketAddress(session.targetIp, session.targetPort), CONNECT_TIMEOUT_MILLIS)
-                val upstreamTls = ((SSLSocketFactory.getDefault() as SSLSocketFactory)
-                    .createSocket(rawUpstreamSocket, session.host, session.targetPort, true) as SSLSocket)
+                val upstreamTls = createUpstreamTlsSocket(context, session, protectSocket)
                 upstreamTls.use { remoteTls ->
                     localTls.tcpNoDelay = true
                     remoteTls.tcpNoDelay = true
@@ -171,28 +161,8 @@ object HttpsTlsBridgeManager {
                     remoteTls.startHandshake()
                     val negotiatedAlpn = readApplicationProtocol(remoteTls)
                     val negotiatedTls = remoteTls.session?.protocol
-                    TlsMitmSessionManager.updateNegotiatedProtocol(context, session.flowKey, negotiatedAlpn, negotiatedTls)
-                    LogRepository.append(
-                        context,
-                        "Accepted local HTTPS bridge client host=${session.host} flow=${session.flowKey} local=${running.host}:${running.port} alpn=${negotiatedAlpn ?: "none"} negotiatedHttp2=${negotiatedAlpn.equals("h2", ignoreCase = true)}"
-                    )
-                    val requestRef = java.util.concurrent.atomic.AtomicReference<HttpMitmFilter.RequestInspection?>()
-                    val latch = CountDownLatch(2)
-                    executor.execute {
-                        try {
-                            pipeClientToServer(context, session, localTls.inputStream, remoteTls.outputStream, requestRef, negotiatedAlpn)
-                        } finally {
-                            latch.countDown()
-                            runCatching { remoteTls.shutdownOutput() }
-                        }
-                    }
-                    try {
-                        pipeServerToClient(context, session, remoteTls.inputStream, localTls.outputStream, requestRef, negotiatedAlpn)
-                    } finally {
-                        latch.countDown()
-                        runCatching { localTls.shutdownOutput() }
-                    }
-                    latch.await()
+                    logNegotiatedTlsSession(context, session, running, negotiatedAlpn, negotiatedTls)
+                    pipeBridgeTraffic(context, session, localTls, remoteTls, negotiatedAlpn)
                 }
             }
         } catch (error: SSLHandshakeException) {
@@ -202,6 +172,64 @@ object HttpsTlsBridgeManager {
             TlsMitmSessionManager.markMitmBypass(context, session.flowKey, "io-bridge:${error.message ?: error.javaClass.simpleName}")
             LogRepository.append(context, "HTTPS MITM bridge failure host=${session.host} flow=${session.flowKey}: ${error.message ?: error.javaClass.simpleName}")
         }
+    }
+
+    private fun createUpstreamTlsSocket(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        protectSocket: (Socket) -> Boolean
+    ): SSLSocket {
+        val rawUpstreamSocket = Socket()
+        rawUpstreamSocket.tcpNoDelay = true
+        if (!protectSocket(rawUpstreamSocket)) {
+            LogRepository.append(context, "Protect upstream socket failed for HTTPS bridge host=${session.host}")
+        }
+        rawUpstreamSocket.connect(InetSocketAddress(session.targetIp, session.targetPort), CONNECT_TIMEOUT_MILLIS)
+        val upstreamFactory = javax.net.ssl.SSLSocketFactory.getDefault() as? javax.net.ssl.SSLSocketFactory
+            ?: throw IOException("Upstream TLS socket factory unavailable")
+        return upstreamFactory
+            .createSocket(rawUpstreamSocket, session.host, session.targetPort, true) as? SSLSocket
+            ?: throw IOException("Upstream TLS socket creation failed")
+    }
+
+    private fun logNegotiatedTlsSession(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        running: RunningBridge,
+        negotiatedAlpn: String?,
+        negotiatedTls: String?
+    ) {
+        TlsMitmSessionManager.updateNegotiatedProtocol(context, session.flowKey, negotiatedAlpn, negotiatedTls)
+        LogRepository.append(
+            context,
+            "Accepted local HTTPS bridge client host=${session.host} flow=${session.flowKey} local=${running.host}:${running.port} alpn=${negotiatedAlpn ?: "none"} negotiatedHttp2=${negotiatedAlpn.equals("h2", ignoreCase = true)}"
+        )
+    }
+
+    private fun pipeBridgeTraffic(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        localTls: SSLSocket,
+        remoteTls: SSLSocket,
+        negotiatedAlpn: String?
+    ) {
+        val requestRef = java.util.concurrent.atomic.AtomicReference<HttpMitmFilter.RequestInspection?>()
+        val latch = CountDownLatch(2)
+        executor.execute {
+            try {
+                pipeClientToServer(context, session, localTls.inputStream, remoteTls.outputStream, requestRef, negotiatedAlpn)
+            } finally {
+                latch.countDown()
+                runCatching { remoteTls.shutdownOutput() }
+            }
+        }
+        try {
+            pipeServerToClient(context, session, remoteTls.inputStream, localTls.outputStream, requestRef, negotiatedAlpn)
+        } finally {
+            latch.countDown()
+            runCatching { localTls.shutdownOutput() }
+        }
+        latch.await()
     }
 
     private fun pipeClientToServer(
@@ -227,15 +255,14 @@ object HttpsTlsBridgeManager {
                 val directives = logHttp2Events(context, session, inspection.events, "client")
                 applyHttp2Directives(context, session, directives, output, resetPeer = "upstream")
                 if (pendingHttp2ClientRewrite.active) {
-                    pendingHttp2ClientRewrite.rawBytes += payload
-                    pendingHttp2ClientRewrite.parsedFrames += inspection.parsedFrames
-                    pendingHttp2ClientRewrite.openStreams.removeAll { streamId ->
-                        !directionHasOpenClientHeaderBlock(session.flowKey, streamId)
-                    }
+                    pendingHttp2ClientRewrite = appendPendingHttp2ClientRewrite(
+                        session,
+                        pendingHttp2ClientRewrite,
+                        payload,
+                        inspection.parsedFrames
+                    )
                     if (pendingHttp2ClientRewrite.rawBytes.size > MAX_PENDING_HTTP2_CLIENT_REWRITE_BYTES) {
-                        LogRepository.append(context, "HTTP/2 client rewrite bypass host=${session.host} flow=${session.flowKey} reason=buffer-overflow bytes=${pendingHttp2ClientRewrite.rawBytes.size}")
-                        output.write(pendingHttp2ClientRewrite.rawBytes)
-                        output.flush()
+                        flushPendingHttp2ClientRewriteBypass(context, session, output, pendingHttp2ClientRewrite, "buffer-overflow")
                         pendingHttp2ClientRewrite = PendingHttp2ClientRewrite()
                         continue
                     }
@@ -246,12 +273,10 @@ object HttpsTlsBridgeManager {
                     val bufferedFrames = pendingHttp2ClientRewrite.parsedFrames.toList()
                     pendingHttp2ClientRewrite = PendingHttp2ClientRewrite()
                     payload = processHttp2ClientPayload(context, session, bufferedFrames, payload, directives.isNotEmpty())
-                    if (payload.isEmpty()) {
-                        LogRepository.append(context, "HTTP/2 payload suppressed host=${session.host} flow=${session.flowKey} direction=client")
+                    if (logAndCheckSuppressedHttp2Payload(context, session, payload, "client")) {
                         continue
                     }
-                    output.write(payload)
-                    output.flush()
+                    writeAndFlush(output, payload)
                     continue
                 }
                 val delayedRewriteStreams = findIncompleteClientHeaderStreams(session.flowKey, inspection.parsedFrames)
@@ -266,8 +291,7 @@ object HttpsTlsBridgeManager {
                     continue
                 }
                 payload = processHttp2ClientPayload(context, session, inspection.parsedFrames, payload, directives.isNotEmpty())
-                if (payload.isEmpty()) {
-                    LogRepository.append(context, "HTTP/2 payload suppressed host=${session.host} flow=${session.flowKey} direction=client")
+                if (logAndCheckSuppressedHttp2Payload(context, session, payload, "client")) {
                     continue
                 }
             }
@@ -285,25 +309,12 @@ object HttpsTlsBridgeManager {
                     inspected = true
                 }
             }
-            output.write(payload)
-            output.flush()
+            writeAndFlush(output, payload)
         }
         if (pendingHttp2ClientRewrite.active && pendingHttp2ClientRewrite.rawBytes.isNotEmpty()) {
-            val finalPayload = if (pendingHttp2ClientRewrite.openStreams.isEmpty() && http2State.pendingFrameBytes.isEmpty()) {
-                processHttp2ClientPayload(
-                    context,
-                    session,
-                    pendingHttp2ClientRewrite.parsedFrames,
-                    pendingHttp2ClientRewrite.rawBytes,
-                    directivesPresent = false
-                )
-            } else {
-                LogRepository.append(context, "HTTP/2 client rewrite bypass host=${session.host} flow=${session.flowKey} reason=stream-ended-before-complete headersStreams=${pendingHttp2ClientRewrite.openStreams.sorted().joinToString(",").ifBlank { "none" }} pendingFrameBytes=${http2State.pendingFrameBytes.size}")
-                pendingHttp2ClientRewrite.rawBytes
-            }
+            val finalPayload = finalizePendingHttp2ClientRewrite(context, session, pendingHttp2ClientRewrite, http2State)
             if (finalPayload.isNotEmpty()) {
-                output.write(finalPayload)
-                output.flush()
+                writeAndFlush(output, finalPayload)
             }
         }
     }
@@ -339,18 +350,17 @@ object HttpsTlsBridgeManager {
                 applyHttp2Directives(context, session, directives, output, resetPeer = "client")
                 val parsedFrameBytes = inspection.parsedFrames.sumOf { it.rawBytes.size }
                 if (parsedFrameBytes != payload.size && directives.isNotEmpty()) {
-                    LogRepository.append(context, "HTTP/2 frame filtering tail-preserved host=${session.host} flow=${session.flowKey} direction=server reason=partial-frame-boundary parsedBytes=$parsedFrameBytes payloadBytes=${payload.size} tailBytes=${payload.size - parsedFrameBytes}")
+                    logHttp2TailPreserved(context, session, "server", parsedFrameBytes, payload.size)
                 }
                 payload = filterHttp2Payload(context, session, "server", inspection.parsedFrames, payload)
-                if (payload.isEmpty()) {
-                    LogRepository.append(context, "HTTP/2 payload suppressed host=${session.host} flow=${session.flowKey} direction=server")
+                if (logAndCheckSuppressedHttp2Payload(context, session, payload, "server")) {
                     continue
                 }
             }
             if (!filtered && allowHttp1Filter) {
                 val bufferedPayload = pendingHttp1Bytes + payload
                 if (bufferedPayload.size > HttpMitmFilter.maxHttp1FilterBufferBytes()) {
-                    LogRepository.append(context, "HTTPS response passthrough host=${session.host} reason=http1-buffer-overflow bytes=${bufferedPayload.size}")
+                    logHttp1ResponsePassthrough(context, session, "http1-buffer-overflow bytes=${bufferedPayload.size}")
                     payload = bufferedPayload
                     pendingHttp1Bytes = ByteArray(0)
                     filtered = true
@@ -361,7 +371,7 @@ object HttpsTlsBridgeManager {
                             continue
                         }
                         is HttpMitmFilter.BufferedHttp1Result.Bypass -> {
-                            LogRepository.append(context, "HTTPS response passthrough host=${session.host} reason=${assembled.reason}")
+                            logHttp1ResponsePassthrough(context, session, assembled.reason)
                             payload = bufferedPayload
                             pendingHttp1Bytes = ByteArray(0)
                             filtered = true
@@ -377,24 +387,20 @@ object HttpsTlsBridgeManager {
                     }
                 }
             }
-            output.write(payload)
-            output.flush()
+            writeAndFlush(output, payload)
         }
         if (!filtered && allowHttp1Filter && pendingHttp1Bytes.isNotEmpty()) {
             when (val assembled = HttpMitmFilter.finalizeBufferedHttp1Response(pendingHttp1Bytes)) {
                 is HttpMitmFilter.BufferedHttp1Result.Ready -> {
                     val finalPayload = applyHttp1Filter(context, session, assembled.responseBytes, requestRef.get()) + assembled.remainderBytes
-                    output.write(finalPayload)
-                    output.flush()
+                    writeAndFlush(output, finalPayload)
                 }
                 is HttpMitmFilter.BufferedHttp1Result.Bypass -> {
-                    LogRepository.append(context, "HTTPS response passthrough host=${session.host} reason=${assembled.reason}")
-                    output.write(pendingHttp1Bytes)
-                    output.flush()
+                    logHttp1ResponsePassthrough(context, session, assembled.reason)
+                    writeAndFlush(output, pendingHttp1Bytes)
                 }
                 HttpMitmFilter.BufferedHttp1Result.AwaitMore -> {
-                    output.write(pendingHttp1Bytes)
-                    output.flush()
+                    writeAndFlush(output, pendingHttp1Bytes)
                 }
             }
         }
@@ -434,10 +440,121 @@ object HttpsTlsBridgeManager {
             LogRepository.append(context, "HTTP/2 request payload rewritten host=${session.host} flow=${session.flowKey} direction=client originalBytes=${payload.size} rewrittenBytes=${rewrittenPayload.size} parsedBytes=$parsedFrameBytes")
         }
         if (parsedFrameBytes != nextPayload.size && directivesPresent) {
-            LogRepository.append(context, "HTTP/2 frame filtering tail-preserved host=${session.host} flow=${session.flowKey} direction=client reason=partial-frame-boundary parsedBytes=$parsedFrameBytes payloadBytes=${nextPayload.size} tailBytes=${nextPayload.size - parsedFrameBytes}")
+            logHttp2TailPreserved(context, session, "client", parsedFrameBytes, nextPayload.size)
         }
         nextPayload = filterHttp2Payload(context, session, "client", parsedFrames, nextPayload)
         return nextPayload
+    }
+
+    private fun writeAndFlush(output: OutputStream, payload: ByteArray) {
+        output.write(payload)
+        output.flush()
+    }
+
+    private fun logHttp1ResponsePassthrough(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        reason: String
+    ) {
+        LogRepository.append(context, "HTTPS response passthrough host=${session.host} reason=$reason")
+    }
+
+    private fun logHttp2TailPreserved(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        parsedBytes: Int,
+        payloadBytes: Int
+    ) {
+        LogRepository.append(
+            context,
+            "HTTP/2 frame filtering tail-preserved host=${session.host} flow=${session.flowKey} direction=$direction reason=partial-frame-boundary parsedBytes=$parsedBytes payloadBytes=$payloadBytes tailBytes=${payloadBytes - parsedBytes}"
+        )
+    }
+
+    private fun appendPendingHttp2ClientRewrite(
+        session: TlsMitmSessionManager.TlsMitmSession,
+        pendingRewrite: PendingHttp2ClientRewrite,
+        payload: ByteArray,
+        parsedFrames: List<Http2FrameLogger.ParsedFrame>
+    ): PendingHttp2ClientRewrite {
+        pendingRewrite.rawBytes += payload
+        pendingRewrite.parsedFrames += parsedFrames
+        pendingRewrite.openStreams.removeAll { streamId ->
+            !directionHasOpenClientHeaderBlock(session.flowKey, streamId)
+        }
+        return pendingRewrite
+    }
+
+    private fun flushPendingHttp2ClientRewriteBypass(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        output: OutputStream,
+        pendingRewrite: PendingHttp2ClientRewrite,
+        reason: String
+    ) {
+        logHttp2ClientRewriteBypass(
+            context = context,
+            session = session,
+            reason = reason,
+            detail = "bytes=${pendingRewrite.rawBytes.size}"
+        )
+        writeAndFlush(output, pendingRewrite.rawBytes)
+    }
+
+    private fun logAndCheckSuppressedHttp2Payload(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        payload: ByteArray,
+        direction: String
+    ): Boolean {
+        if (payload.isNotEmpty()) return false
+        logHttp2PayloadSuppressed(context, session, direction)
+        return true
+    }
+
+    private fun logHttp2PayloadSuppressed(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String
+    ) {
+        appendHttp2Log(context, session, "HTTP/2 payload suppressed direction=$direction")
+    }
+
+    private fun finalizePendingHttp2ClientRewrite(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        pendingRewrite: PendingHttp2ClientRewrite,
+        http2State: Http2FrameLogger.StreamState
+    ): ByteArray {
+        if (pendingRewrite.openStreams.isEmpty() && http2State.pendingFrameBytes.isEmpty()) {
+            return processHttp2ClientPayload(
+                context,
+                session,
+                pendingRewrite.parsedFrames,
+                pendingRewrite.rawBytes,
+                directivesPresent = false
+            )
+        }
+        logHttp2ClientRewriteBypass(
+            context = context,
+            session = session,
+            reason = "stream-ended-before-complete",
+            detail = "headersStreams=${pendingRewrite.openStreams.sorted().joinToString(",").ifBlank { "none" }} pendingFrameBytes=${http2State.pendingFrameBytes.size}"
+        )
+        return pendingRewrite.rawBytes
+    }
+
+    private fun logHttp2ClientRewriteBypass(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        reason: String,
+        detail: String
+    ) {
+        LogRepository.append(
+            context,
+            "HTTP/2 client rewrite bypass host=${session.host} flow=${session.flowKey} reason=$reason $detail"
+        )
     }
 
     private fun findIncompleteClientHeaderStreams(
@@ -531,9 +648,17 @@ object HttpsTlsBridgeManager {
                 priorityFragment = frame.priorityFragment
             )
             changed = true
-            LogRepository.append(
-                context,
-                "HTTP/2 request headers rewritten host=${session.host} flow=${session.flowKey} stream=${frame.streamId} headerCount=${rewrite.headers.size} originalHeaderCount=${decodedHeaders.size} originalFrames=${sequenceFrames.size} originalHeaderBytes=${sequenceFrames.sumOf { it.headerBlockFragment.size }} rewrittenHeaderBytes=${encoded.size} padded=${frame.padded} priority=${frame.priorityFragment.isNotEmpty()}"
+            logHttp2RequestHeadersRewritten(
+                context = context,
+                session = session,
+                streamId = frame.streamId,
+                headerCount = rewrite.headers.size,
+                originalHeaderCount = decodedHeaders.size,
+                originalFrames = sequenceFrames.size,
+                originalHeaderBytes = sequenceFrames.sumOf { it.headerBlockFragment.size },
+                rewrittenHeaderBytes = encoded.size,
+                padded = frame.padded,
+                priority = frame.priorityFragment.isNotEmpty()
             )
             index += sequenceFrames.size
         }
@@ -542,6 +667,24 @@ object HttpsTlsBridgeManager {
         val prefix = rebuiltFrames.fold(ByteArray(0)) { acc, bytes -> acc + bytes }
         val tailBytes = if (parsedBytes >= originalPayload.size) ByteArray(0) else originalPayload.copyOfRange(parsedBytes, originalPayload.size)
         return prefix + tailBytes
+    }
+
+    private fun logHttp2RequestHeadersRewritten(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        streamId: Int,
+        headerCount: Int,
+        originalHeaderCount: Int,
+        originalFrames: Int,
+        originalHeaderBytes: Int,
+        rewrittenHeaderBytes: Int,
+        padded: Boolean,
+        priority: Boolean
+    ) {
+        LogRepository.append(
+            context,
+            "HTTP/2 request headers rewritten host=${session.host} flow=${session.flowKey} stream=$streamId headerCount=$headerCount originalHeaderCount=$originalHeaderCount originalFrames=$originalFrames originalHeaderBytes=$originalHeaderBytes rewrittenHeaderBytes=$rewrittenHeaderBytes padded=$padded priority=$priority"
+        )
     }
 
     private fun configureUpstreamTls(socket: SSLSocket, offeredAlpnProtocols: List<String>, clientSupportedTlsVersions: List<String>) {
@@ -613,10 +756,7 @@ object HttpsTlsBridgeManager {
             when (event) {
                 Http2FrameLogger.FrameEvent.ConnectionPreface -> {
                     state.prefaceSeen = true
-                    LogRepository.append(
-                        context,
-                        "HTTP/2 preface host=${session.host} flow=${session.flowKey} direction=$direction"
-                    )
+                    logHttp2Preface(context, session, direction)
                 }
 
                 is Http2FrameLogger.FrameEvent.FrameHeader -> {
@@ -643,24 +783,21 @@ object HttpsTlsBridgeManager {
                             event.ack
                     if (shouldLogVerbose) {
                         state.verboseFramesLogged += 1
-                        LogRepository.append(
-                            context,
-                            "HTTP/2 frame host=${session.host} flow=${session.flowKey} direction=$direction index=$index type=${event.typeName} length=${event.length} flags=0x${event.flags.toString(16)} flagNames=${event.flagNames.joinToString("|").ifBlank { "none" }} stream=${event.streamId} endStream=${event.endStream} endHeaders=${event.endHeaders} ack=${event.ack}"
+                        logHttp2Frame(
+                            context = context,
+                            session = session,
+                            direction = direction,
+                            index = index,
+                            event = event
                         )
                     }
                     if (event.goAway) {
                         http2FlowControls.computeIfAbsent(session.flowKey) { Http2FlowControl() }.goAwaySeen = true
                         cleanupTerminalHttp2Streams(context, session, direction, reason = "goaway-observed")
-                        LogRepository.append(
-                            context,
-                            "HTTP/2 GOAWAY observed host=${session.host} flow=${session.flowKey} direction=$direction index=$index"
-                        )
+                        logHttp2GoAwayObserved(context, session, direction, index)
                     }
                     if (event.closedStreamFrame) {
-                        LogRepository.append(
-                            context,
-                            "HTTP/2 frame on closed stream host=${session.host} flow=${session.flowKey} direction=$direction index=$index stream=${event.streamId} type=${event.typeName}"
-                        )
+                        logHttp2ClosedStreamFrame(context, session, direction, index, event.streamId, event.typeName)
                     }
                     if (state.frameCount % HTTP2_SUMMARY_FRAME_INTERVAL == 0) {
                         flushHttp2Summary(context, session.flowKey, direction, finalFlush = false, session = session)
@@ -677,17 +814,17 @@ object HttpsTlsBridgeManager {
                         if (event.unexpectedContinuation) {
                             streamState.headerBlockAbandoned = true
                             streamState.lastDecodedHeaderError = "unexpected-continuation"
-                            LogRepository.append(
-                                context,
-                                "HTTP/2 continuation without open header block host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId}"
-                            )
+                            logHttp2ContinuationWithoutHeaderBlock(context, session, direction, event.streamId)
                         }
                         if (event.replacedOpenHeaderBlock) {
                             streamState.headerBlockAbandoned = true
                             streamState.lastDecodedHeaderError = "interleaved-header-block"
-                            LogRepository.append(
+                            logHttp2HeaderBlockReplaced(
                                 context,
-                                "HTTP/2 header block replaced before close host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} previousBytes=${streamState.currentHeaderBlockBytes}"
+                                session,
+                                direction,
+                                event.streamId,
+                                streamState.currentHeaderBlockBytes
                             )
                         }
                         if (event.opensHeaderBlock && !event.headerBlockOpenBeforeFrame) {
@@ -744,10 +881,7 @@ object HttpsTlsBridgeManager {
                                 ?: trimHttp2DataSample(streamState.lastDataSample, event.dataFragment)
                             if (dataInspection != null) {
                                 streamState.lastDataInspection = dataInspection
-                                LogRepository.append(
-                                    context,
-                                    "HTTP/2 data inspection host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} vendor=${dataInspection.vendor} suspiciousScore=${dataInspection.suspiciousScore} reasons=${dataInspection.suspiciousReasons.joinToString("|").ifBlank { "none" }} preview=${dataInspection.samplePreview.ifBlank { "none" }}"
-                                )
+                                logHttp2DataInspection(context, session, direction, event.streamId, dataInspection)
                                 if (!streamState.blockedByAction) {
                                     val syntheticResponse = HttpMitmFilter.buildRedirectHttp2SyntheticResponse(
                                         streamId = event.streamId,
@@ -772,9 +906,16 @@ object HttpsTlsBridgeManager {
                                         sendRst = false,
                                         syntheticResponse = syntheticResponse
                                     )
-                                    LogRepository.append(
-                                        context,
-                                        "HTTP/2 body-triggered block host=${session.host} flow=${session.flowKey} stream=${event.streamId} trigger=body confidence=${dataInspection.confidence} vendor=${dataInspection.vendor} redirect=${dataInspection.redirectResource ?: "none"} reasons=${dataInspection.suspiciousReasons.joinToString("|").ifBlank { "none" }}"
+                                    logHttp2TriggeredBlock(
+                                        context = context,
+                                        session = session,
+                                        streamId = event.streamId,
+                                        trigger = "body",
+                                        action = "body-candidate",
+                                        confidence = dataInspection.confidence,
+                                        vendor = dataInspection.vendor,
+                                        redirectResource = dataInspection.redirectResource,
+                                        reasons = dataInspection.suspiciousReasons
                                     )
                                 }
                             }
@@ -803,10 +944,7 @@ object HttpsTlsBridgeManager {
                         if (event.closesHeaderBlock && !streamState.headerBlockOpen) {
                             streamState.headerBlockAbandoned = true
                             streamState.lastDecodedHeaderError = "end-headers-without-open-block"
-                            LogRepository.append(
-                                context,
-                                "HTTP/2 END_HEADERS without open header block host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId}"
-                            )
+                            logHttp2EndHeadersWithoutOpenBlock(context, session, direction, event.streamId)
                         }
                         if (event.closesHeaderBlock && streamState.headerBlockOpen) {
                             streamState.headerBlockOpen = false
@@ -827,40 +965,22 @@ object HttpsTlsBridgeManager {
                             )
                             streamState.lastActionDecision = streamState.lastHeaderInspection
                                 ?.let(HttpMitmFilter::decideHttp2Action)
-                            LogRepository.append(
-                                context,
-                                "HTTP/2 headers complete host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} blockIndex=${streamState.headerBlockCount} blockBytes=${streamState.currentHeaderBlockBytes} largeHeaderBlock=${streamState.currentHeaderBlockBytes >= HTTP2_HEADER_BLOCK_LARGE_THRESHOLD} totalHeaderBytes=${streamState.headerBytes}"
-                            )
+                            logHttp2HeadersComplete(context, session, direction, event.streamId, streamState)
                             if (streamState.currentHeaderBlockBytes == 0L) {
-                                LogRepository.append(
-                                    context,
-                                    "HTTP/2 empty header block host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} blockIndex=${streamState.headerBlockCount}"
-                                )
+                                logHttp2EmptyHeaderBlock(context, session, direction, event.streamId, streamState.headerBlockCount)
                             }
                             if (streamState.lastDecodedHeaders.isNotEmpty() || streamState.lastDecodedHeaderError != null) {
-                                LogRepository.append(
-                                    context,
-                                    "HTTP/2 headers decoded host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} decoded=${streamState.lastDecodedHeaders.size} huffmanStrings=${decoded.huffmanEncodedStrings} truncated=${decoded.truncated} error=${decoded.error ?: "none"} preview=${streamState.lastDecodedHeaderPreview.ifBlank { "none" }}"
-                                )
+                                logHttp2HeadersDecoded(context, session, direction, event.streamId, streamState, decoded)
                             }
                             if (streamState.lastDecodedHeaderError != null) {
-                                LogRepository.append(
-                                    context,
-                                    "HTTP/2 header decode failure host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} error=${streamState.lastDecodedHeaderError} blockBytes=${streamState.currentHeaderBlockBytes} truncated=${streamState.lastDecodedHeaderTruncated}"
-                                )
+                                logHttp2HeaderDecodeFailure(context, session, direction, event.streamId, streamState)
                             }
                             streamState.lastHeaderInspection?.let { inspection ->
-                                LogRepository.append(
-                                    context,
-                                    "HTTP/2 header inspection host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} requestLike=${inspection.requestLike} responseLike=${inspection.responseLike} method=${inspection.method ?: "none"} authority=${inspection.authority} path=${inspection.path ?: "none"} status=${inspection.status ?: "none"} contentType=${inspection.contentType ?: "none"} location=${inspection.location ?: "none"} setCookie=${inspection.setCookie ?: "none"} vendor=${inspection.vendor} suspiciousScore=${inspection.suspiciousScore} reasons=${inspection.suspiciousReasons.joinToString("|").ifBlank { "none" }}"
-                                )
+                                logHttp2HeaderInspection(context, session, direction, event.streamId, inspection)
                             }
                             streamState.lastActionDecision?.let { decision ->
                                 val inspection = streamState.lastHeaderInspection
-                                LogRepository.append(
-                                    context,
-                                    "HTTP/2 action decision host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} action=${decision.action} confidence=${decision.confidence} blockCandidate=${decision.shouldBlockCandidate}"
-                                )
+                                logHttp2ActionDecision(context, session, direction, event.streamId, decision)
                                 if (decision.shouldBlockCandidate) {
                                     val syntheticResponse = if (decision.shouldSyntheticRespond) {
                                         HttpMitmFilter.buildRedirectHttp2SyntheticResponse(
@@ -876,9 +996,16 @@ object HttpsTlsBridgeManager {
                                         null
                                     }
                                     streamState.blockedByAction = true
-                                    LogRepository.append(
-                                        context,
-                                        "HTTP/2 header-triggered block host=${session.host} flow=${session.flowKey} stream=${event.streamId} trigger=header action=${decision.action} confidence=${decision.confidence} vendor=${inspection?.vendor ?: "none"} redirect=${decision.redirectResource ?: "none"} reasons=${inspection?.suspiciousReasons?.joinToString("|")?.ifBlank { "none" } ?: "none"}"
+                                    logHttp2TriggeredBlock(
+                                        context = context,
+                                        session = session,
+                                        streamId = event.streamId,
+                                        trigger = "header",
+                                        action = decision.action,
+                                        confidence = decision.confidence,
+                                        vendor = inspection?.vendor ?: "none",
+                                        redirectResource = decision.redirectResource,
+                                        reasons = inspection?.suspiciousReasons.orEmpty()
                                     )
                                     directives += Http2StreamDirective(
                                         streamId = event.streamId,
@@ -906,10 +1033,7 @@ object HttpsTlsBridgeManager {
                             streamState.terminalBlocked = true
                         }
                         streamState.streamClosed = true
-                        LogRepository.append(
-                            context,
-                            "HTTP/2 stream host=${session.host} flow=${session.flowKey} direction=$direction stream=${event.streamId} stage=${event.stage} headerFrames=${streamState.headerFrames} headerBytes=${streamState.headerBytes} dataFrames=${streamState.dataFrames} dataBytes=${streamState.dataBytes} headerBlocks=${streamState.headerBlockCount} maxHeaderBlockBytes=${streamState.maxHeaderBlockBytes} largeHeaderBlockSeen=${streamState.largeHeaderBlockSeen} decodedHeaders=${streamState.lastDecodedHeaders.size} headerDecodeError=${streamState.lastDecodedHeaderError ?: "none"} suspiciousScore=${streamState.lastHeaderInspection?.suspiciousScore ?: 0} action=${streamState.lastActionDecision?.action ?: "none"} headersClosed=${streamState.headersClosed} reset=${streamState.reset} closed=true"
-                        )
+                        logHttp2StreamClosed(context, session, direction, event.streamId, event.stage, streamState)
                     }
                 }
             }
@@ -929,32 +1053,90 @@ object HttpsTlsBridgeManager {
         directives.forEach { directive ->
             control.blockedStreams += directive.streamId
             if (directive.syntheticResponse != null && control.syntheticRespondedStreams.add(directive.streamId)) {
-                output.write(directive.syntheticResponse)
-                output.flush()
+                writeAndFlush(output, directive.syntheticResponse)
                 control.terminalBlockedStreams += directive.streamId
-                val vendor = RuleRepository.classifyVendorFromHints(context, session.host, session.appName)
-                if (!control.terminalStatsRecorded.contains(directive.streamId)) {
-                    StatsRepository.recordBlockedMitm(context, vendor, session.appName, 100 * 1024)
-                    control.terminalStatsRecorded += directive.streamId
-                }
-                LogRepository.append(
-                    context,
-                    "HTTP/2 synthetic response host=${session.host} flow=${session.flowKey} stream=${directive.streamId} action=${directive.action} confidence=${directive.confidence} peer=$resetPeer bytes=${directive.syntheticResponse.size} sendRst=${directive.sendRst}"
-                )
+                recordHttp2TerminalBlockedStat(context, session, control, directive.streamId, 100 * 1024)
+                logHttp2SyntheticResponse(context, session, directive, resetPeer)
             }
             if (directive.sendRst && control.resetSentStreams.add(directive.streamId)) {
                 writeHttp2RstStream(output, directive.streamId)
-                val vendor = RuleRepository.classifyVendorFromHints(context, session.host, session.appName)
-                if (!control.terminalStatsRecorded.contains(directive.streamId)) {
-                    StatsRepository.recordBlockedMitm(context, vendor, session.appName, 50 * 1024)
-                    control.terminalStatsRecorded += directive.streamId
-                }
-                LogRepository.append(
-                    context,
-                    "HTTP/2 stream reset host=${session.host} flow=${session.flowKey} stream=${directive.streamId} action=${directive.action} confidence=${directive.confidence} peer=$resetPeer"
-                )
+                recordHttp2TerminalBlockedStat(context, session, control, directive.streamId, 50 * 1024)
+                logHttp2StreamReset(context, session, directive, resetPeer)
             }
         }
+    }
+
+    private fun logHttp2Preface(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String
+    ) {
+        appendHttp2Log(context, session, "HTTP/2 preface direction=$direction")
+    }
+
+    private fun logHttp2Frame(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        index: Int,
+        event: Http2FrameLogger.FrameEvent.FrameHeader
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 frame direction=$direction index=$index type=${event.typeName} length=${event.length} flags=0x${event.flags.toString(16)} flagNames=${event.flagNames.joinToString("|").ifBlank { "none" }} stream=${event.streamId} endStream=${event.endStream} endHeaders=${event.endHeaders} ack=${event.ack}"
+        )
+    }
+
+    private fun logHttp2GoAwayObserved(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        index: Int
+    ) {
+        appendHttp2Log(context, session, "HTTP/2 GOAWAY observed direction=$direction index=$index")
+    }
+
+    private fun logHttp2ClosedStreamFrame(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        index: Int,
+        streamId: Int,
+        typeName: String
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 frame on closed stream direction=$direction index=$index stream=$streamId type=$typeName"
+        )
+    }
+
+    private fun logHttp2ContinuationWithoutHeaderBlock(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 continuation without open header block direction=$direction stream=$streamId"
+        )
+    }
+
+    private fun logHttp2HeaderBlockReplaced(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int,
+        previousBytes: Long
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 header block replaced before close direction=$direction stream=$streamId previousBytes=$previousBytes"
+        )
     }
 
     private fun filterHttp2Payload(
@@ -1012,24 +1194,248 @@ object HttpsTlsBridgeManager {
                     streamClosed = true
                 }
             }
-            // Record stats for newly blocked streams
-            terminalStreams.forEach { streamId ->
-                if (!control.terminalStatsRecorded.contains(streamId)) {
-                    val vendor = RuleRepository.classifyVendorFromHints(context, session.host, session.appName)
-                    StatsRepository.recordBlockedMitm(context, vendor, session.appName, 50 * 1024)
-                    control.terminalStatsRecorded += streamId
-                }
-            }
+            recordHttp2TerminalBlockedStats(context, session, control, terminalStreams)
         }
         cleanupTerminalHttp2Streams(context, session, direction, reason = "blocked-frame-filtered")
         val filteredPrefix = keptFrames.fold(ByteArray(0)) { acc, frame -> acc + frame.rawBytes }
         val tailBytes = if (parsedBytes >= originalPayload.size) ByteArray(0) else originalPayload.copyOfRange(parsedBytes, originalPayload.size)
-        LogRepository.append(
-            context,
-            "HTTP/2 blocked frame drop host=${session.host} flow=$flowKey direction=$direction droppedFrames=${droppedFrames.size} droppedBytes=$droppedBytes droppedStreams=${droppedStreams.joinToString(",").ifBlank { "none" }} droppedTypes=$droppedTypes terminalStreams=${terminalStreams.joinToString(",").ifBlank { "none" }} tailBytes=${tailBytes.size}"
+        appendHttp2BlockedFrameDropLog(
+            context = context,
+            session = session,
+            direction = direction,
+            droppedFrames = droppedFrames.size,
+            droppedBytes = droppedBytes,
+            droppedStreams = droppedStreams,
+            droppedTypes = droppedTypes,
+            terminalStreams = terminalStreams,
+            tailBytes = tailBytes.size
         )
         if (tailBytes.isEmpty()) return filteredPrefix
         return filteredPrefix + tailBytes
+    }
+
+    private fun appendHttp2Log(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        message: String
+    ) {
+        LogRepository.append(context, "$message host=${session.host} flow=${session.flowKey}")
+    }
+
+    private fun recordHttp2TerminalBlockedStats(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        control: Http2FlowControl,
+        terminalStreams: List<Int>
+    ) {
+        val vendor = classifyHttp2SessionVendor(context, session)
+        terminalStreams.forEach { streamId ->
+            if (!control.terminalStatsRecorded.contains(streamId)) {
+                StatsRepository.recordBlockedMitm(context, vendor, session.appName, 50 * 1024)
+                control.terminalStatsRecorded += streamId
+            }
+        }
+    }
+
+    private fun recordHttp2TerminalBlockedStat(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        control: Http2FlowControl,
+        streamId: Int,
+        bytes: Int
+    ) {
+        if (control.terminalStatsRecorded.contains(streamId)) return
+        val vendor = classifyHttp2SessionVendor(context, session)
+        StatsRepository.recordBlockedMitm(context, vendor, session.appName, bytes.toLong())
+        control.terminalStatsRecorded += streamId
+    }
+
+    private fun classifyHttp2SessionVendor(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession
+    ): String {
+        return RuleRepository.classifyVendorFromHints(context, session.host, session.appName)
+    }
+
+    private fun logHttp2DataInspection(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int,
+        inspection: HttpMitmFilter.Http2DataInspection
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 data inspection direction=$direction stream=$streamId vendor=${inspection.vendor} suspiciousScore=${inspection.suspiciousScore} reasons=${inspection.suspiciousReasons.joinToString("|").ifBlank { "none" }} preview=${inspection.samplePreview.ifBlank { "none" }}"
+        )
+    }
+
+    private fun logHttp2EndHeadersWithoutOpenBlock(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int
+    ) {
+        appendHttp2Log(context, session, "HTTP/2 END_HEADERS without open header block direction=$direction stream=$streamId")
+    }
+
+    private fun logHttp2HeadersComplete(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int,
+        streamState: Http2StreamLogState
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 headers complete direction=$direction stream=$streamId blockIndex=${streamState.headerBlockCount} blockBytes=${streamState.currentHeaderBlockBytes} largeHeaderBlock=${streamState.currentHeaderBlockBytes >= HTTP2_HEADER_BLOCK_LARGE_THRESHOLD} totalHeaderBytes=${streamState.headerBytes}"
+        )
+    }
+
+    private fun logHttp2EmptyHeaderBlock(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int,
+        blockIndex: Int
+    ) {
+        appendHttp2Log(context, session, "HTTP/2 empty header block direction=$direction stream=$streamId blockIndex=$blockIndex")
+    }
+
+    private fun logHttp2HeadersDecoded(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int,
+        streamState: Http2StreamLogState,
+        decoded: HpackDecoder.DecodeResult
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 headers decoded direction=$direction stream=$streamId decoded=${streamState.lastDecodedHeaders.size} huffmanStrings=${decoded.huffmanEncodedStrings} truncated=${decoded.truncated} error=${decoded.error ?: "none"} preview=${streamState.lastDecodedHeaderPreview.ifBlank { "none" }}"
+        )
+    }
+
+    private fun logHttp2HeaderDecodeFailure(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int,
+        streamState: Http2StreamLogState
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 header decode failure direction=$direction stream=$streamId error=${streamState.lastDecodedHeaderError} blockBytes=${streamState.currentHeaderBlockBytes} truncated=${streamState.lastDecodedHeaderTruncated}"
+        )
+    }
+
+    private fun logHttp2HeaderInspection(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int,
+        inspection: HttpMitmFilter.Http2HeaderInspection
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 header inspection direction=$direction stream=$streamId requestLike=${inspection.requestLike} responseLike=${inspection.responseLike} method=${inspection.method ?: "none"} authority=${inspection.authority} path=${inspection.path ?: "none"} status=${inspection.status ?: "none"} contentType=${inspection.contentType ?: "none"} location=${inspection.location ?: "none"} setCookie=${inspection.setCookie ?: "none"} vendor=${inspection.vendor} suspiciousScore=${inspection.suspiciousScore} reasons=${inspection.suspiciousReasons.joinToString("|").ifBlank { "none" }}"
+        )
+    }
+
+    private fun logHttp2ActionDecision(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int,
+        decision: HttpMitmFilter.Http2ActionDecision
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 action decision direction=$direction stream=$streamId action=${decision.action} confidence=${decision.confidence} blockCandidate=${decision.shouldBlockCandidate}"
+        )
+    }
+
+    private fun logHttp2TriggeredBlock(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        streamId: Int,
+        trigger: String,
+        action: String,
+        confidence: String,
+        vendor: String,
+        redirectResource: String?,
+        reasons: List<String>
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 ${trigger}-triggered block stream=$streamId trigger=$trigger action=$action confidence=$confidence vendor=$vendor redirect=${redirectResource ?: "none"} reasons=${reasons.joinToString("|").ifBlank { "none" }}"
+        )
+    }
+
+    private fun logHttp2StreamClosed(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        streamId: Int,
+        stage: String,
+        streamState: Http2StreamLogState
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 stream direction=$direction stream=$streamId stage=$stage headerFrames=${streamState.headerFrames} headerBytes=${streamState.headerBytes} dataFrames=${streamState.dataFrames} dataBytes=${streamState.dataBytes} headerBlocks=${streamState.headerBlockCount} maxHeaderBlockBytes=${streamState.maxHeaderBlockBytes} largeHeaderBlockSeen=${streamState.largeHeaderBlockSeen} decodedHeaders=${streamState.lastDecodedHeaders.size} headerDecodeError=${streamState.lastDecodedHeaderError ?: "none"} suspiciousScore=${streamState.lastHeaderInspection?.suspiciousScore ?: 0} action=${streamState.lastActionDecision?.action ?: "none"} headersClosed=${streamState.headersClosed} reset=${streamState.reset} closed=true"
+        )
+    }
+
+    private fun logHttp2SyntheticResponse(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        directive: Http2StreamDirective,
+        resetPeer: String
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 synthetic response stream=${directive.streamId} action=${directive.action} confidence=${directive.confidence} peer=$resetPeer bytes=${directive.syntheticResponse?.size ?: 0} sendRst=${directive.sendRst}"
+        )
+    }
+
+    private fun logHttp2StreamReset(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        directive: Http2StreamDirective,
+        resetPeer: String
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 stream reset stream=${directive.streamId} action=${directive.action} confidence=${directive.confidence} peer=$resetPeer"
+        )
+    }
+
+    private fun appendHttp2BlockedFrameDropLog(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        direction: String,
+        droppedFrames: Int,
+        droppedBytes: Int,
+        droppedStreams: List<Int>,
+        droppedTypes: String,
+        terminalStreams: List<Int>,
+        tailBytes: Int
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 blocked frame drop direction=$direction droppedFrames=$droppedFrames droppedBytes=$droppedBytes droppedStreams=${droppedStreams.joinToString(",").ifBlank { "none" }} droppedTypes=$droppedTypes terminalStreams=${terminalStreams.joinToString(",").ifBlank { "none" }} tailBytes=$tailBytes"
+        )
     }
 
     private fun http2FrameTypeName(type: Int): String {
@@ -1061,9 +1467,10 @@ object HttpsTlsBridgeManager {
         streamState.headersClosed = false
         streamState.currentHeaderBlock = ByteArray(0)
         streamState.currentHeaderBlockBytes = 0
-        LogRepository.append(
+        appendHttp2Log(
             context,
-            "HTTP/2 blocked header block abandoned host=${session.host} flow=${session.flowKey} direction=$direction stream=${streamState.streamId} reason=$reason headerBlocks=${streamState.headerBlockCount} totalHeaderBytes=${streamState.headerBytes}"
+            session,
+            "HTTP/2 blocked header block abandoned direction=$direction stream=${streamState.streamId} reason=$reason headerBlocks=${streamState.headerBlockCount} totalHeaderBytes=${streamState.headerBytes}"
         )
     }
 
@@ -1091,16 +1498,16 @@ object HttpsTlsBridgeManager {
                 state.streams.remove(streamId)
             }
         }
-        LogRepository.append(
+        appendHttp2Log(
             context,
-            "HTTP/2 terminal stream cleanup host=${session.host} flow=$flowKey direction=$direction reason=$reason streams=${completedStreams.joinToString(",").ifBlank { "none" }}"
+            session,
+            "HTTP/2 terminal stream cleanup direction=$direction reason=$reason streams=${completedStreams.joinToString(",").ifBlank { "none" }}"
         )
     }
 
     private fun writeHttp2RstStream(output: OutputStream, streamId: Int) {
         val frame = Http2FrameCodec.buildRstStreamFrame(streamId)
-        output.write(frame)
-        output.flush()
+        writeAndFlush(output, frame)
     }
 
     private fun flushHttp2Summary(

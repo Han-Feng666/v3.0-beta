@@ -19,10 +19,6 @@
         <item name="materialAlertDialogBodyTextStyle">@style/TextAppearance.HanFeng.DialogBody</item>
         <item name="materialAlertDialogTitleTextStyle">@style/TextAppearance.HanFeng.DialogTitle</item>
         <item name="backgroundTint">@color/hf_surface_strong</item>
-        <item name="colorOnSurface">@color/hf_text_primary</item>
-        <item name="buttonBarPositiveButtonStyle">@style/Widget.HanFeng.DialogButton</item>
-        <item name="buttonBarNegativeButtonStyle">@style/Widget.HanFeng.DialogButton</item>
-        <item name="buttonBarNeutralButtonStyle">@style/Widget.HanFeng.DialogButton</item>
     </style>
 
     <style name="TextAppearance.HanFeng.DialogTitle" parent="TextAppearance.Material3.TitleLarge">
@@ -31,13 +27,6 @@
 
     <style name="TextAppearance.HanFeng.DialogBody" parent="TextAppearance.Material3.BodyMedium">
         <item name="android:textColor">@color/hf_text_primary</item>
-    </style>
-
-    <style name="Widget.HanFeng.DialogButton" parent="Widget.Material3.Button.TextButton.Dialog">
-        <item name="android:textColor">@color/hf_text_primary</item>
-        <item name="backgroundTint">@color/hf_surface</item>
-        <item name="strokeColor">@color/hf_border</item>
-        <item name="strokeWidth">1dp</item>
     </style>
 
     <style name="Widget.HanFeng.Button" parent="Widget.AppCompat.Button">

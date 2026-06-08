@@ -1,6 +1,5 @@
 package com.HanFeng.ui
 
-import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -8,9 +7,9 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.doAfterTextChanged
+import com.HanFeng.core.network.NetworkKernel
 import com.HanFeng.data.WhitelistRepository
 import com.HanFeng.databinding.ActivityLocalProxyCoexistBinding
-import com.HanFeng.service.AdBlockVpnService
 
 class LocalProxyCoexistActivity : BaseActivity() {
     private lateinit var binding: ActivityLocalProxyCoexistBinding
@@ -118,8 +117,7 @@ class LocalProxyCoexistActivity : BaseActivity() {
     }
 
     private fun reloadVpnIfNeeded() {
-        if (!AdBlockVpnService.isRunning) return
-        startService(Intent(this, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+        NetworkKernel.reloadIfRunning(this)
     }
 
     private val Int.dp: Int

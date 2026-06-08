@@ -114,18 +114,19 @@
             </LinearLayout>
 
             <Button
+                android:id="@+id/btnResetHideBackground"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="重置隐藏后台设置"
+                android:visibility="gone" />
+
+            <Button
                 android:id="@+id/btnShizukuAdControl"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="12dp"
-                android:text="系统推广治理" />
-
-            <Button
-                android:id="@+id/btnShizukuAdControlBatch"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="一键治理已安装推广项" />
+                android:text="推广治理" />
 
             <Button
                 android:id="@+id/btnCoexistSettings"
@@ -135,11 +136,25 @@
                 android:text="加速器共存设置" />
 
             <Button
+                android:id="@+id/btnTrafficCardSettings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="免费领流量卡" />
+
+            <Button
                 android:id="@+id/btnJoinGroupSettings"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="12dp"
                 android:text="加入群聊" />
+
+            <Button
+                android:id="@+id/btnExportLogs"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="导出日志" />
 
         </LinearLayout>
     </ScrollView>

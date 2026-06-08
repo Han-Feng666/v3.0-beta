@@ -26,47 +26,46 @@
 
         <activity
             android:name="com.HanFeng.ui.WhitelistActivity"
-            android:excludeFromRecents="true"
             android:exported="false" />
 
         <activity
             android:name="com.HanFeng.ui.LocalProxyCoexistActivity"
-            android:excludeFromRecents="true"
             android:exported="false" />
 
         <activity
             android:name="com.HanFeng.ui.SettingsActivity"
-            android:excludeFromRecents="true"
             android:exported="false" />
 
         <activity
             android:name="com.HanFeng.ui.RemoteRuleSourcesActivity"
-            android:excludeFromRecents="true"
             android:exported="false" />
 
         <activity
             android:name="com.HanFeng.ui.ImpactNormalNetworkActivity"
-            android:excludeFromRecents="true"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.PromoGovernScopeActivity"
             android:exported="false" />
 
         <activity
             android:name="com.HanFeng.ui.GuideActivity"
-            android:excludeFromRecents="true"
             android:exported="false" />
 
         <activity
             android:name="com.HanFeng.ui.RankingDetailActivity"
-            android:excludeFromRecents="true"
             android:exported="false" />
 
         <activity
             android:name="com.HanFeng.ui.SuspiciousDomainsActivity"
-            android:excludeFromRecents="true"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.DecisionDomainsActivity"
             android:exported="false" />
 
         <activity
             android:name="com.HanFeng.ui.MainActivity"
-            android:excludeFromRecents="true"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

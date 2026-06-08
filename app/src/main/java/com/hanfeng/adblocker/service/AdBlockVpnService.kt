@@ -19,6 +19,31 @@ import android.system.OsConstants
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import com.HanFeng.R
+import com.HanFeng.core.network.HttpsHandshakeEngine
+import com.HanFeng.core.network.HttpsBridgeFailureSupport
+import com.HanFeng.core.network.HttpsPipeline
+import com.HanFeng.core.network.LocalProxyBridgeConnectSupport
+import com.HanFeng.core.network.NetworkModeCoordinator
+import com.HanFeng.core.network.NetworkRuntimeSettingsStore
+import com.HanFeng.core.network.DnsRuntimeSupport
+import com.HanFeng.core.network.BridgeSocketSupport
+import com.HanFeng.core.network.BridgeSessionSupport
+import com.HanFeng.core.network.DecisionLogSupport
+import com.HanFeng.core.network.BridgeFlowStateSupport
+import com.HanFeng.core.network.BridgeFailureSupport
+import com.HanFeng.core.network.BridgeLifecycleSupport
+import com.HanFeng.core.network.BridgeReaderSupport
+import com.HanFeng.core.network.BridgeResetSupport
+import com.HanFeng.core.network.BridgeTerminalStateSupport
+import com.HanFeng.core.network.ClientPayloadReplaySupport
+import com.HanFeng.core.network.ExpiringTargetCacheSupport
+import com.HanFeng.core.network.FlowCacheSupport
+import com.HanFeng.core.network.RouteCacheMaintenanceSupport
+import com.HanFeng.core.network.ServerAckStateSupport
+import com.HanFeng.core.network.TcpSyntheticFlowEngine
+import com.HanFeng.core.network.TunPacketWriter
+import com.HanFeng.core.network.TrafficDecisionEngine
+import com.HanFeng.core.network.UpstreamDnsSupport
 import com.HanFeng.data.AppSettingsRepository
 import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.HttpsDecryptRouteRepository
@@ -34,6 +59,7 @@ import com.HanFeng.data.StatsRepository
 import com.HanFeng.data.WhitelistRepository
 import com.HanFeng.dns.DnsMessageParser
 import com.HanFeng.model.BlockRule
+import com.HanFeng.model.DnsQuestion
 import com.HanFeng.model.LocalProxyCoexistConfig
 import com.HanFeng.security.CertificateAuthorityManager
 import com.HanFeng.security.TlsClientHelloParser
@@ -46,9 +72,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -76,7 +102,7 @@ class AdBlockVpnService : VpnService() {
     private val ownerUidFailureCache = ConcurrentHashMap<String, Long>(512)
     private val appLabelCache = ConcurrentHashMap<Int, String>(128)
     private val vendorHintCache = ConcurrentHashMap<String, String>(512)
-    private val dnsResponseCache = LinkedHashMap<String, CachedDnsResponse>(256, 0.75f, true)
+    private val dnsResponseCache = LinkedHashMap<String, DnsRuntimeSupport.CachedDnsResponse>(256, 0.75f, true)
     private val decisionLogCache = LinkedHashMap<String, Long>(256, 0.75f, true)
     private val adIpTargetCache = LinkedHashMap<String, AdIpTarget>(1024, 0.75f, true)
     private val httpDecryptIpCache = LinkedHashMap<String, HttpDecryptTarget>(512, 0.75f, true)
@@ -87,9 +113,9 @@ class AdBlockVpnService : VpnService() {
     private val localProxyTcpFlowCache = LinkedHashMap<String, LocalProxyTcpFlow>(256, 0.75f, true)
     private val localProxyBridgeSocketCache = LinkedHashMap<String, LocalProxyBridgeSocketSession>(128, 0.75f, true)
     private val localProxyTargetAppCache = ConcurrentHashMap<String, Boolean>(512)
-    private val upstreamServerStates = linkedMapOf<String, UpstreamServerState>()
+    private val upstreamServerStates = linkedMapOf<String, DnsRuntimeSupport.UpstreamServerState>()
     private val dnsServerCacheLock = Any()
-    private val tunWriteLock = Any()
+    private val tunPacketWriter = TunPacketWriter()
     // DNS socket 连接池 - 复用 socket 避免每次创建开销
     private val dnsSocketPool = ConcurrentLinkedQueue<Pair<InetAddress, DatagramSocket>>()
     private val dnsSocketPoolLock = Any()
@@ -149,12 +175,14 @@ class AdBlockVpnService : VpnService() {
     private val forcedDnsRouteHosts by lazy(LazyThreadSafetyMode.NONE) {
         upstreamFallbackDnsHosts.toSet()
     }
-    @Volatile private var cachedDnsServers: CachedDnsServers? = null
+    @Volatile private var cachedDnsServers: DnsRuntimeSupport.CachedDnsServers? = null
     @Volatile private var httpDecryptEnabled = false
     @Volatile private var mitmCertificateInstalled = false
     @Volatile private var shizukuConnectionOwnerReady = false
     @Volatile private var shizukuAdControlReady = false
     @Volatile private var shizukuStrictAppAdBlockEnabled = false
+    @Volatile private var lastShizukuConnectionOwnerRetryAt = 0L
+    @Volatile private var lastShizukuAdControlRetryAt = 0L
     @Volatile private var localProxyCoexistConfig = LocalProxyCoexistConfig()
     @Volatile private var localProxyTargetPackages: Set<String> = emptySet()
     @Volatile private var localProxyReachable: Boolean? = null
@@ -263,67 +291,17 @@ class AdBlockVpnService : VpnService() {
     private fun startVpn(userInitiated: Boolean = false, preserveUserIntentOnFailure: Boolean = false) {
         refreshRuntimeFeatureFlags()
         if (vpnInterface != null && packetJob?.isActive == true) {
-            isRunning = true
-            notifyRuntimeStatusChanged()
-            startInProgress = false
-            LogRepository.append(this, "VPN start called while already running")
+            handleAlreadyRunningVpnStart()
             return
         }
-        if (!foregroundShown) {
-            val foregroundStarted = runCatching {
-                createChannel()
-                startForeground(NOTIFICATION_ID, buildPendingNotification())
-                foregroundShown = true
-            }.onFailure { error ->
-                isRunning = false
-                notifyRuntimeStatusChanged()
-                startInProgress = false
-                LogRepository.append(this, "VPN foreground start failed: ${error.message ?: error.javaClass.simpleName}")
-                stopSelf()
-            }.isSuccess
-            if (!foregroundStarted) {
-                return
-            }
-        }
+        if (!startForegroundIfNeeded()) return
         vpnInterface = runCatching { buildInterface() }
             .onFailure { error ->
                 LogRepository.append(this, "VPN establish failed: ${error.message ?: error.javaClass.simpleName}")
             }
             .getOrNull()
-        if (vpnInterface == null) {
-            isRunning = false
-            notifyRuntimeStatusChanged()
-            startInProgress = false
-            if (preserveUserIntentOnFailure) {
-                FeatureSettingsRepository.setAdBlockEnabled(this, true)
-                FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, true)
-                scheduleVpnReacquireAfterRevoke()
-                refreshForegroundNotification()
-                LogRepository.append(this, "VPN establish deferred: keep waiting for external VPN release")
-                return
-            }
-            FeatureSettingsRepository.setAdBlockEnabled(this, false)
-            FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
-            pendingReacquireJob?.cancel()
-            pendingReacquireJob = null
-            clearRuntimeState()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            foregroundShown = false
-            stopSelf()
-            return
-        }
-        isRunning = vpnInterface != null
-        notifyRuntimeStatusChanged()
-        startInProgress = false
-        FeatureSettingsRepository.setAdBlockEnabled(this, true)
-        FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
-        pendingReacquireJob?.cancel()
-        pendingReacquireJob = null
-        registerNetworkMonitoringIfNeeded()
-        invalidateDnsServerCache()
-        refreshForegroundNotification()
-        applyUnderlyingNetworks()
-        probeLocalProxyCoexistAsync()
+        if (vpnInterface == null && handleVpnEstablishFailure(preserveUserIntentOnFailure)) return
+        completeSuccessfulVpnStart()
         activeTunGeneration += 1L
         val tunGeneration = activeTunGeneration
         if (httpDecryptEnabled && mitmCertificateInstalled) {
@@ -332,21 +310,86 @@ class AdBlockVpnService : VpnService() {
         packetJob = scope.launch {
             runCatching { runPacketLoop(tunGeneration) }
                 .onFailure { error ->
-                    if (tunGeneration != activeTunGeneration || !isRunning) {
-                        LogRepository.append(
-                            this@AdBlockVpnService,
-                            "Ignore stale VPN loop shutdown generation=$tunGeneration active=$activeTunGeneration reason=${error.message ?: error.javaClass.simpleName}"
-                        )
-                        return@onFailure
-                    }
-                    LogRepository.append(this@AdBlockVpnService, "VPN loop crashed: ${error.message ?: error.javaClass.simpleName}")
-                    FeatureSettingsRepository.setAdBlockEnabled(this@AdBlockVpnService, false)
-                    FeatureSettingsRepository.setVpnRevokedByOtherVpn(this@AdBlockVpnService, false)
-                    pendingReacquireJob?.cancel()
-                    pendingReacquireJob = null
-                    stopVpn(stopService = false)
+                    handlePacketLoopFailure(tunGeneration, error)
                 }
         }
+        logAndWarmAfterVpnStart(userInitiated)
+    }
+
+    private fun handleAlreadyRunningVpnStart() {
+        isRunning = true
+        notifyRuntimeStatusChanged()
+        startInProgress = false
+        LogRepository.append(this, "VPN start called while already running")
+    }
+
+    private fun startForegroundIfNeeded(): Boolean {
+        if (foregroundShown) return true
+        return runCatching {
+            createChannel()
+            startForeground(NOTIFICATION_ID, buildPendingNotification())
+            foregroundShown = true
+        }.onFailure { error ->
+            isRunning = false
+            notifyRuntimeStatusChanged()
+            startInProgress = false
+            LogRepository.append(this, "VPN foreground start failed: ${error.message ?: error.javaClass.simpleName}")
+            stopSelf()
+        }.isSuccess
+    }
+
+    private fun handleVpnEstablishFailure(preserveUserIntentOnFailure: Boolean): Boolean {
+        isRunning = false
+        notifyRuntimeStatusChanged()
+        startInProgress = false
+        if (preserveUserIntentOnFailure) {
+            FeatureSettingsRepository.setAdBlockEnabled(this, true)
+            FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, true)
+            scheduleVpnReacquireAfterRevoke()
+            refreshForegroundNotification()
+            LogRepository.append(this, "VPN establish deferred: keep waiting for external VPN release")
+            return true
+        }
+        FeatureSettingsRepository.setAdBlockEnabled(this, false)
+        FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
+        finishPendingReacquireJob()
+        clearRuntimeState()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        foregroundShown = false
+        stopSelf()
+        return true
+    }
+
+    private fun completeSuccessfulVpnStart() {
+        isRunning = true
+        notifyRuntimeStatusChanged()
+        startInProgress = false
+        FeatureSettingsRepository.setAdBlockEnabled(this, true)
+        FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
+        finishPendingReacquireJob()
+        registerNetworkMonitoringIfNeeded()
+        invalidateDnsServerCache()
+        refreshForegroundNotification()
+        applyUnderlyingNetworks()
+        probeLocalProxyCoexistAsync()
+    }
+
+    private fun handlePacketLoopFailure(tunGeneration: Long, error: Throwable) {
+        if (tunGeneration != activeTunGeneration || !isRunning) {
+            LogRepository.append(
+                this,
+                "Ignore stale VPN loop shutdown generation=$tunGeneration active=$activeTunGeneration reason=${error.message ?: error.javaClass.simpleName}"
+            )
+            return
+        }
+        LogRepository.append(this, "VPN loop crashed: ${error.message ?: error.javaClass.simpleName}")
+        FeatureSettingsRepository.setAdBlockEnabled(this, false)
+        FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
+        finishPendingReacquireJob()
+        stopVpn(stopService = false)
+    }
+
+    private fun logAndWarmAfterVpnStart(userInitiated: Boolean) {
         LogRepository.append(this, if (userInitiated) "VPN started from user action" else "VPN started from background restore")
         HttpsMitmController.onVpnStarted(this)
         LogRepository.append(this, "VPN started")
@@ -404,8 +447,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun reloadVpn() {
-        pendingVpnReloadJob?.cancel()
-        pendingVpnReloadJob = null
+        clearPendingVpnReloadJob()
         refreshRuntimeFeatureFlags()
         LogRepository.append(this, "VPN reload requested")
         if (!performSeamlessReload()) {
@@ -442,20 +484,11 @@ class AdBlockVpnService : VpnService() {
         packetJob = scope.launch {
             runCatching { runPacketLoop(tunGeneration) }
                 .onFailure { error ->
-                    if (tunGeneration != activeTunGeneration || !isRunning) {
-                        LogRepository.append(
-                            this@AdBlockVpnService,
-                            "Ignore stale VPN loop shutdown after reload generation=$tunGeneration active=$activeTunGeneration reason=${error.message ?: error.javaClass.simpleName}"
-                        )
-                        return@onFailure
-                    }
-                    LogRepository.append(this@AdBlockVpnService, "VPN loop crashed after seamless reload: ${error.message ?: error.javaClass.simpleName}")
-                    stopVpn(stopService = false)
+                    handleSeamlessReloadPacketLoopFailure(tunGeneration, error)
                 }
         }
         previousPacketJob?.cancel()
-        runCatching { previousTunOutput?.close() }
-        runCatching { previousInterface.close() }
+        closePreviousSeamlessReloadResources(previousTunOutput, previousInterface)
         refreshForegroundNotification()
         HttpsMitmController.onVpnStarted(this)
         probeLocalProxyCoexistAsync()
@@ -463,20 +496,32 @@ class AdBlockVpnService : VpnService() {
         return true
     }
 
+    private fun handleSeamlessReloadPacketLoopFailure(tunGeneration: Long, error: Throwable) {
+        if (tunGeneration != activeTunGeneration || !isRunning) {
+            LogRepository.append(
+                this,
+                "Ignore stale VPN loop shutdown after reload generation=$tunGeneration active=$activeTunGeneration reason=${error.message ?: error.javaClass.simpleName}"
+            )
+            return
+        }
+        LogRepository.append(this, "VPN loop crashed after seamless reload: ${error.message ?: error.javaClass.simpleName}")
+        stopVpn(stopService = false)
+    }
+
+    private fun closePreviousSeamlessReloadResources(
+        previousTunOutput: FileOutputStream?,
+        previousInterface: ParcelFileDescriptor
+    ) {
+        runCatching { previousTunOutput?.close() }
+        runCatching { previousInterface.close() }
+    }
+
     private fun stopVpn(stopService: Boolean = true, keepForeground: Boolean = false) {
         isRunning = false
         notifyRuntimeStatusChanged()
         startInProgress = false
-        pendingVpnReloadJob?.cancel()
-        pendingVpnReloadJob = null
-        pendingReacquireJob?.cancel()
-        pendingReacquireJob = null
-        pendingRouteReloadJob?.cancel()
-        pendingRouteReloadJob = null
-        pendingLocalProxyProbeJob?.cancel()
-        pendingLocalProxyProbeJob = null
-        packetJob?.cancel()
-        packetJob = null
+        cancelPendingRuntimeJobs()
+        cancelPacketLoop()
         activeTunGeneration += 1L
         unregisterNetworkMonitoring()
         vpnInterface?.close()
@@ -502,12 +547,16 @@ class AdBlockVpnService : VpnService() {
             runCatching {
                 startVpn(userInitiated = userInitiated, preserveUserIntentOnFailure = preserveUserIntentOnFailure)
             }.onFailure { error ->
-                startInProgress = false
-                isRunning = false
-                notifyRuntimeStatusChanged()
-                LogRepository.append(this@AdBlockVpnService, "VPN async start failed: ${error.message ?: error.javaClass.simpleName}")
+                handleAsyncVpnStartFailure(error)
             }
         }
+    }
+
+    private fun handleAsyncVpnStartFailure(error: Throwable) {
+        startInProgress = false
+        isRunning = false
+        notifyRuntimeStatusChanged()
+        LogRepository.append(this, "VPN async start failed: ${error.message ?: error.javaClass.simpleName}")
     }
 
     private fun notifyRuntimeStatusChanged() {
@@ -517,7 +566,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun scheduleVpnReacquireAfterRevoke() {
-        pendingReacquireJob?.cancel()
+        clearPendingReacquireJob()
         refreshForegroundNotification()
         pendingReacquireJob = scope.launch {
             repeat(REACQUIRE_ATTEMPT_COUNT) { attempt ->
@@ -528,11 +577,11 @@ class AdBlockVpnService : VpnService() {
                 }
                 delay(delayMillis)
                 if (!FeatureSettingsRepository.isAdBlockEnabled(this@AdBlockVpnService)) {
-                    pendingReacquireJob = null
+                    finishPendingReacquireJob()
                     return@launch
                 }
                 if (!FeatureSettingsRepository.isVpnRevokedByOtherVpn(this@AdBlockVpnService)) {
-                    pendingReacquireJob = null
+                    finishPendingReacquireJob()
                     return@launch
                 }
                 val vpnPermissionReady = runCatching { VpnService.prepare(this@AdBlockVpnService) }.getOrNull() == null
@@ -540,31 +589,39 @@ class AdBlockVpnService : VpnService() {
                 LogRepository.append(this@AdBlockVpnService, "Attempting VPN reacquire after external VPN release #${attempt + 1}")
                 startVpn(userInitiated = false, preserveUserIntentOnFailure = true)
                 if (isRunning) {
-                    pendingRouteReloadJob?.cancel()
-                    pendingRouteReloadJob = scope.launch {
-                        delay(600)
-                        if (isRunning) {
-                            refreshRuntimeFeatureFlags()
-                            applyUnderlyingNetworks()
-                            probeLocalProxyCoexistAsync()
-                            refreshForegroundNotification()
-                            LogRepository.append(this@AdBlockVpnService, "VPN coexist recovery refresh completed after external VPN release")
-                        }
-                    }
-                    pendingReacquireJob = null
+                    schedulePostReacquireRecoveryRefresh()
+                    finishPendingReacquireJob()
                     return@launch
                 }
             }
             LogRepository.append(this@AdBlockVpnService, "VPN reacquire window expired after external VPN revoke")
-            pendingReacquireJob = null
+            finishPendingReacquireJob()
             refreshForegroundNotification()
         }
     }
 
+    private fun finishPendingReacquireJob() {
+        pendingReacquireJob = null
+    }
+
+    private fun schedulePostReacquireRecoveryRefresh() {
+        clearPendingRouteReloadJob()
+        pendingRouteReloadJob = scope.launch { runPostReacquireRecoveryRefresh() }
+    }
+
+    private suspend fun runPostReacquireRecoveryRefresh() {
+        delay(600)
+        if (isRunning) {
+            refreshRuntimeFeatureFlags()
+            applyUnderlyingNetworks()
+            probeLocalProxyCoexistAsync()
+            refreshForegroundNotification()
+            LogRepository.append(this, "VPN coexist recovery refresh completed after external VPN release")
+        }
+    }
+
     private fun isWaitingForReacquire(): Boolean {
-        return !isRunning &&
-            FeatureSettingsRepository.isAdBlockEnabled(this) &&
-            FeatureSettingsRepository.isVpnRevokedByOtherVpn(this)
+        return NetworkRuntimeSettingsStore.isWaitingForReacquire(this, isRunning)
     }
 
     private fun clearRuntimeState() {
@@ -572,11 +629,12 @@ class AdBlockVpnService : VpnService() {
         mitmCertificateInstalled = false
         shizukuConnectionOwnerReady = false
         shizukuAdControlReady = false
+        lastShizukuConnectionOwnerRetryAt = 0L
+        lastShizukuAdControlRetryAt = 0L
         lightweightPassThroughMode = false
         localProxyTargetPackages = emptySet()
         localProxyReachable = null
-        pendingLocalProxyProbeJob?.cancel()
-        pendingLocalProxyProbeJob = null
+        clearPendingLocalProxyProbeJob()
         TlsMitmSessionManager.clear(this)
         appNameCache.clear()
         domainAppCache.clear()
@@ -593,17 +651,47 @@ class AdBlockVpnService : VpnService() {
         httpsDecryptIpCache.clear()
         quicRouteCache.clear()
         httpsProxyFlowCache.clear()
-        httpsBridgeSocketCache.values.forEach { it.close() }
-        httpsBridgeSocketCache.clear()
+        FlowCacheSupport.clear(httpsBridgeSocketCache) { it.close() }
         localProxyTcpFlowCache.clear()
-        localProxyBridgeSocketCache.values.forEach { it.close() }
-        localProxyBridgeSocketCache.clear()
+        FlowCacheSupport.clear(localProxyBridgeSocketCache) { it.close() }
         upstreamServerStates.clear()
         cachedDnsServers = null
         dnsSocketPool.forEach { (_, socket) -> socket.close() }
         dnsSocketPool.clear()
         lastUnderlyingNetworkRefreshAt = 0L
         lastForegroundNotificationRefreshAt = 0L
+    }
+
+    private fun cancelPendingRuntimeJobs() {
+        clearPendingVpnReloadJob()
+        clearPendingReacquireJob()
+        clearPendingRouteReloadJob()
+        clearPendingLocalProxyProbeJob()
+    }
+
+    private fun cancelPacketLoop() {
+        packetJob?.cancel()
+        packetJob = null
+    }
+
+    private fun clearPendingVpnReloadJob() {
+        pendingVpnReloadJob?.cancel()
+        pendingVpnReloadJob = null
+    }
+
+    private fun clearPendingReacquireJob() {
+        pendingReacquireJob?.cancel()
+        pendingReacquireJob = null
+    }
+
+    private fun clearPendingRouteReloadJob() {
+        pendingRouteReloadJob?.cancel()
+        pendingRouteReloadJob = null
+    }
+
+    private fun clearPendingLocalProxyProbeJob() {
+        pendingLocalProxyProbeJob?.cancel()
+        pendingLocalProxyProbeJob = null
     }
 
     private fun buildInterface(): ParcelFileDescriptor? {
@@ -933,12 +1021,22 @@ class AdBlockVpnService : VpnService() {
         val info = PacketCodec.parse(packet, length) ?: return
         val isUdp = info.protocol == OsConstants.IPPROTO_UDP
         val isTcp = info.protocol == OsConstants.IPPROTO_TCP
-        if (lightweightPassThroughMode && !(isUdp && info.destinationPort == 53)) {
-            return
-        }
-        findBlockedIpNetwork(info.destinationAddress)?.let { network ->
-            return
-        }
+        if (shouldBypassPacketHandling(info, isUdp)) return
+        if (handleBlockedPacketTargets(info)) return
+        if (handleDnsPacket(info, output, isUdp)) return
+        if (handleLocalProxyPacket(info, isTcp, isUdp)) return
+        handleHttpDecryptPacket(info, output, isTcp, isUdp)
+    }
+
+    private fun shouldBypassPacketHandling(
+        info: com.HanFeng.model.PacketInfo,
+        isUdp: Boolean
+    ): Boolean {
+        return lightweightPassThroughMode && !(isUdp && info.destinationPort == 53)
+    }
+
+    private fun handleBlockedPacketTargets(info: com.HanFeng.model.PacketInfo): Boolean {
+        findBlockedIpNetwork(info.destinationAddress)?.let { return true }
         findMatchingIpRule(info)?.let { match ->
             StatsRepository.recordBlockedHttp(this, match.rule.vendor, match.appName, 32 * 1024)
             logDecisionOnce(
@@ -946,7 +1044,7 @@ class AdBlockVpnService : VpnService() {
                 message = "Blocked IP-CIDR flow ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} app=${match.appName} vendor=${match.rule.vendor} cidr=${match.rule.ipCidr ?: "unknown"}",
                 minIntervalMillis = 30_000L
             )
-            return
+            return true
         }
         findMatchingPortOnlyRule(info)?.let { match ->
             StatsRepository.recordBlockedHttp(this, match.rule.vendor, match.appName, 32 * 1024)
@@ -955,7 +1053,7 @@ class AdBlockVpnService : VpnService() {
                 message = "Blocked port-only flow ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} sourcePort=${info.sourcePort} app=${match.appName} vendor=${match.rule.vendor}",
                 minIntervalMillis = 30_000L
             )
-            return
+            return true
         }
         findAdIpTarget(info)?.let { target ->
             StatsRepository.recordBlockedHttp(this, target.vendor, target.appName, 32 * 1024)
@@ -964,194 +1062,222 @@ class AdBlockVpnService : VpnService() {
                 message = "Blocked ad IP flow ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} domain=${target.domain} app=${target.appName} vendor=${target.vendor} source=${target.source}",
                 minIntervalMillis = 30_000L
             )
-            return
+            return true
         }
-        if (isUdp && info.destinationPort == 53) {
-            if (!shouldHandleDns(info.destinationAddress)) {
-                logDecisionOnce(
-                    key = "dns-non-local-endpoint:${formatAddress(info.destinationAddress)}",
-                    message = "Observed DNS query to non-local endpoint ip=${formatAddress(info.destinationAddress)}, fallback to local DNS handler",
-                    minIntervalMillis = 30_000L
-                )
-            }
+        return false
+    }
 
-            val question = DnsMessageParser.parseQuestion(info.payload) ?: return
-
-            if (lightweightPassThroughMode) {
-                StatsRepository.recordRequest(this, "System", "系统")
-                readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
-                    output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
-                    return
-                }
-                val upstreamResponse = queryUpstreamDns(info.payload)?.response
-                    ?: readStaleCachedDnsResponse(question, info.payload)
-                    ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
-                cacheDnsResponse(question, upstreamResponse)
-                output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
-                return
-            }
-
-            // App 启动核心域名快速放行（避免冷加载开销，只针对少数关键域名）
-            if (RuleRepository.criticalStartupDomains.contains(question.domain)) {
-                val appName = resolveAppName(question.domain, info)
-                StatsRepository.recordRequest(this, "System", appName)
-                readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
-                    output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
-                    return
-                }
-                val upstreamResult = queryUpstreamDns(info.payload)
-                val upstreamResponse = upstreamResult?.response
-                    ?: readStaleCachedDnsResponse(question, info.payload)
-                    ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
-                cacheDnsResponse(question, upstreamResponse)
-                output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
-                return
-            }
-
-            // DNS 拦截决策优化：复用计算结果，避免重复调用
-            val domainContext = resolveDomainDecisionContext(
-                domain = question.domain,
-                info = info,
-                qType = question.qType
-            )
-            val appName = domainContext.appName
-            val matchedRule = domainContext.matchedRule
-            val isBlocked = matchedRule != null
-            val vendor = domainContext.vendor
-            if (isBlocked) {
-                output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
-                StatsRepository.recordBlockedDns(this, vendor, appName, 512)
-                logDecisionOnce(
-                    key = "dns-block:${question.domain}:${question.qType}:${appName}",
-                    message = "Blocked DNS domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
-                    minIntervalMillis = 20_000L
-                )
-                return
-            }
-
-            StatsRepository.recordRequest(this, vendor, appName)
+    private fun handleDnsPacket(
+        info: com.HanFeng.model.PacketInfo,
+        output: FileOutputStream,
+        isUdp: Boolean
+    ): Boolean {
+        if (!(isUdp && info.destinationPort == 53)) return false
+        if (!shouldHandleDns(info.destinationAddress)) {
             logDecisionOnce(
-                key = "dns-pass:${question.domain}:${question.qType}:${appName}",
-                message = "Passed DNS domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
+                key = "dns-non-local-endpoint:${formatAddress(info.destinationAddress)}",
+                message = "Observed DNS query to non-local endpoint ip=${formatAddress(info.destinationAddress)}, fallback to local DNS handler",
                 minIntervalMillis = 30_000L
             )
-            RuleRepository.reportUnknownVendorIfNeeded(
-                context = this,
-                vendor = vendor,
-                domain = question.domain,
-                appName = appName,
-                signal = RuleRepository.SuspiciousSignal.DNS_QUERY
-            )
+        }
+        val question = DnsMessageParser.parseQuestion(info.payload) ?: return true
+        if (lightweightPassThroughMode) {
+            handlePassThroughDnsQuery(info, question, output)
+            return true
+        }
+        if (RuleRepository.criticalStartupDomains.contains(question.domain)) {
+            handleCriticalStartupDnsQuery(info, question, output)
+            return true
+        }
+        handleManagedDnsQuery(info, question, output)
+        return true
+    }
 
-            readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
-                output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
-                return
-            }
-
-            val upstreamResult = queryUpstreamDns(info.payload)
-            val upstreamResponse = upstreamResult?.response
-                ?: readStaleCachedDnsResponse(question, info.payload)
-                ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
-
-            // CNAME 别名检查优化：复用 vendor 缓存
-            // CNAME 别名链式检测（防止多层 CNAME 绕过）
-            val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
-            var blockedAliasTarget: String? = null
-            if (aliasTargets.isNotEmpty()) {
-                // 检查所有 CNAME 目标（包括多级 CNAME）
-                for (aliasTarget in aliasTargets) {
-                    if (isProtectedTrafficDomain(aliasTarget)) continue
-                    val aliasContext = resolveDomainDecisionContext(
-                        domain = aliasTarget,
-                        info = info,
-                        qType = question.qType,
-                        knownAppName = appName
-                    )
-                    val matchedAliasRule = aliasContext.matchedRule
-                    val aliasVendor = aliasContext.vendor
-                    if (matchedAliasRule != null && shouldTreatAsTrackedAdTarget(
-                            domain = aliasTarget,
-                            appName = appName,
-                            vendor = aliasVendor,
-                            matchedRule = matchedAliasRule,
-                            includeProtectedNovelUrl = false,
-                            includeForceNovelQuic = false
-                        )) {
-                        RuleRepository.reportUnknownVendorIfNeeded(
-                            context = this,
-                            vendor = aliasVendor,
-                            domain = aliasTarget,
-                            appName = appName,
-                            signal = RuleRepository.SuspiciousSignal.DNS_ALIAS,
-                            confidenceBoost = 1,
-                            refererDomain = question.domain
-                        )
-                        blockedAliasTarget = aliasTarget
-                        break
-                    }
-                }
-            }
-            if (blockedAliasTarget != null) {
-                output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
-                StatsRepository.recordBlockedDns(this, vendor, appName, 512)
-                return
-            }
-            if (aliasTargets.isNotEmpty()) {
-                rememberHttpDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
-                rememberHttpsDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
-                rememberQuicAliasTargets(question, aliasTargets, upstreamResponse, appName)
-                rememberAdIpTargetsForAliases(question, aliasTargets, upstreamResponse, appName)
-            }
-            rememberQuicTargets(question, upstreamResponse, appName, vendor)
-            rememberHttpDecryptTargets(question, upstreamResponse, appName, vendor)
-            rememberHttpsDecryptTargets(question, upstreamResponse, appName, vendor)
-            rememberAdIpTargets(question, upstreamResponse, appName, vendor)
-            cacheDnsResponse(question, upstreamResponse)
-            output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
+    private fun handlePassThroughDnsQuery(
+        info: com.HanFeng.model.PacketInfo,
+        question: DnsQuestion,
+        output: FileOutputStream
+    ) {
+        StatsRepository.recordRequest(this, "System", "系统")
+        readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
+            output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
             return
         }
+        val upstreamResponse = queryUpstreamDns(info.payload)?.response
+            ?: readStaleCachedDnsResponse(question, info.payload)
+            ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
+        cacheDnsResponse(question, upstreamResponse)
+        output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
+    }
 
-        if (isTcp && shouldRouteViaLocalProxy(info)) {
-            observeLocalProxyTcpFlow(info)
-            if (handleLocalProxyTcpHandshake(info)) {
-                return
+    private fun handleCriticalStartupDnsQuery(
+        info: com.HanFeng.model.PacketInfo,
+        question: DnsQuestion,
+        output: FileOutputStream
+    ) {
+        val appName = resolveAppName(question.domain, info)
+        StatsRepository.recordRequest(this, "System", appName)
+        readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
+            output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
+            return
+        }
+        val upstreamResult = queryUpstreamDns(info.payload)
+        val upstreamResponse = upstreamResult?.response
+            ?: readStaleCachedDnsResponse(question, info.payload)
+            ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
+        cacheDnsResponse(question, upstreamResponse)
+        output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
+    }
+
+    private fun handleManagedDnsQuery(
+        info: com.HanFeng.model.PacketInfo,
+        question: DnsQuestion,
+        output: FileOutputStream
+    ) {
+        val domainContext = resolveDomainDecisionContext(
+            domain = question.domain,
+            info = info,
+            qType = question.qType
+        )
+        val appName = domainContext.appName
+        val vendor = domainContext.vendor
+        if (domainContext.matchedRule != null) {
+            output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
+            StatsRepository.recordBlockedDns(this, vendor, appName, 512)
+            logDecisionOnce(
+                key = "dns-block:${question.domain}:${question.qType}:${appName}",
+                message = "Blocked DNS domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
+                minIntervalMillis = 20_000L
+            )
+            return
+        }
+        StatsRepository.recordRequest(this, vendor, appName)
+        logDecisionOnce(
+            key = "dns-pass:${question.domain}:${question.qType}:${appName}",
+            message = "Passed DNS domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
+            minIntervalMillis = 30_000L
+        )
+        RuleRepository.reportUnknownVendorIfNeeded(
+            context = this,
+            vendor = vendor,
+            domain = question.domain,
+            appName = appName,
+            signal = RuleRepository.SuspiciousSignal.DNS_QUERY
+        )
+        readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
+            output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
+            return
+        }
+        val upstreamResult = queryUpstreamDns(info.payload)
+        val upstreamResponse = upstreamResult?.response
+            ?: readStaleCachedDnsResponse(question, info.payload)
+            ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
+        val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
+        if (handleBlockedDnsAliasTargets(info, question, appName, vendor, aliasTargets, output)) return
+        if (aliasTargets.isNotEmpty()) {
+            rememberHttpDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
+            rememberHttpsDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
+            rememberQuicAliasTargets(question, aliasTargets, upstreamResponse, appName)
+            rememberAdIpTargetsForAliases(question, aliasTargets, upstreamResponse, appName)
+        }
+        rememberQuicTargets(question, upstreamResponse, appName, vendor)
+        rememberHttpDecryptTargets(question, upstreamResponse, appName, vendor)
+        rememberHttpsDecryptTargets(question, upstreamResponse, appName, vendor)
+        rememberAdIpTargets(question, upstreamResponse, appName, vendor)
+        cacheDnsResponse(question, upstreamResponse)
+        output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
+    }
+
+    private fun handleBlockedDnsAliasTargets(
+        info: com.HanFeng.model.PacketInfo,
+        question: DnsQuestion,
+        appName: String,
+        vendor: String,
+        aliasTargets: List<String>,
+        output: FileOutputStream
+    ): Boolean {
+        val blockedAliasTarget = findBlockedDnsAliasTarget(info, question, appName, aliasTargets)
+        if (blockedAliasTarget == null) return false
+        output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return true))
+        StatsRepository.recordBlockedDns(this, vendor, appName, 512)
+        return true
+    }
+
+    private fun findBlockedDnsAliasTarget(
+        info: com.HanFeng.model.PacketInfo,
+        question: DnsQuestion,
+        appName: String,
+        aliasTargets: List<String>
+    ): String? {
+        if (aliasTargets.isEmpty()) return null
+        for (aliasTarget in aliasTargets) {
+            if (isProtectedTrafficDomain(aliasTarget)) continue
+            val aliasContext = resolveDomainDecisionContext(
+                domain = aliasTarget,
+                info = info,
+                qType = question.qType,
+                knownAppName = appName
+            )
+            val matchedAliasRule = aliasContext.matchedRule
+            val aliasVendor = aliasContext.vendor
+            if (matchedAliasRule != null && shouldTreatAsTrackedAdTarget(
+                    domain = aliasTarget,
+                    appName = appName,
+                    vendor = aliasVendor,
+                    matchedRule = matchedAliasRule,
+                    includeProtectedNovelUrl = false,
+                    includeForceNovelQuic = false
+                )) {
+                RuleRepository.reportUnknownVendorIfNeeded(
+                    context = this,
+                    vendor = aliasVendor,
+                    domain = aliasTarget,
+                    appName = appName,
+                    signal = RuleRepository.SuspiciousSignal.DNS_ALIAS,
+                    confidenceBoost = 1,
+                    refererDomain = question.domain
+                )
+                return aliasTarget
             }
         }
+        return null
+    }
 
+    private fun handleLocalProxyPacket(
+        info: com.HanFeng.model.PacketInfo,
+        isTcp: Boolean,
+        isUdp: Boolean
+    ): Boolean {
+        if (isTcp && shouldRouteViaLocalProxy(info)) {
+            observeLocalProxyTcpFlow(info)
+            if (handleLocalProxyTcpHandshake(info)) return true
+        }
         if (isUdp) {
             observeLocalProxyUdpFlow(info)
         }
+        return false
+    }
 
-        if (httpDecryptEnabled && shouldBlockEncryptedDnsDirectFlow(info)) {
-            return
-        }
-
-        if (!httpDecryptEnabled) {
-            return
-        }
+    private fun handleHttpDecryptPacket(
+        info: com.HanFeng.model.PacketInfo,
+        output: FileOutputStream,
+        isTcp: Boolean,
+        isUdp: Boolean
+    ): Boolean {
+        if (httpDecryptEnabled && shouldBlockEncryptedDnsDirectFlow(info)) return true
+        if (!httpDecryptEnabled) return true
         if (isTcp) {
-            if (shouldBlockHttpDecryptConnection(info)) {
-                return
-            }
-            // Observe ClientHello first so the same packet can prewarm the TLS bridge
-            // before synthetic HTTPS proxy state attempts to bind and consume it.
+            if (shouldBlockHttpDecryptConnection(info)) return true
             observeHttpsClientHello(info)
             observeHttpsTransparentProxyFlow(info)
-            if (handleHttpsProxyHandshake(info, output)) {
-                return
-            }
-            return
+            return handleHttpsProxyHandshake(info, output)
         }
-        if (isUdp && info.destinationPort == 443 && shouldBlockQuicFlow(info)) {
-            return
-        }
+        return isUdp && info.destinationPort == 443 && shouldBlockQuicFlow(info)
     }
 
     private fun shouldBlockQuicFlow(info: com.HanFeng.model.PacketInfo): Boolean {
-        if (info.protocol != OsConstants.IPPROTO_UDP || info.destinationPort != 443) return false
         val payload = info.payload
-        if (payload.isEmpty()) return false
-        if (!looksLikeQuicPacket(payload)) return false
+        val payloadLooksLikeQuic = looksLikeQuicPacket(payload)
 
         val cacheKeys = buildCacheKeys(info)
         val localProxyTarget = belongsToLocalProxyTargetUid(cacheKeys)
@@ -1173,8 +1299,6 @@ class AdBlockVpnService : VpnService() {
             return true
         }
         val domain = httpsTarget?.domain ?: route?.domain ?: return false
-        if (RuleRepository.isWhitelistedDomain(domain)) return false
-        if (RuleRepository.isSensitiveAuthDomain(domain)) return false
 
         val domainContext = resolveDomainDecisionContext(
             domain = domain,
@@ -1187,20 +1311,26 @@ class AdBlockVpnService : VpnService() {
             sourcePort = info.sourcePort
         )
         val appName = domainContext.appName
-        if (RuleRepository.isGameCoreDomain(domain) || RuleRepository.isCommunityAppHint(appName) || RuleRepository.isSocialCoreDomain(domain)) {
-            return false
-        }
         val vendor = domainContext.vendor
         val matchedRule = domainContext.matchedRule
         val bypassReason = HttpsMitmRepository.getActiveBypassReason(this, domain)
-        val shouldForceTcpFallback = httpDecryptEnabled && httpsTarget != null && matchedRule != null && bypassReason == null
-        if (matchedRule == null && !shouldForceTcpFallback) return false
+        val decision = TrafficDecisionEngine.shouldBlockQuicFlow(
+            TrafficDecisionEngine.QuicBlockInput(
+                packet = info,
+                payloadLooksLikeQuic = payloadLooksLikeQuic,
+                localProxyTarget = localProxyTarget,
+                domain = domain,
+                appName = appName,
+                vendor = vendor,
+                matchedRule = matchedRule,
+                bypassReason = bypassReason,
+                httpDecryptEnabled = httpDecryptEnabled,
+                hasHttpsTarget = httpsTarget != null
+            )
+        )
+        if (!decision.blocked) return false
 
-        val reason = when {
-            localProxyTarget -> "local-proxy-force-tcp"
-            matchedRule != null -> "matched-rule"
-            else -> "force-tcp-fallback"
-        }
+        val reason = decision.reason ?: "unknown"
         StatsRepository.recordBlockedHttp(this, vendor, appName, 64 * 1024)
         logDecisionOnce(
             key = "quic-block:$domain:$destinationIp",
@@ -1234,39 +1364,48 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun shouldRouteViaLocalProxy(info: com.HanFeng.model.PacketInfo): Boolean {
-        if (info.protocol != OsConstants.IPPROTO_TCP) return false
         val config = localProxyCoexistConfig
-        if (!config.enabled) return false
-        if (localProxyReachable != true) return false
-        val port = config.port ?: return false
-        if (port !in 1..65535) return false
-        if (localProxyTargetPackages.isEmpty()) return false
         val cacheKeys = buildCacheKeys(info)
-        localProxyTargetAppCache[cacheKeys.flowKey]?.let { return it }
-        localProxyTargetAppCache[cacheKeys.sourcePortKey]?.let { return it }
-        val targetContext = resolveDestinationAppContext(info) ?: return false
-        val destinationIp = targetContext.destinationIp
-        if (isLocalProxyEndpoint(destinationIp, info.destinationPort)) {
+        val cachedFlowDecision = localProxyTargetAppCache[cacheKeys.flowKey]
+        val cachedSourcePortDecision = localProxyTargetAppCache[cacheKeys.sourcePortKey]
+        val targetContext = resolveDestinationAppContext(info)
+        val matched = TrafficDecisionEngine.shouldRouteViaLocalProxy(
+            TrafficDecisionEngine.LocalProxyRouteInput(
+                packet = info,
+                configHost = config.host,
+                configPort = config.port,
+                configEnabled = config.enabled,
+                localProxyReachable = localProxyReachable,
+                targetPackages = localProxyTargetPackages,
+                cachedFlowDecision = cachedFlowDecision,
+                cachedSourcePortDecision = cachedSourcePortDecision,
+                destinationIp = targetContext?.destinationIp,
+                appName = targetContext?.appName,
+                belongsToTargetApp = targetContext?.appName?.let(::belongsToLocalProxyTarget) == true,
+                belongsToTargetUid = belongsToLocalProxyTargetUid(cacheKeys)
+            )
+        )
+        if (targetContext != null && TrafficDecisionEngine.isLocalProxyEndpoint(
+                targetContext.destinationIp,
+                info.destinationPort,
+                config.host,
+                config.port
+            )) {
             localProxyTargetAppCache[cacheKeys.flowKey] = false
             logDecisionOnce(
-                key = "local-proxy-route-skip:$destinationIp:${info.destinationPort}",
-                message = "Skipped local proxy reroute for direct proxy endpoint ip=$destinationIp port=${info.destinationPort}",
+                key = "local-proxy-route-skip:${targetContext.destinationIp}:${info.destinationPort}",
+                message = "Skipped local proxy reroute for direct proxy endpoint ip=${targetContext.destinationIp} port=${info.destinationPort}",
                 minIntervalMillis = 15_000L
             )
             return false
         }
-        val appName = targetContext.appName
-        val matched = belongsToLocalProxyTarget(appName) || belongsToLocalProxyTargetUid(cacheKeys)
         localProxyTargetAppCache[cacheKeys.flowKey] = matched
         localProxyTargetAppCache[cacheKeys.sourcePortKey] = matched
         return matched
     }
 
     private fun belongsToLocalProxyTarget(appName: String): Boolean {
-        if (appName.isBlank() || localProxyTargetPackages.isEmpty()) return false
-        return localProxyTargetPackages.any { packageName ->
-            appName == packageName || appName.endsWith("($packageName)")
-        }
+        return NetworkModeCoordinator.belongsToLocalProxyTarget(appName, localProxyTargetPackages)
     }
 
     private fun belongsToLocalProxyTargetUid(cacheKeys: AppResolveCacheKeys): Boolean {
@@ -1279,8 +1418,7 @@ class AdBlockVpnService : VpnService() {
             ?.distinct()
             .orEmpty()
         val selectedPackage = selectBestPackageForUid(packages)
-        if (selectedPackage != null && selectedPackage in localProxyTargetPackages) return true
-        return packages.any { packageName -> packageName in localProxyTargetPackages }
+        return NetworkModeCoordinator.belongsToLocalProxyUid(packages, selectedPackage, localProxyTargetPackages)
     }
 
     private fun shouldBlockEncryptedDnsDirectFlow(info: com.HanFeng.model.PacketInfo): Boolean {
@@ -1292,21 +1430,20 @@ class AdBlockVpnService : VpnService() {
         val httpsTarget = synchronized(httpsDecryptIpCache) { httpsDecryptIpCache[destinationIp] }
         val quicTarget = synchronized(quicRouteCache) { quicRouteCache[destinationIp] }
         val trackedTargetDomain = httpsTarget?.domain ?: quicTarget?.domain
-        val trackedTargetBypassProtection = trackedTargetDomain?.let(RuleRepository::isBypassProtectionDomain) == true
-        if (!currentDnsEndpoint && !knownPublicDnsEndpoint) {
-            if (port != 443 && port != 853 && port != 784 && port != 8853) return false
-            if (!trackedTargetBypassProtection) return false
-        }
-        val encryptedDnsPort = when (port) {
-            853 -> true
-            784, 8853 -> knownPublicDnsEndpoint
-            443 -> knownPublicDnsEndpoint || trackedTargetBypassProtection
-            else -> false
-        }
-        if (!encryptedDnsPort) return false
         val appName = httpsTarget?.appName?.takeIf { it.isNotBlank() }
             ?: quicTarget?.appName?.takeIf { it.isNotBlank() }
             ?: targetContext.appName
+        val blocked = TrafficDecisionEngine.shouldBlockEncryptedDnsDirectFlow(
+            input = TrafficDecisionEngine.EncryptedDnsDirectInput(
+                destinationIp = destinationIp,
+                port = port,
+                appName = appName,
+                trackedTargetDomain = trackedTargetDomain
+            ),
+            isCurrentDnsEndpoint = currentDnsEndpoint,
+            isKnownPublicDnsEndpoint = knownPublicDnsEndpoint
+        )
+        if (!blocked) return false
         StatsRepository.recordBlockedHttp(this, "加密DNS", appName, 8 * 1024)
         logDecisionOnce(
             key = "encrypted-dns-direct:$destinationIp:$port",
@@ -1322,16 +1459,20 @@ class AdBlockVpnService : VpnService() {
         destinationIp: String,
         appName: String
     ): Boolean {
+        val isKnownPublicDnsEndpoint = isKnownPublicDnsEndpoint(destinationIp)
+        val isCurrentDnsEndpoint = isCurrentDnsEndpoint(destinationIp)
+        val knownDnsEndpoint = isKnownPublicDnsEndpoint || isCurrentDnsEndpoint
+        val blocked = TrafficDecisionEngine.shouldBlockEncryptedDnsClientHello(
+            input = TrafficDecisionEngine.EncryptedDnsClientHelloInput(
+                sniHost = sniHost,
+                alpnProtocols = alpnProtocols,
+                destinationIp = destinationIp
+            ),
+            isCurrentDnsEndpoint = isCurrentDnsEndpoint,
+            isKnownPublicDnsEndpoint = isKnownPublicDnsEndpoint
+        )
+        if (!blocked) return false
         val normalizedSni = sniHost.lowercase()
-        val looksLikeEncryptedDnsHost = RuleRepository.isBypassProtectionDomain(normalizedSni)
-        val offersHttp2OrHttp3 = alpnProtocols.any { protocol ->
-            protocol.equals("h2", ignoreCase = true) ||
-                protocol.equals("h3", ignoreCase = true) ||
-                protocol.startsWith("h3-", ignoreCase = true)
-        }
-        val knownDnsEndpoint = isKnownPublicDnsEndpoint(destinationIp) || isCurrentDnsEndpoint(destinationIp)
-        if (!looksLikeEncryptedDnsHost) return false
-        if (!offersHttp2OrHttp3 && !knownDnsEndpoint) return false
         StatsRepository.recordBlockedHttp(this, "加密DNS", appName, 8 * 1024)
         logDecisionOnce(
             key = "encrypted-dns-clienthello:$normalizedSni:$destinationIp",
@@ -1357,16 +1498,11 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun shouldBlockHttpDecryptConnection(info: com.HanFeng.model.PacketInfo): Boolean {
-        if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 80) return false
         val ip = formatAddress(info.destinationAddress)
         maybePruneRouteCaches()
         val target = synchronized(httpDecryptIpCache) {
             httpDecryptIpCache[ip]
         } ?: return false
-        if (RuleRepository.isSensitiveAuthDomain(target.domain)) return false
-        if (RuleRepository.isSocialCoreDomain(target.domain)) return false
-        if (isProtectedTrafficDomain(target.domain)) return false
-        // HTTP 连接拦截优化：复用计算结果，避免重复调用
         val domainContext = resolveDomainDecisionContext(
             domain = target.domain,
             info = info,
@@ -1377,7 +1513,26 @@ class AdBlockVpnService : VpnService() {
         val appName = domainContext.appName
         val matchedRule = domainContext.matchedRule
         val vendor = domainContext.vendor
-        if (!shouldTreatAsTrackedAdTarget(target.domain, appName, vendor, matchedRule, includeProtectedNovelUrl = false, includeForceNovelQuic = false)) {
+        val decision = TrafficDecisionEngine.shouldBlockHttpDecryptConnection(
+            input = TrafficDecisionEngine.HttpDecryptBlockInput(
+                packet = info,
+                domain = target.domain,
+                appName = appName,
+                vendor = vendor,
+                matchedRule = matchedRule
+            ),
+            shouldTreatAsTrackedAdTarget = { domain, resolvedAppName, resolvedVendor, resolvedMatchedRule ->
+                shouldTreatAsTrackedAdTarget(
+                    domain = domain,
+                    appName = resolvedAppName,
+                    vendor = resolvedVendor,
+                    matchedRule = resolvedMatchedRule,
+                    includeProtectedNovelUrl = false,
+                    includeForceNovelQuic = false
+                )
+            }
+        )
+        if (!decision.blocked) {
             logDecisionOnce(
                 key = "http-pass:${target.domain}:$ip:${info.sourcePort}",
                 message = "Passed HTTP connection domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source}",
@@ -1442,10 +1597,25 @@ class AdBlockVpnService : VpnService() {
         if (shouldBlockEncryptedDnsClientHello(sniHost, clientHelloInfo.offeredAlpnProtocols, destinationIp, appName)) {
             return
         }
-        if (!blockedTarget && !targetGeneralAd && RuleRepository.isWhitelistedDomain(decryptTarget.domain)) return
-        if (!blockedSni && !sniGeneralAd && RuleRepository.isWhitelistedDomain(sniHost)) return
-        if (RuleRepository.isSensitiveAuthDomain(decryptTarget.domain)) return
-        if (RuleRepository.isSensitiveAuthDomain(sniHost)) return
+        val clientHelloDecision = HttpsPipeline.decideClientHello(
+            HttpsPipeline.ClientHelloInput(
+                targetDomain = decryptTarget.domain,
+                sniHost = sniHost,
+                blockedTarget = blockedTarget,
+                blockedSni = blockedSni,
+                targetGeneralAd = targetGeneralAd,
+                sniGeneralAd = sniGeneralAd,
+                targetSocialCore = RuleRepository.isSocialCoreDomain(decryptTarget.domain),
+                sniSocialCore = RuleRepository.isSocialCoreDomain(sniHost),
+                targetProtected = isProtectedTrafficDomain(decryptTarget.domain),
+                sniProtected = isProtectedTrafficDomain(sniHost),
+                targetWhitelisted = RuleRepository.isWhitelistedDomain(decryptTarget.domain),
+                sniWhitelisted = RuleRepository.isWhitelistedDomain(sniHost),
+                targetSensitive = RuleRepository.isSensitiveAuthDomain(decryptTarget.domain),
+                sniSensitive = RuleRepository.isSensitiveAuthDomain(sniHost)
+            )
+        )
+        if (!clientHelloDecision.shouldObserve) return
         val decryptSource = decryptTarget.source
         val flowKey = buildCacheKeys(info).flowKey
         logDecisionOnce(
@@ -1502,371 +1672,66 @@ class AdBlockVpnService : VpnService() {
         if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return
         val flowKey = buildCacheKeys(info).flowKey
         val ip = formatAddress(info.destinationAddress)
-        if (isLocalLoopOrProxyEndpoint(ip, info.destinationPort)) {
-            synchronized(httpsProxyFlowCache) {
-                httpsProxyFlowCache.remove(flowKey)
-            }
-            logDecisionOnce(
-                key = "https-transparent-skip-local:$ip:${info.destinationPort}",
-                message = "Skipped HTTPS transparent proxy tracking for local endpoint ip=$ip port=${info.destinationPort}",
-                minIntervalMillis = 15_000L
-            )
-            return
-        }
+        if (shouldSkipHttpsTransparentProxyTracking(flowKey, ip, info.destinationPort)) return
         maybePruneRouteCaches()
         val target = synchronized(httpsDecryptIpCache) {
             httpsDecryptIpCache[ip]
         } ?: return
-        if (RuleRepository.isSensitiveAuthDomain(target.domain)) {
-            synchronized(httpsProxyFlowCache) {
-                httpsProxyFlowCache.remove(flowKey)
-            }
-            return
-        }
-        if (RuleRepository.isSocialCoreDomain(target.domain)) {
-            synchronized(httpsProxyFlowCache) {
-                httpsProxyFlowCache.remove(flowKey)
-            }
-            return
-        }
-        // TCP SYN 阶段检查规则（早期拦截广告连接）优化：复用计算结果
-        if (info.tcpFlags.hasTcpFlag(TCP_FLAG_SYN) && !info.tcpFlags.hasTcpFlag(TCP_FLAG_ACK)) {
-            val domainContext = resolveDomainDecisionContext(
+        val transparentDecision = HttpsPipeline.decideTransparentProxy(
+            HttpsPipeline.TransparentProxyInput(
                 domain = target.domain,
-                info = info,
-                knownAppName = target.appName.takeIf { it.isNotBlank() },
-                destinationPort = info.destinationPort,
-                sourcePort = info.sourcePort
+                sensitive = RuleRepository.isSensitiveAuthDomain(target.domain),
+                socialCore = RuleRepository.isSocialCoreDomain(target.domain),
+                tcpFlags = info.tcpFlags,
+                hasPreparedBridgePort = TlsMitmSessionManager.findPreparedSession(
+                    targetIp = ip,
+                    targetPort = info.destinationPort,
+                    appName = target.appName.takeIf { it.isNotBlank() }
+                )?.localBridgePort != null,
+                hasPayload = info.payload.isNotEmpty(),
+                currentState = synchronized(httpsProxyFlowCache) { httpsProxyFlowCache[flowKey]?.state }
             )
-            val appName = domainContext.appName
-            val matchedRule = domainContext.matchedRule
-            val vendor = domainContext.vendor
-            if (shouldTreatAsTrackedAdTarget(target.domain, appName, vendor, matchedRule, includeProtectedNovelUrl = false, includeForceNovelQuic = false)) {
-                StatsRepository.recordBlockedMitm(this, vendor, appName, 64 * 1024)
-                LogRepository.append(
-                    this,
-                    "Blocked HTTPS connection at SYN domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source} via=https-decrypt-entry"
-                )
-                synchronized(httpsProxyFlowCache) {
-                    httpsProxyFlowCache.remove(flowKey)
-                }
-                return
-            }
-            logDecisionOnce(
-                key = "https-pass-syn:${target.domain}:$ip:${info.sourcePort}",
-                message = "Passed HTTPS SYN domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source}",
-                minIntervalMillis = 30_000L
-            )
-        }
-        
-        val cooldownReason = HttpsMitmRepository.getActiveBypassReason(this, target.domain)
-        if (cooldownReason != null) {
-            synchronized(httpsProxyFlowCache) {
-                httpsProxyFlowCache.remove(flowKey)
-            }
-            return
-        }
-
-        val existingSession = TlsMitmSessionManager.getSession(flowKey)
-        if (existingSession?.bypassMitm == true) {
-            synchronized(httpsProxyFlowCache) {
-                httpsProxyFlowCache.remove(flowKey)
-            }
-            return
-        }
-        
-        val currentProxyAppName = synchronized(httpsProxyFlowCache) {
-            httpsProxyFlowCache[flowKey]?.appName?.takeIf { it.isNotBlank() }
-        }
-        val targetAppName = target.appName.takeIf { it.isNotBlank() }
-            ?: currentProxyAppName
-        val preparedSession = TlsMitmSessionManager.findPreparedSession(
-            targetIp = ip,
-            targetPort = info.destinationPort,
-            appName = targetAppName
         )
-        val resolvedProxyAppName = currentProxyAppName
-            ?: preparedSession?.appName?.takeIf { it.isNotBlank() }
-            ?: targetAppName
-            ?: resolveAppName(target.domain, info)
-        
-        val flags = info.tcpFlags
-        synchronized(httpsProxyFlowCache) {
-            val current = httpsProxyFlowCache[flowKey]
-            val nextState = when {
-                flags.hasTcpFlag(TCP_FLAG_SYN) && !flags.hasTcpFlag(TCP_FLAG_ACK) -> "syn_seen"
-                flags.hasTcpFlag(TCP_FLAG_SYN) && flags.hasTcpFlag(TCP_FLAG_ACK) -> "syn_ack_seen"
-                flags.hasTcpFlag(TCP_FLAG_FIN) -> "fin_seen"
-                flags.hasTcpFlag(TCP_FLAG_RST) -> "rst_seen"
-                preparedSession?.localBridgePort != null -> "bridge_bound"
-                info.payload.isNotEmpty() -> "payload_seen"
-                else -> current?.state ?: "tracked"
-            }
-            httpsProxyFlowCache[flowKey] = HttpsProxyFlow(
-                flowKey = flowKey,
-                domain = target.domain,
-                vendor = target.vendor,
-                source = target.source,
-                targetIp = ip,
-                sourcePort = info.sourcePort,
-                appName = resolvedProxyAppName,
-                state = nextState,
-                bridgeHost = preparedSession?.localBridgeHost,
-                bridgePort = preparedSession?.localBridgePort,
-                lastSequenceNumber = info.tcpSequenceNumber,
-                lastAcknowledgementNumber = info.tcpAcknowledgementNumber,
-                lastSeenAt = System.currentTimeMillis()
-            )
-            while (httpsProxyFlowCache.size > 512) {
-                val firstKey = httpsProxyFlowCache.entries.firstOrNull()?.key ?: break
-                httpsProxyFlowCache.remove(firstKey)
-            }
+        if (!transparentDecision.shouldTrack) {
+            FlowCacheSupport.remove(httpsProxyFlowCache, flowKey)
+            return
         }
+        if (shouldBlockHttpsTransparentProxySyn(flowKey, target, ip, info)) return
+        if (shouldBypassHttpsTransparentProxyTracking(flowKey, target.domain)) return
+        val preparedBridge = resolveHttpsTransparentPreparedBridge(flowKey, ip, info, target)
+        trackHttpsTransparentProxyFlow(flowKey, target, ip, info, preparedBridge)
     }
 
     private fun observeLocalProxyTcpFlow(info: com.HanFeng.model.PacketInfo) {
         if (info.protocol != OsConstants.IPPROTO_TCP) return
         val flowKey = buildCacheKeys(info).flowKey
         val targetContext = resolveDestinationAppContext(info) ?: return
-        val targetIp = targetContext.destinationIp
-        val appName = targetContext.appName
-        val flags = info.tcpFlags
-        synchronized(localProxyTcpFlowCache) {
-            val current = localProxyTcpFlowCache[flowKey]
-            val nextState = when {
-                flags.hasTcpFlag(TCP_FLAG_SYN) && !flags.hasTcpFlag(TCP_FLAG_ACK) -> "syn_seen"
-                flags.hasTcpFlag(TCP_FLAG_SYN) && flags.hasTcpFlag(TCP_FLAG_ACK) -> "syn_ack_seen"
-                flags.hasTcpFlag(TCP_FLAG_FIN) -> "fin_seen"
-                flags.hasTcpFlag(TCP_FLAG_RST) -> "rst_seen"
-                info.payload.isNotEmpty() -> "payload_seen"
-                else -> current?.state ?: "tracked"
-            }
-            localProxyTcpFlowCache[flowKey] = LocalProxyTcpFlow(
-                flowKey = flowKey,
-                targetIp = targetIp,
-                targetPort = info.destinationPort,
-                sourcePort = info.sourcePort,
-                appName = appName,
-                state = nextState,
-                bridgeHost = localProxyCoexistConfig.host,
-                bridgePort = localProxyCoexistConfig.port,
-                lastSequenceNumber = info.tcpSequenceNumber,
-                lastAcknowledgementNumber = info.tcpAcknowledgementNumber,
-                lastSeenAt = System.currentTimeMillis()
-            )
-            while (localProxyTcpFlowCache.size > 512) {
-                val firstKey = localProxyTcpFlowCache.entries.firstOrNull()?.key ?: break
-                localProxyTcpFlowCache.remove(firstKey)
-            }
-        }
+        trackLocalProxyTcpFlow(flowKey, targetContext, info)
     }
 
     private fun handleLocalProxyTcpHandshake(info: com.HanFeng.model.PacketInfo): Boolean {
-        if (info.protocol != OsConstants.IPPROTO_TCP) return false
         val flowKey = buildCacheKeys(info).flowKey
-        val current = synchronized(localProxyTcpFlowCache) {
-            localProxyTcpFlowCache[flowKey]
-        } ?: return false
-        val bridgePort = current.bridgePort ?: return false
-        if (bridgePort !in 1..65535) return false
-        val flags = info.tcpFlags
-        val seq = info.tcpSequenceNumber ?: 0L
-        val ack = info.tcpAcknowledgementNumber ?: 0L
-        val payloadLength = info.payload.size.toLong()
-        if (flags.hasTcpFlag(TCP_FLAG_SYN) && !flags.hasTcpFlag(TCP_FLAG_ACK)) {
-            val serverSeq = current.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-            synchronized(localProxyTcpFlowCache) {
-                localProxyTcpFlowCache[flowKey] = current.copy(
-                    state = "syn_ack_sent",
-                    clientInitialSequence = seq,
-                    serverInitialSequence = serverSeq,
-                    lastSequenceNumber = seq,
-                    lastAcknowledgementNumber = ack,
-                    lastSeenAt = System.currentTimeMillis()
+        return executeCachedSyntheticHandshake(
+            info = info,
+            flowCache = localProxyTcpFlowCache,
+            flowKey = flowKey,
+            destinationPort = 443,
+            validateCurrent = {
+                val bridgePort = bridgePort
+                bridgePort in 1..65535
+            },
+            buildHandlers = { packetState, activeCurrent ->
+                buildLocalProxyHandshakeHandlers(
+                    flowKey = flowKey,
+                    current = activeCurrent,
+                    info = info,
+                    sequenceNumber = packetState.sequenceNumber,
+                    acknowledgementNumber = packetState.acknowledgementNumber,
+                    payloadLength = packetState.payloadLength,
+                    now = packetState.now
                 )
             }
-            writeTunPacket(
-                PacketCodec.buildTcpResponse(
-                    request = info,
-                    sequenceNumber = serverSeq,
-                    acknowledgementNumber = seq + 1,
-                    flags = TCP_FLAG_SYN or TCP_FLAG_ACK,
-                    windowSize = info.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
-                )
-            )
-            return true
-        }
-        if (current.state == "syn_ack_sent" && flags == TCP_FLAG_ACK && payloadLength == 0L) {
-            ensureLocalProxyBridgeSocket(flowKey, current, info)
-            synchronized(localProxyTcpFlowCache) {
-                localProxyTcpFlowCache[flowKey] = current.copy(
-                    state = "bridge_connecting",
-                    lastSequenceNumber = seq,
-                    lastAcknowledgementNumber = ack,
-                    clientNextSequence = seq,
-                    lastSeenAt = System.currentTimeMillis()
-                )
-            }
-            return true
-        }
-        if ((current.state == "bridge_connecting" || current.state == "established" || current.state == "payload_acknowledged") && (payloadLength > 0 || flags.hasTcpFlag(TCP_FLAG_PSH))) {
-            val serverSeq = current.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-            val expectedClientSeq = current.clientNextSequence ?: ((current.clientInitialSequence ?: seq) + 1)
-            val isRetransmission = seq < expectedClientSeq || (current.lastClientPayloadSequence == seq && current.lastClientPayloadLength == payloadLength)
-            if (seq > expectedClientSeq) {
-                val updatedBufferedSegments = if (info.payload.isNotEmpty()) {
-                    mergeBufferedClientSegments(current.bufferedClientSegments, ClientPayloadSegment(seq, info.payload))
-                } else {
-                    current.bufferedClientSegments
-                }
-                if (bufferedClientPayloadBytes(updatedBufferedSegments) > MAX_BUFFERED_CLIENT_BYTES) {
-                    emitLocalProxyBridgeReset(flowKey, info, "Buffered client window overflow reset local proxy flow target=${current.targetIp}:${current.targetPort}")
-                    return true
-                }
-                synchronized(localProxyTcpFlowCache) {
-                    val latest = localProxyTcpFlowCache[flowKey] ?: return@synchronized
-                    localProxyTcpFlowCache[flowKey] = latest.copy(
-                        bufferedClientSegments = updatedBufferedSegments,
-                        lastSeenAt = System.currentTimeMillis()
-                    )
-                }
-                writeTunPacket(
-                    PacketCodec.buildTcpResponse(
-                        request = info,
-                        sequenceNumber = serverSeq + 1,
-                        acknowledgementNumber = expectedClientSeq,
-                        flags = TCP_FLAG_ACK,
-                        windowSize = info.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
-                    )
-                )
-                return true
-            }
-            val inboundSegments = mutableListOf<ClientPayloadSegment>()
-            var ackNumber = expectedClientSeq
-            if (!isRetransmission && info.payload.isNotEmpty()) {
-                inboundSegments += ClientPayloadSegment(seq, info.payload)
-                ackNumber = maxOf(ackNumber, seq + payloadLength)
-            }
-            val flushResult = drainBufferedClientSegments(
-                mergeBufferedClientSegments(current.bufferedClientSegments, inboundSegments),
-                ackNumber
-            )
-            if (bufferedClientPayloadBytes(flushResult.remainingSegments) > MAX_BUFFERED_CLIENT_BYTES) {
-                emitLocalProxyBridgeReset(flowKey, info, "Buffered client replay overflow reset local proxy flow target=${current.targetIp}:${current.targetPort}")
-                return true
-            }
-            val bridgeConnected = synchronized(localProxyBridgeSocketCache) {
-                localProxyBridgeSocketCache.containsKey(flowKey)
-            }
-            if (bridgeConnected) {
-                flushResult.forwardSegments.forEach { segment ->
-                    forwardPayloadToLocalProxyBridge(flowKey, segment.payload)
-                }
-            }
-            val lastForwardedSegment = flushResult.forwardSegments.lastOrNull()
-            synchronized(localProxyTcpFlowCache) {
-                localProxyTcpFlowCache[flowKey] = current.copy(
-                    state = if (bridgeConnected) "payload_acknowledged" else "bridge_connecting",
-                    lastSequenceNumber = seq,
-                    lastAcknowledgementNumber = ack,
-                    clientNextSequence = flushResult.nextExpectedSequence,
-                    bufferedClientSegments = if (bridgeConnected) {
-                        flushResult.remainingSegments
-                    } else {
-                        mergeBufferedClientSegments(flushResult.remainingSegments, flushResult.forwardSegments)
-                    },
-                    lastClientPayloadSequence = if (bridgeConnected) {
-                        lastForwardedSegment?.sequenceNumber ?: current.lastClientPayloadSequence
-                    } else {
-                        current.lastClientPayloadSequence
-                    },
-                    lastClientPayloadLength = if (bridgeConnected) {
-                        lastForwardedSegment?.payload?.size?.toLong() ?: current.lastClientPayloadLength
-                    } else {
-                        current.lastClientPayloadLength
-                    },
-                    lastSeenAt = System.currentTimeMillis()
-                )
-            }
-            writeTunPacket(
-                PacketCodec.buildTcpResponse(
-                    request = info,
-                    sequenceNumber = serverSeq + 1,
-                    acknowledgementNumber = flushResult.nextExpectedSequence,
-                    flags = TCP_FLAG_ACK,
-                    windowSize = info.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
-                )
-            )
-            return true
-        }
-        if ((current.state == "server_payload_sent" || current.state == "payload_acknowledged") && flags == TCP_FLAG_ACK && payloadLength == 0L) {
-            if (current.pendingServerSegments.isNotEmpty() && current.serverNextSequence != null && ack < current.serverNextSequence) {
-                val remainingSegments = trimAcknowledgedServerSegments(current.pendingServerSegments, ack)
-                if (remainingSegments.isNotEmpty()) {
-                    resendPendingLocalProxyBridgePayload(info, current, remainingSegments)
-                    synchronized(localProxyTcpFlowCache) {
-                        val latest = localProxyTcpFlowCache[flowKey] ?: return@synchronized
-                        localProxyTcpFlowCache[flowKey] = latest.copy(
-                            pendingServerSegments = remainingSegments,
-                            lastSeenAt = System.currentTimeMillis()
-                        )
-                    }
-                    return true
-                }
-            }
-            synchronized(localProxyTcpFlowCache) {
-                val latest = localProxyTcpFlowCache[flowKey] ?: return@synchronized
-                localProxyTcpFlowCache[flowKey] = latest.copy(
-                    state = if (latest.state == "bridge_fin_sent") "bridge_fin_acked" else "server_payload_acked",
-                    pendingServerSegments = emptyList(),
-                    lastSequenceNumber = seq,
-                    lastAcknowledgementNumber = ack,
-                    lastSeenAt = System.currentTimeMillis()
-                )
-            }
-            return true
-        }
-        if (current.state == "bridge_fin_sent" && flags == TCP_FLAG_ACK && payloadLength == 0L) {
-            closeLocalProxyTcpFlow(flowKey, current, "Closed bridge-finished local proxy flow target=${current.targetIp}:${current.targetPort}")
-            return true
-        }
-        if (flags.hasTcpFlag(TCP_FLAG_FIN)) {
-            val serverSeqBase = current.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-            val nextServerSeq = current.serverNextSequence ?: (serverSeqBase + 1)
-            val ackNumber = seq + 1 + payloadLength
-            synchronized(localProxyTcpFlowCache) {
-                localProxyTcpFlowCache[flowKey] = current.copy(
-                    state = "fin_ack_sent",
-                    lastSequenceNumber = seq,
-                    lastAcknowledgementNumber = ack,
-                    serverNextSequence = nextServerSeq + 1,
-                    clientNextSequence = ackNumber,
-                    lastSeenAt = System.currentTimeMillis()
-                )
-            }
-            writeTunPacket(
-                PacketCodec.buildTcpResponse(
-                    request = info,
-                    sequenceNumber = nextServerSeq,
-                    acknowledgementNumber = ackNumber,
-                    flags = TCP_FLAG_FIN or TCP_FLAG_ACK,
-                    windowSize = info.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
-                )
-            )
-            synchronized(localProxyBridgeSocketCache) {
-                localProxyBridgeSocketCache.remove(flowKey)?.close()
-            }
-            return true
-        }
-        if (current.state == "fin_ack_sent" && flags == TCP_FLAG_ACK && payloadLength == 0L) {
-            closeLocalProxyTcpFlow(flowKey, current, "Closed synthetic local proxy flow target=${current.targetIp}:${current.targetPort}")
-            return true
-        }
-        if (flags.hasTcpFlag(TCP_FLAG_RST)) {
-            closeLocalProxyTcpFlow(flowKey, current, "Reset synthetic local proxy flow target=${current.targetIp}:${current.targetPort}")
-            return true
-        }
-        return false
+        )
     }
 
     private fun resendPendingLocalProxyBridgePayload(
@@ -1880,465 +1745,176 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun ensureLocalProxyBridgeSocket(flowKey: String, flow: LocalProxyTcpFlow, request: com.HanFeng.model.PacketInfo) {
-        synchronized(localProxyBridgeSocketCache) {
-            if (localProxyBridgeSocketCache.containsKey(flowKey)) return
-        }
-        val host = flow.bridgeHost ?: return
-        val port = flow.bridgePort ?: return
-        scope.launch {
-            runCatching {
-                val socket = Socket()
-                socket.tcpNoDelay = true
-                if (!protect(socket)) {
-                    LogRepository.append(this@AdBlockVpnService, "Protect local proxy bridge socket failed flow=$flowKey target=${flow.targetIp}:${flow.targetPort}")
-                }
-                socket.connect(InetSocketAddress(host, port), LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS)
-                val connectedBridge = performLocalProxyConnect(socket, request, host, port)
-                val session = LocalProxyBridgeSocketSession(
+        ensureBridgeSocketConnected(
+            sessionCache = localProxyBridgeSocketCache,
+            flowKey = flowKey,
+            bridgeHost = flow.bridgeHost,
+            bridgePort = flow.bridgePort,
+            connectBridge = { host, port ->
+                val socket = BridgeSocketSupport.createConnectedSocket(
+                    host = host,
+                    port = port,
+                    timeoutMillis = LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS,
+                    protect = this@AdBlockVpnService::protect,
+                    onProtectFailed = {
+                        logBridgeProtectFailure("local proxy bridge socket", flowKey, "target=${flow.targetIp}:${flow.targetPort}")
+                    }
+                )
+                LocalProxyBridgeConnectSupport.performLocalProxyConnect(
+                    socket = socket,
+                    request = request,
+                    host = host,
+                    port = port,
+                    timeoutMillis = LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS,
+                    protect = this@AdBlockVpnService::protect,
+                    onFallbackProtectFailed = {
+                        LogRepository.append(this@AdBlockVpnService, "Protect local proxy HTTP CONNECT socket failed target=${formatAddress(request.destinationAddress)}:${request.destinationPort}")
+                    }
+                )
+            },
+            createSession = { connectedBridge ->
+                LocalProxyBridgeSocketSession(
                     flowKey = flowKey,
                     requestTemplate = request,
                     socket = connectedBridge.socket,
                     input = connectedBridge.socket.getInputStream(),
                     output = connectedBridge.socket.getOutputStream()
                 )
-                synchronized(localProxyBridgeSocketCache) {
-                    localProxyBridgeSocketCache[flowKey] = session
-                }
+            },
+            onConnected = { session, connectedBridge ->
                 flushBufferedLocalProxyPayload(flowKey)
                 scope.launch { runLocalProxyBridgeReader(session) }
-                LogRepository.append(this@AdBlockVpnService, "Connected local proxy bridge flow=$flowKey target=${flow.targetIp}:${flow.targetPort} via=$host:$port protocol=${connectedBridge.protocol}")
-            }.onFailure {
-                LogRepository.append(this@AdBlockVpnService, "Connect local proxy bridge failed flow=$flowKey: ${it.message ?: it.javaClass.simpleName}")
-                emitLocalProxyBridgeReset(flowKey, request, "Bridge connect reset local proxy flow target=${flow.targetIp}:${flow.targetPort}")
-            }
-        }
-    }
-
-    private fun performSocks5Connect(socket: Socket, request: com.HanFeng.model.PacketInfo) {
-        val output = socket.getOutputStream()
-        val input = socket.getInputStream()
-        output.write(byteArrayOf(0x05, 0x01, 0x00))
-        output.flush()
-        val methodReply = ByteArray(2)
-        input.readFully(methodReply)
-        check(methodReply[0].toInt() == 0x05 && methodReply[1].toInt() == 0x00) { "SOCKS5 method negotiation failed" }
-        val addressType = if (request.version == 6) 0x04 else 0x01
-        val connectRequest = ByteArray(4 + request.destinationAddress.size + 2)
-        connectRequest[0] = 0x05
-        connectRequest[1] = 0x01
-        connectRequest[2] = 0x00
-        connectRequest[3] = addressType.toByte()
-        request.destinationAddress.copyInto(connectRequest, 4)
-        val portOffset = 4 + request.destinationAddress.size
-        connectRequest[portOffset] = ((request.destinationPort ushr 8) and 0xFF).toByte()
-        connectRequest[portOffset + 1] = (request.destinationPort and 0xFF).toByte()
-        output.write(connectRequest)
-        output.flush()
-        val header = ByteArray(4)
-        input.readFully(header)
-        check(header[0].toInt() == 0x05 && header[1].toInt() == 0x00) { "SOCKS5 connect failed code=${header[1].toInt() and 0xFF}" }
-        val addressLength = when (header[3].toInt() and 0xFF) {
-            0x01 -> 4
-            0x04 -> 16
-            0x03 -> input.read().takeIf { it >= 0 } ?: throw IllegalStateException("SOCKS5 domain length missing")
-            else -> throw IllegalStateException("SOCKS5 atyp unsupported")
-        }
-        val skip = ByteArray(addressLength + 2)
-        input.readFully(skip)
-    }
-
-    private fun performLocalProxyConnect(socket: Socket, request: com.HanFeng.model.PacketInfo, host: String, port: Int): LocalProxyConnectedSocket {
-        socket.soTimeout = LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS
-        val socksError = runCatching {
-            performSocks5Connect(socket, request)
-        }.exceptionOrNull()
-        if (socksError == null) return LocalProxyConnectedSocket(socket = socket, protocol = "socks5")
-
-        runCatching { socket.close() }
-        val fallbackSocket = Socket()
-        fallbackSocket.tcpNoDelay = true
-        fallbackSocket.soTimeout = LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS
-        if (!protect(fallbackSocket)) {
-            LogRepository.append(this, "Protect local proxy HTTP CONNECT socket failed target=${formatAddress(request.destinationAddress)}:${request.destinationPort}")
-        }
-        fallbackSocket.connect(InetSocketAddress(host, port), LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS)
-        runCatching {
-            performHttpConnect(fallbackSocket, request)
-        }.onFailure {
-            runCatching { fallbackSocket.close() }
-            throw IllegalStateException(
-                "Local proxy connect failed socks=${socksError.message ?: socksError.javaClass.simpleName}, http=${it.message ?: it.javaClass.simpleName}"
+                logBridgeConnected("local proxy bridge", flowKey, "target=${flow.targetIp}:${flow.targetPort} via=${flow.bridgeHost}:${flow.bridgePort} protocol=${connectedBridge.protocol}")
+            },
+            onFailure = buildLocalProxyBridgeFailureHandler(
+                action = "Connect local proxy bridge failed",
+                flowKey = flowKey,
+                request = request,
+                stage = "connect",
+                target = "${flow.targetIp}:${flow.targetPort}"
             )
-        }
-        return LocalProxyConnectedSocket(socket = fallbackSocket, protocol = "http_connect")
+        )
     }
 
-    private fun performHttpConnect(socket: Socket, request: com.HanFeng.model.PacketInfo) {
-        val host = formatAddress(request.destinationAddress)
-        val connectRequest = buildString {
-            append("CONNECT ")
-            append(host)
-            append(':')
-            append(request.destinationPort)
-            append(" HTTP/1.1\r\n")
-            append("Host: ")
-            append(host)
-            append(':')
-            append(request.destinationPort)
-            append("\r\n")
-            append("Proxy-Connection: Keep-Alive\r\n")
-            append("Connection: Keep-Alive\r\n\r\n")
-        }.toByteArray(Charsets.US_ASCII)
-        val output = socket.getOutputStream()
-        val input = socket.getInputStream()
-        output.write(connectRequest)
-        output.flush()
-        val responseBytes = input.readUntilHeaderTerminator(8192)
-        val responseText = responseBytes.toString(Charsets.US_ASCII)
-        val statusLine = responseText.lineSequence().firstOrNull()?.trim().orEmpty()
-        check(statusLine.startsWith("HTTP/1.1 200") || statusLine.startsWith("HTTP/1.0 200")) {
-            "HTTP CONNECT failed status=${statusLine.ifBlank { "unknown" }}"
-        }
-    }
 
     private fun handleHttpsProxyHandshake(info: com.HanFeng.model.PacketInfo, output: FileOutputStream): Boolean {
-        if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return false
         val flowKey = buildCacheKeys(info).flowKey
-        val current = synchronized(httpsProxyFlowCache) {
-            httpsProxyFlowCache[flowKey]
+        return executeCachedSyntheticHandshake(
+            info = info,
+            flowCache = httpsProxyFlowCache,
+            flowKey = flowKey,
+            destinationPort = info.destinationPort,
+            buildHandlers = { packetState, activeCurrent ->
+                buildHttpsHandshakeHandlers(
+                    flowKey = flowKey,
+                    current = activeCurrent,
+                    info = info,
+                    sequenceNumber = packetState.sequenceNumber,
+                    acknowledgementNumber = packetState.acknowledgementNumber,
+                    payloadLength = packetState.payloadLength,
+                    now = packetState.now
+                )
+            }
+        )
+    }
+
+    private fun <T> executeCachedSyntheticHandshake(
+        info: com.HanFeng.model.PacketInfo,
+        flowCache: MutableMap<String, T>,
+        flowKey: String,
+        destinationPort: Int,
+        validateCurrent: T.() -> Boolean = { true },
+        buildHandlers: (SyntheticPacketState, T) -> SyntheticHandshakeHandlers
+    ): Boolean {
+        val current = synchronized(flowCache) {
+            flowCache[flowKey]
         } ?: return false
-        if (current.bridgePort == null) return false
-        val flags = info.tcpFlags
-        val seq = info.tcpSequenceNumber ?: 0L
-        val ack = info.tcpAcknowledgementNumber ?: 0L
-        val payloadLength = info.payload.size.toLong()
-        if (flags.hasTcpFlag(TCP_FLAG_SYN) && !flags.hasTcpFlag(TCP_FLAG_ACK)) {
-            val serverSeq = current.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-            val next = current.copy(
-                state = "syn_ack_sent",
-                clientInitialSequence = seq,
-                serverInitialSequence = serverSeq,
-                lastSequenceNumber = seq,
-                lastAcknowledgementNumber = ack,
-                lastSeenAt = System.currentTimeMillis()
-            )
-            synchronized(httpsProxyFlowCache) {
-                httpsProxyFlowCache[flowKey] = next
-            }
-            writeTunPacket(
-                PacketCodec.buildTcpResponse(
-                    request = info,
-                    sequenceNumber = serverSeq,
-                    acknowledgementNumber = seq + 1,
-                    flags = TCP_FLAG_SYN or TCP_FLAG_ACK,
-                    windowSize = info.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
-                )
-            )
-            logDecisionOnce(
-                key = "https-proxy-handshake:$flowKey:synack",
-                message = "Sent synthetic SYN-ACK for HTTPS proxy flow domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} bridge=${current.bridgeHost}:${current.bridgePort}",
-                minIntervalMillis = 5_000L
-            )
-            return true
+        return executeSyntheticHandshake(
+            info = info,
+            destinationPort = destinationPort,
+            current = current,
+            currentState = resolveSyntheticFlowState(current),
+            validateCurrent = { current.validateCurrent() },
+            buildHandlers = buildHandlers
+        )
+    }
+
+    private fun resolveSyntheticFlowState(current: Any): String {
+        return when (current) {
+            is LocalProxyTcpFlow -> current.state
+            is HttpsProxyFlow -> current.state
+            else -> ""
         }
-        if (current.state == "syn_ack_sent" && flags == TCP_FLAG_ACK && payloadLength == 0L) {
-            ensureHttpsBridgeSocket(flowKey, current, info)
-            val next = current.copy(
-                state = "established",
-                lastSequenceNumber = seq,
-                lastAcknowledgementNumber = ack,
-                clientNextSequence = seq,
-                lastSeenAt = System.currentTimeMillis()
-            )
-            synchronized(httpsProxyFlowCache) {
-                httpsProxyFlowCache[flowKey] = next
-            }
-            logDecisionOnce(
-                key = "https-proxy-handshake:$flowKey:established",
-                message = "Established synthetic HTTPS proxy flow domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} bridge=${current.bridgeHost}:${current.bridgePort}",
-                minIntervalMillis = 5_000L
-            )
-            return true
-        }
-        if ((current.state == "established" || current.state == "payload_acknowledged") && (payloadLength > 0 || flags.hasTcpFlag(TCP_FLAG_PSH))) {
-            val serverSeq = current.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-            val expectedClientSeq = current.clientNextSequence ?: ((current.clientInitialSequence ?: seq) + 1)
-            val isRetransmission = seq < expectedClientSeq || (current.lastClientPayloadSequence == seq && current.lastClientPayloadLength == payloadLength)
-            if (seq > expectedClientSeq) {
-                val updatedBufferedSegments = if (info.payload.isNotEmpty()) {
-                    mergeBufferedClientSegments(
-                        current.bufferedClientSegments,
-                        ClientPayloadSegment(seq, info.payload)
-                    )
-                } else {
-                    current.bufferedClientSegments
-                }
-                if (bufferedClientPayloadBytes(updatedBufferedSegments) > MAX_BUFFERED_CLIENT_BYTES) {
-                    emitHttpsBridgeReset(flowKey, info, "Buffered client window overflow reset HTTPS proxy flow domain=${current.domain}")
-                    return true
-                }
-                synchronized(httpsProxyFlowCache) {
-                    val latest = httpsProxyFlowCache[flowKey] ?: return@synchronized
-                    httpsProxyFlowCache[flowKey] = latest.copy(
-                        bufferedClientSegments = updatedBufferedSegments,
-                        lastSeenAt = System.currentTimeMillis()
-                    )
-                }
-                writeTunPacket(
-                    PacketCodec.buildTcpResponse(
-                        request = info,
-                        sequenceNumber = serverSeq + 1,
-                        acknowledgementNumber = expectedClientSeq,
-                        flags = TCP_FLAG_ACK,
-                        windowSize = info.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
-                    )
-                )
-                logDecisionOnce(
-                    key = "https-proxy-handshake:$flowKey:out-of-order",
-                    message = "Buffered out-of-order HTTPS proxy payload domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} seq=$seq expected=$expectedClientSeq bufferedSegments=${updatedBufferedSegments.size} bufferedBytes=${bufferedClientPayloadBytes(updatedBufferedSegments)}",
-                    minIntervalMillis = 3_000L
-                )
-                return true
-            }
-            val inboundSegments = mutableListOf<ClientPayloadSegment>()
-            var ackNumber = expectedClientSeq
-            if (!isRetransmission && info.payload.isNotEmpty()) {
-                inboundSegments += ClientPayloadSegment(seq, info.payload)
-                ackNumber = maxOf(ackNumber, seq + payloadLength)
-            }
-            val flushResult = drainBufferedClientSegments(
-                mergeBufferedClientSegments(current.bufferedClientSegments, inboundSegments),
-                ackNumber
-            )
-            if (bufferedClientPayloadBytes(flushResult.remainingSegments) > MAX_BUFFERED_CLIENT_BYTES) {
-                emitHttpsBridgeReset(flowKey, info, "Buffered client replay overflow reset HTTPS proxy flow domain=${current.domain}")
-                return true
-            }
-            flushResult.forwardSegments.forEach { segment ->
-                forwardPayloadToHttpsBridge(flowKey, segment.payload)
-            }
-            val lastForwardedSegment = flushResult.forwardSegments.lastOrNull()
-            val next = current.copy(
-                state = "payload_acknowledged",
-                lastSequenceNumber = seq,
-                lastAcknowledgementNumber = ack,
-                clientNextSequence = flushResult.nextExpectedSequence,
-                bufferedClientSegments = flushResult.remainingSegments,
-                lastClientPayloadSequence = lastForwardedSegment?.sequenceNumber ?: current.lastClientPayloadSequence,
-                lastClientPayloadLength = lastForwardedSegment?.payload?.size?.toLong() ?: current.lastClientPayloadLength,
-                lastSeenAt = System.currentTimeMillis()
-            )
-            synchronized(httpsProxyFlowCache) {
-                httpsProxyFlowCache[flowKey] = next
-            }
-            writeTunPacket(
-                PacketCodec.buildTcpResponse(
-                    request = info,
-                    sequenceNumber = serverSeq + 1,
-                    acknowledgementNumber = flushResult.nextExpectedSequence,
-                    flags = TCP_FLAG_ACK,
-                    windowSize = info.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
-                )
-            )
-            logDecisionOnce(
-                key = "https-proxy-handshake:$flowKey:payload-ack",
-                message = if (isRetransmission) {
-                    "Acknowledged retransmitted HTTPS proxy payload domain=${current.domain} source=${current.source} size=$payloadLength bridge=${current.bridgeHost}:${current.bridgePort} nextClientSeq=${flushResult.nextExpectedSequence} bufferedSegments=${flushResult.remainingSegments.size} bufferedBytes=${bufferedClientPayloadBytes(flushResult.remainingSegments)}"
-                } else {
-                    "Acknowledged HTTPS proxy payload domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} size=$payloadLength bridge=${current.bridgeHost}:${current.bridgePort} nextClientSeq=${flushResult.nextExpectedSequence} bufferedSegments=${flushResult.remainingSegments.size} bufferedBytes=${bufferedClientPayloadBytes(flushResult.remainingSegments)}"
-                },
-                minIntervalMillis = 5_000L
-            )
-            return true
-        }
-        if ((current.state == "server_payload_sent" || current.state == "payload_acknowledged") && flags == TCP_FLAG_ACK && payloadLength == 0L) {
-            if (current.pendingServerSegments.isNotEmpty() && current.serverNextSequence != null && ack < current.serverNextSequence) {
-                val remainingSegments = trimAcknowledgedServerSegments(current.pendingServerSegments, ack)
-                if (remainingSegments.isNotEmpty()) {
-                    resendPendingHttpsBridgePayload(info, current, remainingSegments)
-                    synchronized(httpsProxyFlowCache) {
-                        val latest = httpsProxyFlowCache[flowKey] ?: return@synchronized
-                        httpsProxyFlowCache[flowKey] = latest.copy(
-                            pendingServerSegments = remainingSegments,
-                            lastSeenAt = System.currentTimeMillis()
-                        )
-                    }
-                    logDecisionOnce(
-                        key = "https-proxy-handshake:$flowKey:server-retransmit",
-                        message = "Retransmitted synthetic HTTPS server payload window domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} ack=$ack expected=${current.serverNextSequence} pendingSegments=${remainingSegments.size} pendingBytes=${pendingServerPayloadBytes(remainingSegments)}",
-                        minIntervalMillis = 3_000L
-                    )
-                    return true
-                }
-            }
-            synchronized(httpsProxyFlowCache) {
-                val latest = httpsProxyFlowCache[flowKey] ?: return@synchronized
-                httpsProxyFlowCache[flowKey] = latest.copy(
-                    state = if (latest.state == "bridge_fin_sent") "bridge_fin_acked" else "server_payload_acked",
-                    pendingServerSegments = emptyList(),
-                    lastSequenceNumber = seq,
-                    lastAcknowledgementNumber = ack,
-                    lastSeenAt = System.currentTimeMillis()
-                )
-            }
-            logDecisionOnce(
-                key = "https-proxy-handshake:$flowKey:server-acked",
-                message = "Acknowledged synthetic HTTPS server payload domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} bridge=${current.bridgeHost}:${current.bridgePort} ack=$ack pendingSegments=0 pendingBytes=0",
-                minIntervalMillis = 5_000L
-            )
-            return true
-        }
-        if (current.state == "bridge_fin_sent" && flags == TCP_FLAG_ACK && payloadLength == 0L) {
-            closeHttpsProxyFlow(flowKey, current, "Closed bridge-finished HTTPS proxy flow domain=${current.domain}")
-            return true
-        }
-        if (flags.hasTcpFlag(TCP_FLAG_FIN)) {
-            val serverSeqBase = current.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-            val nextServerSeq = current.serverNextSequence ?: (serverSeqBase + 1)
-            val ackNumber = seq + 1 + payloadLength
-            synchronized(httpsProxyFlowCache) {
-                val latest = httpsProxyFlowCache[flowKey] ?: current
-                httpsProxyFlowCache[flowKey] = latest.copy(
-                    state = "fin_ack_sent",
-                    lastSequenceNumber = seq,
-                    lastAcknowledgementNumber = ack,
-                    serverNextSequence = nextServerSeq + 1,
-                    clientNextSequence = ackNumber,
-                    lastSeenAt = System.currentTimeMillis()
-                )
-            }
-            writeTunPacket(
-                PacketCodec.buildTcpResponse(
-                    request = info,
-                    sequenceNumber = nextServerSeq,
-                    acknowledgementNumber = ackNumber,
-                    flags = TCP_FLAG_FIN or TCP_FLAG_ACK,
-                    windowSize = info.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
-                )
-            )
-            logDecisionOnce(
-                key = "https-proxy-handshake:$flowKey:finack",
-                message = "Sent synthetic FIN-ACK for HTTPS proxy flow domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} bridge=${current.bridgeHost}:${current.bridgePort}",
-                minIntervalMillis = 5_000L
-            )
-            synchronized(httpsBridgeSocketCache) {
-                httpsBridgeSocketCache.remove(flowKey)?.close()
-            }
-            return true
-        }
-        if (current.state == "fin_ack_sent" && flags == TCP_FLAG_ACK && payloadLength == 0L) {
-            closeHttpsProxyFlow(flowKey, current, "Closed synthetic HTTPS proxy flow domain=${current.domain}")
-            return true
-        }
-        if (flags.hasTcpFlag(TCP_FLAG_RST)) {
-            closeHttpsProxyFlow(flowKey, current, "Reset synthetic HTTPS proxy flow domain=${current.domain}")
-            return true
-        }
-        return false
     }
 
     private fun ensureHttpsBridgeSocket(flowKey: String, flow: HttpsProxyFlow, request: com.HanFeng.model.PacketInfo) {
-        synchronized(httpsBridgeSocketCache) {
-            if (httpsBridgeSocketCache.containsKey(flowKey)) return
-        }
-        val host = flow.bridgeHost ?: return
-        val port = flow.bridgePort ?: return
-        scope.launch {
-            runCatching {
-                val socket = Socket()
-                socket.tcpNoDelay = true
-                if (!protect(socket)) {
-                    LogRepository.append(this@AdBlockVpnService, "Protect local HTTPS bridge socket failed flow=$flowKey domain=${flow.domain} app=${flow.appName.ifBlank { "unknown" }} source=${flow.source}")
-                }
-                socket.connect(InetSocketAddress(host, port), HTTPS_BRIDGE_CONNECT_TIMEOUT_MILLIS)
-                val session = HttpsBridgeSocketSession(
+        ensureBridgeSocketConnected(
+            sessionCache = httpsBridgeSocketCache,
+            flowKey = flowKey,
+            bridgeHost = flow.bridgeHost,
+            bridgePort = flow.bridgePort,
+            connectBridge = { host, port ->
+                BridgeSocketSupport.createConnectedSocket(
+                    host = host,
+                    port = port,
+                    timeoutMillis = HTTPS_BRIDGE_CONNECT_TIMEOUT_MILLIS,
+                    protect = this@AdBlockVpnService::protect,
+                    onProtectFailed = {
+                        logBridgeProtectFailure("local HTTPS bridge socket", flowKey, "domain=${flow.domain} app=${flow.appName.ifBlank { "unknown" }} source=${flow.source}")
+                    }
+                )
+            },
+            createSession = { socket ->
+                HttpsBridgeSocketSession(
                     flowKey = flowKey,
                     requestTemplate = request,
                     socket = socket,
                     input = socket.getInputStream(),
                     output = socket.getOutputStream()
                 )
-                synchronized(httpsBridgeSocketCache) {
-                    httpsBridgeSocketCache[flowKey] = session
-                }
-                scope.launch {
-                    runHttpsBridgeReader(session)
-                }
-                LogRepository.append(this@AdBlockVpnService, "Connected local HTTPS bridge socket flow=$flowKey domain=${flow.domain} source=${flow.source} local=$host:$port")
-            }.onFailure {
-                LogRepository.append(this@AdBlockVpnService, "Connect local HTTPS bridge socket failed flow=$flowKey: ${it.message ?: it.javaClass.simpleName}")
-                HttpsMitmRepository.markBypassCooldown(
-                    this@AdBlockVpnService,
-                    flow.domain,
-                    reason = "io-bridge:${it.message ?: it.javaClass.simpleName}"
-                )
-                emitHttpsBridgeReset(flowKey, request, "Bridge connect reset HTTPS proxy flow domain=${flow.domain}")
-            }
-        }
+            },
+            onConnected = { session, _ ->
+                scope.launch { runHttpsBridgeReader(session) }
+                logBridgeConnected("local HTTPS bridge socket", flowKey, "domain=${flow.domain} source=${flow.source} local=${flow.bridgeHost}:${flow.bridgePort}")
+            },
+            onFailure = buildHttpsBridgeFailureHandler(
+                action = "Connect local HTTPS bridge socket failed",
+                flowKey = flowKey,
+                request = request,
+                stage = "connect"
+            )
+        )
     }
 
     private fun forwardPayloadToHttpsBridge(flowKey: String, payload: ByteArray) {
-        if (payload.isEmpty()) return
-        val session = synchronized(httpsBridgeSocketCache) {
-            httpsBridgeSocketCache[flowKey]
-        } ?: return
-        scope.launch {
-            runCatching {
-                session.output.write(payload)
-            }.onFailure {
-                LogRepository.append(this@AdBlockVpnService, "Forward HTTPS payload to bridge failed flow=$flowKey: ${it.message ?: it.javaClass.simpleName}")
-                val domain = resolveHttpsProxyDomain(flowKey)
-                if (domain != "unknown") {
-                    HttpsMitmRepository.markBypassCooldown(
-                        this@AdBlockVpnService,
-                        domain,
-                        reason = "io-bridge:${it.message ?: it.javaClass.simpleName}"
+        forwardPayloadToBridge(
+            sessionCache = httpsBridgeSocketCache,
+            flowKey = flowKey,
+            payload = payload,
+            writePayload = { session, bytes -> session.output.write(bytes) },
+            onFailure = buildSessionBridgeFailureHandler(
+                failureHandlerOfRequest = { request ->
+                    buildHttpsBridgeFailureHandler(
+                        action = "Forward HTTPS payload to bridge failed",
+                        flowKey = flowKey,
+                        request = request,
+                        stage = "write"
                     )
-                }
-                emitHttpsBridgeReset(flowKey, session.requestTemplate, "Bridge write reset HTTPS proxy flow domain=${resolveHttpsProxyDomain(flowKey)}")
-            }
-        }
+                },
+                requestOfSession = { it.requestTemplate }
+            )
+        )
     }
 
     private fun mergeBufferedClientSegments(
         existing: List<ClientPayloadSegment>,
         additions: List<ClientPayloadSegment>
     ): List<ClientPayloadSegment> {
-        if (additions.isEmpty()) return existing
-        val allSegments = (existing + additions)
-            .filter { it.payload.isNotEmpty() }
-            .sortedBy { it.sequenceNumber }
-        if (allSegments.isEmpty()) return emptyList()
-        val normalized = mutableListOf<ClientPayloadSegment>()
-        allSegments.forEach { segment ->
-            if (normalized.isEmpty()) {
-                normalized += segment
-                return@forEach
-            }
-            val previous = normalized.removeAt(normalized.lastIndex)
-            val previousEnd = previous.sequenceNumber + previous.payload.size
-            val segmentEnd = segment.sequenceNumber + segment.payload.size
-            if (segment.sequenceNumber > previousEnd) {
-                normalized += previous
-                normalized += segment
-                return@forEach
-            }
-            if (segmentEnd <= previousEnd) {
-                normalized += previous
-                return@forEach
-            }
-            val overlap = (previousEnd - segment.sequenceNumber).toInt().coerceAtLeast(0)
-            val appendPayload = if (overlap == 0) segment.payload else segment.payload.copyOfRange(overlap, segment.payload.size)
-            normalized += if (appendPayload.isEmpty()) {
-                previous
-            } else {
-                ClientPayloadSegment(
-                    sequenceNumber = previous.sequenceNumber,
-                    payload = previous.payload + appendPayload
-                )
-            }
-        }
-        return normalized.takeLast(MAX_BUFFERED_CLIENT_SEGMENTS)
+        return TcpSyntheticFlowEngine.mergeBufferedClientSegments(
+            existing = existing.map { TcpSyntheticFlowEngine.ClientSegment(it.sequenceNumber, it.payload) },
+            additions = additions.map { TcpSyntheticFlowEngine.ClientSegment(it.sequenceNumber, it.payload) },
+            maxSegments = MAX_BUFFERED_CLIENT_SEGMENTS
+        ).map { ClientPayloadSegment(it.sequenceNumber, it.payload) }
     }
 
     private fun mergeBufferedClientSegments(
@@ -2346,109 +1922,362 @@ class AdBlockVpnService : VpnService() {
         addition: ClientPayloadSegment
     ): List<ClientPayloadSegment> = mergeBufferedClientSegments(existing, listOf(addition))
 
+    private fun logBridgeProtectFailure(kind: String, flowKey: String, detail: String) {
+        LogRepository.append(this, "Protect $kind failed flow=$flowKey $detail")
+    }
+
+    private fun logBridgeConnected(kind: String, flowKey: String, detail: String) {
+        LogRepository.append(this, "Connected $kind flow=$flowKey $detail")
+    }
+
+    private fun logBridgeFailure(action: String, flowKey: String, error: Throwable) {
+        LogRepository.append(this, BridgeFailureSupport.buildFailureLog(action, flowKey, error))
+    }
+
+    private fun buildHttpsBridgeFailureHandler(
+        action: String,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        stage: String
+    ): (Throwable) -> Unit {
+        return { error ->
+            handleHttpsBridgeFailure(
+                action = action,
+                flowKey = flowKey,
+                request = request,
+                stage = stage,
+                error = error
+            )
+        }
+    }
+
+    private fun buildLocalProxyBridgeFailureHandler(
+        action: String,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        stage: String,
+        target: String? = null
+    ): (Throwable) -> Unit {
+        return { error ->
+            handleLocalProxyBridgeFailure(
+                action = action,
+                flowKey = flowKey,
+                request = request,
+                stage = stage,
+                error = error,
+                target = target ?: resolveLocalProxyTarget(flowKey)
+            )
+        }
+    }
+
+    private fun <TSession> buildSessionBridgeFailureHandler(
+        failureHandlerOfRequest: (com.HanFeng.model.PacketInfo) -> (Throwable) -> Unit,
+        requestOfSession: (TSession) -> com.HanFeng.model.PacketInfo
+    ): (TSession, Throwable) -> Unit {
+        return { session, error ->
+            failureHandlerOfRequest(requestOfSession(session))(error)
+        }
+    }
+
+    private fun handleHttpsBridgeFailure(
+        action: String,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        stage: String,
+        error: Throwable
+    ) {
+        logBridgeFailure(action, flowKey, error)
+        val domain = resolveHttpsProxyDomain(flowKey)
+        if (domain != "unknown") {
+            HttpsMitmRepository.markBypassCooldown(
+                this,
+                domain,
+                reason = HttpsBridgeFailureSupport.buildBypassReason(error)
+            )
+        }
+        emitHttpsBridgeReset(flowKey, request, HttpsBridgeFailureSupport.buildResetMessage(stage, domain))
+    }
+
+    private fun handleLocalProxyBridgeFailure(
+        action: String,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        stage: String,
+        error: Throwable,
+        target: String = resolveLocalProxyTarget(flowKey)
+    ) {
+        logBridgeFailure(action, flowKey, error)
+        emitLocalProxyBridgeReset(flowKey, request, buildBridgeStageResetMessage("local proxy flow target=$target", "Bridge $stage"))
+    }
+
+    private fun buildBridgeStageResetMessage(subject: String, stage: String): String {
+        return "$stage reset $subject"
+    }
+
+    private fun buildLocalProxyFlowLabel(target: String): String {
+        return "local proxy flow target=$target"
+    }
+
+    private fun buildHttpsFlowLabel(domain: String): String {
+        return "HTTPS proxy flow domain=$domain"
+    }
+
+    private fun buildLocalProxyResetMessage(stage: String, target: String): String {
+        return buildBridgeStageResetMessage(buildLocalProxyFlowLabel(target), stage)
+    }
+
+    private fun emitLocalProxyTargetReset(
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        stage: String,
+        target: String
+    ) {
+        emitLocalProxyBridgeReset(
+            flowKey,
+            request,
+            buildLocalProxyResetMessage(stage, target)
+        )
+    }
+
+    private fun buildHttpsProxyResetMessage(stage: String, domain: String): String {
+        return buildBridgeStageResetMessage(buildHttpsFlowLabel(domain), stage)
+    }
+
+    private fun buildBridgeLogKey(prefix: String, flowKey: String, suffix: String): String {
+        return "$prefix:$flowKey:$suffix"
+    }
+
+    private fun buildBridgeCloseLogKey(prefix: String, flowKey: String): String {
+        return buildBridgeLogKey(prefix, flowKey, "closed")
+    }
+
+    private fun logBridgeFinSent(flowKey: String, domain: String, source: String) {
+        logDecisionOnce(
+            key = "https-proxy-bridge-fin:$flowKey",
+            message = "Sent bridge-initiated FIN-ACK for HTTPS proxy flow domain=$domain source=$source",
+            minIntervalMillis = 5_000L
+        )
+    }
+
+    private data class BridgePayloadState(
+        val state: String,
+        val serverNextSequence: Long,
+        val lastServerPayloadSequence: Long,
+        val lastServerPayload: ByteArray,
+        val pendingServerSegments: List<PendingServerSegment>,
+        val lastSeenAt: Long
+    )
+
+    private fun buildBridgePayloadState(
+        pendingSegments: List<PendingServerSegment>,
+        serverNextSequence: Long,
+        lastServerPayloadSequence: Long,
+        lastServerPayload: ByteArray,
+        lastSeenAt: Long
+    ): BridgePayloadState {
+        return BridgePayloadState(
+            state = "server_payload_sent",
+            serverNextSequence = serverNextSequence,
+            lastServerPayloadSequence = lastServerPayloadSequence,
+            lastServerPayload = lastServerPayload,
+            pendingServerSegments = pendingSegments,
+            lastSeenAt = lastSeenAt
+        )
+    }
+
+    private data class BridgeSocketClosedState(
+        val state: String,
+        val lastSeenAt: Long
+    )
+
+    private fun buildBridgeSocketClosedState(lastSeenAt: Long): BridgeSocketClosedState {
+        return BridgeSocketClosedState(
+            state = "bridge_socket_closed",
+            lastSeenAt = lastSeenAt
+        )
+    }
+
+    private data class BridgeFinState(
+        val state: String,
+        val serverNextSequence: Long,
+        val lastSeenAt: Long
+    )
+
+    private fun buildBridgeFinState(
+        transition: BridgeTerminalStateSupport.BridgeFinTransition
+    ): BridgeFinState {
+        return BridgeFinState(
+            state = transition.nextState,
+            serverNextSequence = transition.nextServerSequence,
+            lastSeenAt = transition.lastSeenAt
+        )
+    }
+
+    private fun updateHttpsBridgePayloadFlow(
+        flowState: HttpsProxyFlow,
+        pendingSegments: List<PendingServerSegment>,
+        serverNextSequence: Long,
+        lastServerPayloadSequence: Long,
+        lastServerPayload: ByteArray,
+        lastSeenAt: Long
+    ): HttpsProxyFlow {
+        val payloadState = buildBridgePayloadState(
+            pendingSegments = pendingSegments,
+            serverNextSequence = serverNextSequence,
+            lastServerPayloadSequence = lastServerPayloadSequence,
+            lastServerPayload = lastServerPayload,
+            lastSeenAt = lastSeenAt
+        )
+        return flowState.copy(
+            state = payloadState.state,
+            serverNextSequence = payloadState.serverNextSequence,
+            lastServerPayloadSequence = payloadState.lastServerPayloadSequence,
+            lastServerPayload = payloadState.lastServerPayload,
+            pendingServerSegments = payloadState.pendingServerSegments,
+            lastSeenAt = payloadState.lastSeenAt
+        )
+    }
+
+    private fun updateLocalProxyBridgePayloadFlow(
+        flowState: LocalProxyTcpFlow,
+        pendingSegments: List<PendingServerSegment>,
+        serverNextSequence: Long,
+        lastServerPayloadSequence: Long,
+        lastServerPayload: ByteArray,
+        lastSeenAt: Long
+    ): LocalProxyTcpFlow {
+        val payloadState = buildBridgePayloadState(
+            pendingSegments = pendingSegments,
+            serverNextSequence = serverNextSequence,
+            lastServerPayloadSequence = lastServerPayloadSequence,
+            lastServerPayload = lastServerPayload,
+            lastSeenAt = lastSeenAt
+        )
+        return flowState.copy(
+            state = payloadState.state,
+            serverNextSequence = payloadState.serverNextSequence,
+            lastServerPayloadSequence = payloadState.lastServerPayloadSequence,
+            lastServerPayload = payloadState.lastServerPayload,
+            pendingServerSegments = payloadState.pendingServerSegments,
+            lastSeenAt = payloadState.lastSeenAt
+        )
+    }
+
+    private fun updateHttpsBridgeFinFlow(
+        flowState: HttpsProxyFlow,
+        transition: BridgeTerminalStateSupport.BridgeFinTransition
+    ): HttpsProxyFlow {
+        val finState = buildBridgeFinState(transition)
+        return flowState.copy(
+            state = finState.state,
+            serverNextSequence = finState.serverNextSequence,
+            lastSeenAt = finState.lastSeenAt
+        )
+    }
+
+    private fun updateLocalProxyBridgeFinFlow(
+        flowState: LocalProxyTcpFlow,
+        transition: BridgeTerminalStateSupport.BridgeFinTransition
+    ): LocalProxyTcpFlow {
+        val finState = buildBridgeFinState(transition)
+        return flowState.copy(
+            state = finState.state,
+            serverNextSequence = finState.serverNextSequence,
+            lastSeenAt = finState.lastSeenAt
+        )
+    }
+
+    private fun updateHttpsBridgeSocketClosedFlow(
+        flowState: HttpsProxyFlow,
+        lastSeenAt: Long
+    ): HttpsProxyFlow {
+        val closedState = buildBridgeSocketClosedState(lastSeenAt)
+        return flowState.copy(
+            state = closedState.state,
+            lastSeenAt = closedState.lastSeenAt
+        )
+    }
+
+    private fun updateLocalProxyBridgeSocketClosedFlow(
+        flowState: LocalProxyTcpFlow,
+        lastSeenAt: Long
+    ): LocalProxyTcpFlow {
+        val closedState = buildBridgeSocketClosedState(lastSeenAt)
+        return flowState.copy(
+            state = closedState.state,
+            lastSeenAt = closedState.lastSeenAt
+        )
+    }
+
+    private fun updateFlushedLocalProxyBufferedPayloadFlow(
+        flowState: LocalProxyTcpFlow,
+        bufferedSegments: List<ClientPayloadSegment>,
+        lastSequence: Long?,
+        lastLength: Long?,
+        lastSeenAt: Long
+    ): LocalProxyTcpFlow {
+        return flowState.copy(
+            state = "established",
+            bufferedClientSegments = bufferedSegments,
+            lastClientPayloadSequence = lastSequence ?: flowState.lastClientPayloadSequence,
+            lastClientPayloadLength = lastLength ?: flowState.lastClientPayloadLength,
+            lastSeenAt = lastSeenAt
+        )
+    }
+
+    private data class BridgeReaderConfig<TSession, TFlow>(
+        val flowCache: LinkedHashMap<String, TFlow>,
+        val sessionCache: LinkedHashMap<String, TSession>,
+        val onPayload: (ByteArray) -> Unit,
+        val onFailure: (Throwable) -> Unit,
+        val onResetNotSent: () -> Unit,
+        val closeSession: (TSession) -> Unit,
+        val updateFlow: (TFlow, Long) -> TFlow
+    )
+
     private fun drainBufferedClientSegments(
         segments: List<ClientPayloadSegment>,
         expectedSequence: Long
     ): ClientSegmentDrainResult {
-        if (segments.isEmpty()) {
-            return ClientSegmentDrainResult(
-                nextExpectedSequence = expectedSequence,
-                forwardSegments = emptyList(),
-                remainingSegments = emptyList()
-            )
-        }
-        val forwardSegments = mutableListOf<ClientPayloadSegment>()
-        val remainingSegments = mutableListOf<ClientPayloadSegment>()
-        var nextExpectedSequence = expectedSequence
-        segments.sortedBy { it.sequenceNumber }.forEach { segment ->
-            val segmentEnd = segment.sequenceNumber + segment.payload.size
-            if (segment.sequenceNumber > nextExpectedSequence) {
-                remainingSegments += segment
-                return@forEach
-            }
-            if (segmentEnd <= nextExpectedSequence) {
-                return@forEach
-            }
-            val overlap = (nextExpectedSequence - segment.sequenceNumber).toInt().coerceAtLeast(0)
-            val forwardPayload = if (overlap == 0) segment.payload else segment.payload.copyOfRange(overlap, segment.payload.size)
-            if (forwardPayload.isNotEmpty()) {
-                forwardSegments += ClientPayloadSegment(nextExpectedSequence, forwardPayload)
-                nextExpectedSequence += forwardPayload.size
-            }
-        }
+        val result = TcpSyntheticFlowEngine.drainBufferedClientSegments(
+            segments = segments.map { TcpSyntheticFlowEngine.ClientSegment(it.sequenceNumber, it.payload) },
+            expectedSequence = expectedSequence,
+            maxSegments = MAX_BUFFERED_CLIENT_SEGMENTS
+        )
         return ClientSegmentDrainResult(
-            nextExpectedSequence = nextExpectedSequence,
-            forwardSegments = forwardSegments,
-            remainingSegments = remainingSegments.takeLast(MAX_BUFFERED_CLIENT_SEGMENTS)
+            nextExpectedSequence = result.nextExpectedSequence,
+            forwardSegments = result.forwardSegments.map { ClientPayloadSegment(it.sequenceNumber, it.payload) },
+            remainingSegments = result.remainingSegments.map { ClientPayloadSegment(it.sequenceNumber, it.payload) }
         )
     }
 
     private fun runHttpsBridgeReader(session: HttpsBridgeSocketSession) {
-        val buffer = ByteArray(16 * 1024)
-        var resetSent = false
-        while (scope.isActive && isRunning) {
-            val count = try {
-                session.input.read(buffer)
-            } catch (error: Exception) {
-                LogRepository.append(this, "Read HTTPS bridge payload failed flow=${session.flowKey}: ${error.message ?: error.javaClass.simpleName}")
-                val domain = resolveHttpsProxyDomain(session.flowKey)
-                if (domain != "unknown") {
-                    HttpsMitmRepository.markBypassCooldown(
-                        this,
-                        domain,
-                        reason = "io-bridge:${error.message ?: error.javaClass.simpleName}"
-                    )
-                }
-                emitHttpsBridgeReset(session.flowKey, session.requestTemplate, "Bridge read reset HTTPS proxy flow domain=${resolveHttpsProxyDomain(session.flowKey)}")
-                resetSent = true
-                break
-            }
-            if (count <= 0) break
-            val payload = buffer.copyOf(count)
-            emitHttpsBridgePayload(session.flowKey, session.requestTemplate, payload)
-        }
-        if (!resetSent) {
-            emitHttpsBridgeFin(session.flowKey, session.requestTemplate)
-        }
-        synchronized(httpsBridgeSocketCache) {
-            httpsBridgeSocketCache.remove(session.flowKey)?.close()
-        }
-        synchronized(httpsProxyFlowCache) {
-            val current = httpsProxyFlowCache[session.flowKey] ?: return@synchronized
-            httpsProxyFlowCache[session.flowKey] = current.copy(
-                state = "bridge_socket_closed",
-                lastSeenAt = System.currentTimeMillis()
-            )
-        }
+        runBridgeReaderConfigured(
+            session = session,
+            input = session.input,
+            flowKey = session.flowKey,
+            config = buildHttpsBridgeReaderConfig(session)
+        )
     }
 
     private fun emitHttpsBridgePayload(flowKey: String, request: com.HanFeng.model.PacketInfo, payload: ByteArray) {
-        val flow = synchronized(httpsProxyFlowCache) {
-            httpsProxyFlowCache[flowKey]
-        } ?: return
-        val serverSeqBase = flow.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-        val nextServerSeq = flow.serverNextSequence ?: (serverSeqBase + 1)
-        val clientAck = flow.clientNextSequence ?: ((flow.clientInitialSequence ?: 0L) + 1)
-        val freshSegments = buildServerPayloadSegments(nextServerSeq, payload)
-        writeServerPayloadSegments(request, clientAck, freshSegments)
-        var pendingSummary = 0 to 0
-        synchronized(httpsProxyFlowCache) {
-            val current = httpsProxyFlowCache[flowKey] ?: return@synchronized
-            val mergedPendingSegments = mergePendingServerSegments(current.pendingServerSegments, freshSegments)
-            if (pendingServerPayloadBytes(mergedPendingSegments) > MAX_BUFFERED_SERVER_BYTES) {
-                emitHttpsBridgeReset(flowKey, request, "Pending server window overflow reset HTTPS proxy flow domain=${current.domain}")
-                return@synchronized
-            }
-            pendingSummary = mergedPendingSegments.size to pendingServerPayloadBytes(mergedPendingSegments)
-            httpsProxyFlowCache[flowKey] = current.copy(
-                state = "server_payload_sent",
-                serverNextSequence = nextServerSeq + payload.size,
-                lastServerPayloadSequence = nextServerSeq,
-                lastServerPayload = payload,
-                pendingServerSegments = mergedPendingSegments,
-                lastSeenAt = System.currentTimeMillis()
-            )
-        }
+        val selectors = BridgeFlowSelectors<HttpsProxyFlow>(
+            sequence = httpsSequenceSelectors(),
+            pendingSegmentsOf = { it.pendingServerSegments }
+        )
+        val emission = emitBridgePayloadCommon(
+            flowCache = httpsProxyFlowCache,
+            flowKey = flowKey,
+            request = request,
+            payload = payload,
+            selectors = selectors,
+            onOverflow = {
+                emitHttpsBridgeReset(flowKey, request, HttpsBridgeFailureSupport.buildResetMessage("pending-server-window-overflow", it.domain))
+            },
+            updateFlow = ::updateHttpsBridgePayloadFlow
+        ) ?: return
+        val flow = emission.flow
+        val pendingSummary = emission.pendingSummary
         logDecisionOnce(
             key = "https-proxy-bridge-payload:$flowKey",
             message = "Forwarded HTTPS bridge payload flow=$flowKey domain=${flow.domain} source=${flow.source} size=${payload.size} pendingSegments=${pendingSummary.first} pendingBytes=${pendingSummary.second}",
@@ -2470,86 +2299,29 @@ class AdBlockVpnService : VpnService() {
         segments: List<PendingServerSegment>,
         acknowledgementNumber: Long
     ): List<PendingServerSegment> {
-        if (segments.isEmpty()) return emptyList()
-        val remainingSegments = ArrayList<PendingServerSegment>(segments.size)
-        segments.forEach { segment ->
-            val segmentEnd = segment.sequenceNumber + segment.payload.size
-            if (acknowledgementNumber <= segment.sequenceNumber) {
-                remainingSegments += segment
-                return@forEach
-            }
-            if (acknowledgementNumber >= segmentEnd) {
-                return@forEach
-            }
-            val acknowledgedBytes = (acknowledgementNumber - segment.sequenceNumber).toInt().coerceAtLeast(0)
-            val remainingPayload = segment.payload.copyOfRange(acknowledgedBytes, segment.payload.size)
-            if (remainingPayload.isNotEmpty()) {
-                remainingSegments += PendingServerSegment(
-                    sequenceNumber = acknowledgementNumber,
-                    payload = remainingPayload
-                )
-            }
-        }
-        return remainingSegments
+        return TcpSyntheticFlowEngine.trimAcknowledgedServerSegments(
+            segments = segments.map { TcpSyntheticFlowEngine.PendingSegment(it.sequenceNumber, it.payload) },
+            acknowledgementNumber = acknowledgementNumber
+        ).map { PendingServerSegment(it.sequenceNumber, it.payload) }
     }
 
     private fun mergePendingServerSegments(
         existing: List<PendingServerSegment>,
         additions: List<PendingServerSegment>
     ): List<PendingServerSegment> {
-        if (additions.isEmpty()) return existing
-        val allSegments = (existing + additions)
-            .filter { it.payload.isNotEmpty() }
-            .sortedBy { it.sequenceNumber }
-        if (allSegments.isEmpty()) return emptyList()
-        val normalized = mutableListOf<PendingServerSegment>()
-        allSegments.forEach { segment ->
-            if (normalized.isEmpty()) {
-                normalized += segment
-                return@forEach
-            }
-            val previous = normalized.removeAt(normalized.lastIndex)
-            val previousEnd = previous.sequenceNumber + previous.payload.size
-            val segmentEnd = segment.sequenceNumber + segment.payload.size
-            if (segment.sequenceNumber > previousEnd) {
-                normalized += previous
-                normalized += segment
-                return@forEach
-            }
-            if (segmentEnd <= previousEnd) {
-                normalized += previous
-                return@forEach
-            }
-            val overlap = (previousEnd - segment.sequenceNumber).toInt().coerceAtLeast(0)
-            val appendPayload = if (overlap == 0) segment.payload else segment.payload.copyOfRange(overlap, segment.payload.size)
-            normalized += if (appendPayload.isEmpty()) {
-                previous
-            } else {
-                PendingServerSegment(
-                    sequenceNumber = previous.sequenceNumber,
-                    payload = previous.payload + appendPayload
-                )
-            }
-        }
-        return normalized.takeLast(MAX_BUFFERED_SERVER_SEGMENTS)
+        return TcpSyntheticFlowEngine.mergePendingServerSegments(
+            existing = existing.map { TcpSyntheticFlowEngine.PendingSegment(it.sequenceNumber, it.payload) },
+            additions = additions.map { TcpSyntheticFlowEngine.PendingSegment(it.sequenceNumber, it.payload) },
+            maxSegments = MAX_BUFFERED_SERVER_SEGMENTS
+        ).map { PendingServerSegment(it.sequenceNumber, it.payload) }
     }
 
     private fun buildServerPayloadSegments(sequenceNumber: Long, payload: ByteArray): List<PendingServerSegment> {
-        if (payload.isEmpty()) return emptyList()
-        val segments = ArrayList<PendingServerSegment>((payload.size / TCP_SEGMENT_PAYLOAD_SIZE) + 1)
-        var sentBytes = 0
-        var currentSeq = sequenceNumber
-        while (sentBytes < payload.size) {
-            val chunkSize = min(TCP_SEGMENT_PAYLOAD_SIZE, payload.size - sentBytes)
-            val chunk = payload.copyOfRange(sentBytes, sentBytes + chunkSize)
-            segments += PendingServerSegment(
-                sequenceNumber = currentSeq,
-                payload = chunk
-            )
-            sentBytes += chunkSize
-            currentSeq += chunkSize
-        }
-        return segments
+        return TcpSyntheticFlowEngine.buildServerPayloadSegments(
+            sequenceNumber = sequenceNumber,
+            payload = payload,
+            segmentPayloadSize = TCP_SEGMENT_PAYLOAD_SIZE
+        ).map { PendingServerSegment(it.sequenceNumber, it.payload) }
     }
 
     private fun writeServerPayloadSegments(
@@ -2571,68 +2343,42 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun emitHttpsBridgeFin(flowKey: String, request: com.HanFeng.model.PacketInfo) {
-        val flow = synchronized(httpsProxyFlowCache) {
-            httpsProxyFlowCache[flowKey]
-        } ?: return
-        if (flow.state == "fin_ack_sent" || flow.state == "bridge_fin_sent" || flow.state == "bridge_fin_acked") return
-        val serverSeqBase = flow.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-        val nextServerSeq = flow.serverNextSequence ?: (serverSeqBase + 1)
-        val clientAck = flow.clientNextSequence ?: ((flow.clientInitialSequence ?: 0L) + 1)
-        writeTunPacket(
-            PacketCodec.buildTcpResponse(
-                request = request,
-                sequenceNumber = nextServerSeq,
-                acknowledgementNumber = clientAck,
-                flags = TCP_FLAG_FIN or TCP_FLAG_ACK,
-                windowSize = DEFAULT_TCP_WINDOW_SIZE
-            )
+        val selectors = BridgeFlowSelectors<HttpsProxyFlow>(
+            sequence = httpsSequenceSelectors(),
+            stateOf = { it.state }
         )
-        synchronized(httpsProxyFlowCache) {
-            val current = httpsProxyFlowCache[flowKey] ?: return@synchronized
-            httpsProxyFlowCache[flowKey] = current.copy(
-                state = "bridge_fin_sent",
-                serverNextSequence = nextServerSeq + 1,
-                lastSeenAt = System.currentTimeMillis()
-            )
-        }
-        logDecisionOnce(
-            key = "https-proxy-bridge-fin:$flowKey",
-            message = "Sent bridge-initiated FIN-ACK for HTTPS proxy flow domain=${flow.domain} source=${flow.source}",
-            minIntervalMillis = 5_000L
-        )
+        val flow = emitBridgeFinCommon(
+            flowCache = httpsProxyFlowCache,
+            flowKey = flowKey,
+            request = request,
+            selectors = selectors,
+            updateFlow = ::updateHttpsBridgeFinFlow
+        ) ?: return
+        logBridgeFinSent(flowKey, flow.domain, flow.source)
     }
 
-    private fun closeHttpsProxyFlow(flowKey: String, flow: HttpsProxyFlow, message: String) {
-        synchronized(httpsProxyFlowCache) {
-            httpsProxyFlowCache.remove(flowKey)
-        }
-        synchronized(httpsBridgeSocketCache) {
-            httpsBridgeSocketCache.remove(flowKey)?.close()
-        }
-        logDecisionOnce(
-            key = "https-proxy-handshake:$flowKey:closed",
+    private fun closeHttpsProxyFlow(flowKey: String, message: String) {
+        closeBridgeFlowCommon(
+            flowCache = httpsProxyFlowCache,
+            sessionCache = httpsBridgeSocketCache,
+            flowKey = flowKey,
             message = message,
-            minIntervalMillis = 5_000L
+            logKey = buildBridgeCloseLogKey("https-proxy-handshake", flowKey)
         )
     }
 
     private fun emitHttpsBridgeReset(flowKey: String, request: com.HanFeng.model.PacketInfo, message: String) {
-        val flow = synchronized(httpsProxyFlowCache) {
-            httpsProxyFlowCache[flowKey]
-        } ?: return
-        val serverSeqBase = flow.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-        val nextServerSeq = flow.serverNextSequence ?: (serverSeqBase + 1)
-        val clientAck = flow.clientNextSequence ?: ((flow.clientInitialSequence ?: 0L) + 1)
-        writeTunPacket(
-            PacketCodec.buildTcpResponse(
-                request = request,
-                sequenceNumber = nextServerSeq,
-                acknowledgementNumber = clientAck,
-                flags = TCP_FLAG_RST or TCP_FLAG_ACK,
-                windowSize = DEFAULT_TCP_WINDOW_SIZE
-            )
+        val selectors = BridgeFlowSelectors<HttpsProxyFlow>(
+            sequence = httpsSequenceSelectors()
         )
-        closeHttpsProxyFlow(flowKey, flow, message)
+        emitBridgeResetCommon(
+            flowCache = httpsProxyFlowCache,
+            flowKey = flowKey,
+            request = request,
+            message = message,
+            selectors = selectors,
+            closeFlow = ::closeHttpsProxyFlow
+        )
     }
 
     private fun resolveHttpsProxyDomain(flowKey: String): String {
@@ -2642,159 +2388,112 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun forwardPayloadToLocalProxyBridge(flowKey: String, payload: ByteArray) {
-        if (payload.isEmpty()) return
-        val session = synchronized(localProxyBridgeSocketCache) {
-            localProxyBridgeSocketCache[flowKey]
-        } ?: return
-        scope.launch {
-            runCatching {
-                session.output.write(payload)
-            }.onFailure {
-                LogRepository.append(this@AdBlockVpnService, "Forward local proxy payload failed flow=$flowKey: ${it.message ?: it.javaClass.simpleName}")
-                emitLocalProxyBridgeReset(flowKey, session.requestTemplate, "Bridge write reset local proxy flow target=${resolveLocalProxyTarget(flowKey)}")
-            }
-        }
+        forwardPayloadToBridge(
+            sessionCache = localProxyBridgeSocketCache,
+            flowKey = flowKey,
+            payload = payload,
+            writePayload = { session, bytes -> session.output.write(bytes) },
+            onFailure = buildSessionBridgeFailureHandler(
+                failureHandlerOfRequest = { request ->
+                    buildLocalProxyBridgeFailureHandler(
+                        action = "Forward local proxy payload failed",
+                        flowKey = flowKey,
+                        request = request,
+                        stage = "write"
+                    )
+                },
+                requestOfSession = { it.requestTemplate }
+            )
+        )
     }
 
     private fun flushBufferedLocalProxyPayload(flowKey: String) {
-        val flow = synchronized(localProxyTcpFlowCache) {
+        val segmentsToFlush = synchronized(localProxyTcpFlowCache) {
             val current = localProxyTcpFlowCache[flowKey] ?: return
-            if (current.bufferedClientSegments.isEmpty()) {
-                localProxyTcpFlowCache[flowKey] = current.copy(
-                    state = "established",
-                    lastSeenAt = System.currentTimeMillis()
-                )
-                return
-            }
-            localProxyTcpFlowCache[flowKey] = current.copy(
-                state = "established",
-                bufferedClientSegments = emptyList(),
-                lastClientPayloadSequence = current.bufferedClientSegments.lastOrNull()?.sequenceNumber ?: current.lastClientPayloadSequence,
-                lastClientPayloadLength = current.bufferedClientSegments.lastOrNull()?.payload?.size?.toLong() ?: current.lastClientPayloadLength,
-                lastSeenAt = System.currentTimeMillis()
+            val flushResult = BridgeFlowStateSupport.flushBufferedClientPayload(
+                flow = current,
+                bufferedSegments = current.bufferedClientSegments,
+                lastSequenceOf = { it.sequenceNumber },
+                payloadSizeOf = { it.payload.size },
+                now = System.currentTimeMillis(),
+                updateFlow = ::updateFlushedLocalProxyBufferedPayloadFlow
             )
-            current
+            localProxyTcpFlowCache[flowKey] = flushResult.nextFlow ?: current
+            flushResult.forwardSegments
         }
-        flow.bufferedClientSegments.forEach { segment ->
+        segmentsToFlush.forEach { segment ->
             forwardPayloadToLocalProxyBridge(flowKey, segment.payload)
         }
     }
 
     private fun runLocalProxyBridgeReader(session: LocalProxyBridgeSocketSession) {
-        val buffer = ByteArray(16 * 1024)
-        var resetSent = false
-        while (scope.isActive && isRunning) {
-            val count = try {
-                session.input.read(buffer)
-            } catch (error: Exception) {
-                LogRepository.append(this, "Read local proxy bridge payload failed flow=${session.flowKey}: ${error.message ?: error.javaClass.simpleName}")
-                emitLocalProxyBridgeReset(session.flowKey, session.requestTemplate, "Bridge read reset local proxy flow target=${resolveLocalProxyTarget(session.flowKey)}")
-                resetSent = true
-                break
-            }
-            if (count <= 0) break
-            emitLocalProxyBridgePayload(session.flowKey, session.requestTemplate, buffer.copyOf(count))
-        }
-        if (!resetSent) {
-            emitLocalProxyBridgeFin(session.flowKey, session.requestTemplate)
-        }
-        synchronized(localProxyBridgeSocketCache) {
-            localProxyBridgeSocketCache.remove(session.flowKey)?.close()
-        }
-        synchronized(localProxyTcpFlowCache) {
-            val current = localProxyTcpFlowCache[session.flowKey] ?: return@synchronized
-            localProxyTcpFlowCache[session.flowKey] = current.copy(
-                state = "bridge_socket_closed",
-                lastSeenAt = System.currentTimeMillis()
-            )
-        }
+        runBridgeReaderConfigured(
+            session = session,
+            input = session.input,
+            flowKey = session.flowKey,
+            config = buildLocalProxyBridgeReaderConfig(session)
+        )
     }
 
     private fun emitLocalProxyBridgePayload(flowKey: String, request: com.HanFeng.model.PacketInfo, payload: ByteArray) {
-        val flow = synchronized(localProxyTcpFlowCache) {
-            localProxyTcpFlowCache[flowKey]
-        } ?: return
-        val serverSeqBase = flow.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-        val nextServerSeq = flow.serverNextSequence ?: (serverSeqBase + 1)
-        val clientAck = flow.clientNextSequence ?: ((flow.clientInitialSequence ?: 0L) + 1)
-        val freshSegments = buildServerPayloadSegments(nextServerSeq, payload)
-        writeServerPayloadSegments(request, clientAck, freshSegments)
-        synchronized(localProxyTcpFlowCache) {
-            val current = localProxyTcpFlowCache[flowKey] ?: return@synchronized
-            val mergedPendingSegments = mergePendingServerSegments(current.pendingServerSegments, freshSegments)
-            if (pendingServerPayloadBytes(mergedPendingSegments) > MAX_BUFFERED_SERVER_BYTES) {
-                emitLocalProxyBridgeReset(flowKey, request, "Pending server window overflow reset local proxy flow target=${current.targetIp}:${current.targetPort}")
-                return@synchronized
-            }
-            localProxyTcpFlowCache[flowKey] = current.copy(
-                state = "server_payload_sent",
-                serverNextSequence = nextServerSeq + payload.size,
-                lastServerPayloadSequence = nextServerSeq,
-                lastServerPayload = payload,
-                pendingServerSegments = mergedPendingSegments,
-                lastSeenAt = System.currentTimeMillis()
-            )
-        }
+        val selectors = BridgeFlowSelectors<LocalProxyTcpFlow>(
+            sequence = localProxySequenceSelectors(),
+            pendingSegmentsOf = { it.pendingServerSegments }
+        )
+        emitBridgePayloadCommon(
+            flowCache = localProxyTcpFlowCache,
+            flowKey = flowKey,
+            request = request,
+            payload = payload,
+            selectors = selectors,
+            onOverflow = {
+                emitLocalProxyTargetReset(
+                    flowKey,
+                    request,
+                    stage = "Pending server window overflow",
+                    target = "${it.targetIp}:${it.targetPort}"
+                )
+            },
+            updateFlow = ::updateLocalProxyBridgePayloadFlow
+        )
     }
 
     private fun emitLocalProxyBridgeFin(flowKey: String, request: com.HanFeng.model.PacketInfo) {
-        val flow = synchronized(localProxyTcpFlowCache) {
-            localProxyTcpFlowCache[flowKey]
-        } ?: return
-        if (flow.state == "fin_ack_sent" || flow.state == "bridge_fin_sent" || flow.state == "bridge_fin_acked") return
-        val serverSeqBase = flow.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-        val nextServerSeq = flow.serverNextSequence ?: (serverSeqBase + 1)
-        val clientAck = flow.clientNextSequence ?: ((flow.clientInitialSequence ?: 0L) + 1)
-        writeTunPacket(
-            PacketCodec.buildTcpResponse(
-                request = request,
-                sequenceNumber = nextServerSeq,
-                acknowledgementNumber = clientAck,
-                flags = TCP_FLAG_FIN or TCP_FLAG_ACK,
-                windowSize = DEFAULT_TCP_WINDOW_SIZE
-            )
+        val selectors = BridgeFlowSelectors<LocalProxyTcpFlow>(
+            sequence = localProxySequenceSelectors(),
+            stateOf = { it.state }
         )
-        synchronized(localProxyTcpFlowCache) {
-            val current = localProxyTcpFlowCache[flowKey] ?: return@synchronized
-            localProxyTcpFlowCache[flowKey] = current.copy(
-                state = "bridge_fin_sent",
-                serverNextSequence = nextServerSeq + 1,
-                lastSeenAt = System.currentTimeMillis()
-            )
-        }
+        emitBridgeFinCommon(
+            flowCache = localProxyTcpFlowCache,
+            flowKey = flowKey,
+            request = request,
+            selectors = selectors,
+            updateFlow = ::updateLocalProxyBridgeFinFlow
+        )
     }
 
-    private fun closeLocalProxyTcpFlow(flowKey: String, flow: LocalProxyTcpFlow, message: String) {
-        synchronized(localProxyTcpFlowCache) {
-            localProxyTcpFlowCache.remove(flowKey)
-        }
-        synchronized(localProxyBridgeSocketCache) {
-            localProxyBridgeSocketCache.remove(flowKey)?.close()
-        }
-        logDecisionOnce(
-            key = "local-proxy-flow:$flowKey:closed",
+    private fun closeLocalProxyTcpFlow(flowKey: String, message: String) {
+        closeBridgeFlowCommon(
+            flowCache = localProxyTcpFlowCache,
+            sessionCache = localProxyBridgeSocketCache,
+            flowKey = flowKey,
             message = message,
-            minIntervalMillis = 5_000L
+            logKey = buildBridgeCloseLogKey("local-proxy-flow", flowKey)
         )
     }
 
     private fun emitLocalProxyBridgeReset(flowKey: String, request: com.HanFeng.model.PacketInfo, message: String) {
-        val flow = synchronized(localProxyTcpFlowCache) {
-            localProxyTcpFlowCache[flowKey]
-        } ?: return
-        val serverSeqBase = flow.serverInitialSequence ?: synthesizeServerSequence(flowKey)
-        val nextServerSeq = flow.serverNextSequence ?: (serverSeqBase + 1)
-        val clientAck = flow.clientNextSequence ?: ((flow.clientInitialSequence ?: 0L) + 1)
-        writeTunPacket(
-            PacketCodec.buildTcpResponse(
-                request = request,
-                sequenceNumber = nextServerSeq,
-                acknowledgementNumber = clientAck,
-                flags = TCP_FLAG_RST or TCP_FLAG_ACK,
-                windowSize = DEFAULT_TCP_WINDOW_SIZE
-            )
+        val selectors = BridgeFlowSelectors<LocalProxyTcpFlow>(
+            sequence = localProxySequenceSelectors()
         )
-        closeLocalProxyTcpFlow(flowKey, flow, message)
+        emitBridgeResetCommon(
+            flowCache = localProxyTcpFlowCache,
+            flowKey = flowKey,
+            request = request,
+            message = message,
+            selectors = selectors,
+            closeFlow = ::closeLocalProxyTcpFlow
+        )
     }
 
     private fun resolveLocalProxyTarget(flowKey: String): String {
@@ -2803,19 +2502,2885 @@ class AdBlockVpnService : VpnService() {
         } ?: "unknown"
     }
 
+    private fun decideSyntheticHandshake(
+        info: com.HanFeng.model.PacketInfo,
+        destinationPort: Int,
+        hasFlow: Boolean,
+        bridgePort: Int?,
+        state: String
+    ): HttpsHandshakeEngine.Decision {
+        return HttpsHandshakeEngine.decide(
+            HttpsHandshakeEngine.Input(
+                protocol = info.protocol,
+                destinationPort = destinationPort,
+                hasFlow = hasFlow,
+                bridgePort = bridgePort,
+                state = state,
+                syn = info.tcpFlags.hasTcpFlag(TCP_FLAG_SYN),
+                ack = info.tcpFlags.hasTcpFlag(TCP_FLAG_ACK),
+                fin = info.tcpFlags.hasTcpFlag(TCP_FLAG_FIN),
+                rst = info.tcpFlags.hasTcpFlag(TCP_FLAG_RST),
+                psh = info.tcpFlags.hasTcpFlag(TCP_FLAG_PSH),
+                payloadLength = info.payload.size.toLong()
+            )
+        )
+    }
+
+    private fun shouldSkipHttpsTransparentProxyTracking(
+        flowKey: String,
+        ip: String,
+        destinationPort: Int
+    ): Boolean {
+        if (!isLocalLoopOrProxyEndpoint(ip, destinationPort)) return false
+        FlowCacheSupport.remove(httpsProxyFlowCache, flowKey)
+        logDecisionOnce(
+            key = "https-transparent-skip-local:$ip:$destinationPort",
+            message = "Skipped HTTPS transparent proxy tracking for local endpoint ip=$ip port=$destinationPort",
+            minIntervalMillis = 15_000L
+        )
+        return true
+    }
+
+    private fun shouldBlockHttpsTransparentProxySyn(
+        flowKey: String,
+        target: HttpsDecryptTarget,
+        ip: String,
+        info: com.HanFeng.model.PacketInfo
+    ): Boolean {
+        if (!info.tcpFlags.hasTcpFlag(TCP_FLAG_SYN) || info.tcpFlags.hasTcpFlag(TCP_FLAG_ACK)) return false
+        val domainContext = resolveDomainDecisionContext(
+            domain = target.domain,
+            info = info,
+            knownAppName = target.appName.takeIf { it.isNotBlank() },
+            destinationPort = info.destinationPort,
+            sourcePort = info.sourcePort
+        )
+        val appName = domainContext.appName
+        val matchedRule = domainContext.matchedRule
+        val vendor = domainContext.vendor
+        if (!shouldTreatAsTrackedAdTarget(
+                target.domain,
+                appName,
+                vendor,
+                matchedRule,
+                includeProtectedNovelUrl = false,
+                includeForceNovelQuic = false
+            )) {
+            logDecisionOnce(
+                key = "https-pass-syn:${target.domain}:$ip:${info.sourcePort}",
+                message = "Passed HTTPS SYN domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source}",
+                minIntervalMillis = 30_000L
+            )
+            return false
+        }
+        StatsRepository.recordBlockedMitm(this, vendor, appName, 64 * 1024)
+        LogRepository.append(
+            this,
+            "Blocked HTTPS connection at SYN domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source} via=https-decrypt-entry"
+        )
+        FlowCacheSupport.remove(httpsProxyFlowCache, flowKey)
+        return true
+    }
+
+    private fun shouldBypassHttpsTransparentProxyTracking(flowKey: String, domain: String): Boolean {
+        val cooldownReason = HttpsMitmRepository.getActiveBypassReason(this, domain)
+        if (cooldownReason != null) {
+            FlowCacheSupport.remove(httpsProxyFlowCache, flowKey)
+            return true
+        }
+        val existingSession = TlsMitmSessionManager.getSession(flowKey)
+        if (existingSession?.bypassMitm == true) {
+            FlowCacheSupport.remove(httpsProxyFlowCache, flowKey)
+            return true
+        }
+        return false
+    }
+
+    private fun resolveHttpsTransparentPreparedBridge(
+        flowKey: String,
+        ip: String,
+        info: com.HanFeng.model.PacketInfo,
+        target: HttpsDecryptTarget
+    ): PreparedTlsMitmSessionInfo {
+        val currentProxyAppName = synchronized(httpsProxyFlowCache) {
+            httpsProxyFlowCache[flowKey]?.appName?.takeIf { it.isNotBlank() }
+        }
+        val targetAppName = target.appName.takeIf { it.isNotBlank() }
+            ?: currentProxyAppName
+        val preparedSession = TlsMitmSessionManager.findPreparedSession(
+            targetIp = ip,
+            targetPort = info.destinationPort,
+            appName = targetAppName
+        )
+        val resolvedProxyAppName = currentProxyAppName
+            ?: preparedSession?.appName?.takeIf { it.isNotBlank() }
+            ?: targetAppName
+            ?: resolveAppName(target.domain, info)
+        return PreparedTlsMitmSessionInfo(
+            appName = resolvedProxyAppName,
+            bridgeHost = preparedSession?.localBridgeHost,
+            bridgePort = preparedSession?.localBridgePort
+        )
+    }
+
+    private fun trackHttpsTransparentProxyFlow(
+        flowKey: String,
+        target: HttpsDecryptTarget,
+        ip: String,
+        info: com.HanFeng.model.PacketInfo,
+        preparedBridge: PreparedTlsMitmSessionInfo
+    ) {
+        val flags = info.tcpFlags
+        synchronized(httpsProxyFlowCache) {
+            val current = httpsProxyFlowCache[flowKey]
+            val nextState = HttpsPipeline.nextTransparentProxyState(
+                flags = flags,
+                hasPreparedBridgePort = preparedBridge.bridgePort != null,
+                hasPayload = info.payload.isNotEmpty(),
+                currentState = current?.state
+            )
+            FlowCacheSupport.putPruned(
+                cache = httpsProxyFlowCache,
+                key = flowKey,
+                value = HttpsProxyFlow(
+                    flowKey = flowKey,
+                    domain = target.domain,
+                    vendor = target.vendor,
+                    source = target.source,
+                    targetIp = ip,
+                    sourcePort = info.sourcePort,
+                    appName = preparedBridge.appName,
+                    state = nextState,
+                    bridgeHost = preparedBridge.bridgeHost,
+                    bridgePort = preparedBridge.bridgePort,
+                    lastSequenceNumber = info.tcpSequenceNumber,
+                    lastAcknowledgementNumber = info.tcpAcknowledgementNumber,
+                    lastSeenAt = System.currentTimeMillis()
+                ),
+                maxSize = 512
+            )
+        }
+    }
+
+    private fun trackLocalProxyTcpFlow(
+        flowKey: String,
+        targetContext: DestinationAppContext,
+        info: com.HanFeng.model.PacketInfo
+    ) {
+        val flags = info.tcpFlags
+        synchronized(localProxyTcpFlowCache) {
+            val current = localProxyTcpFlowCache[flowKey]
+            FlowCacheSupport.putPruned(
+                cache = localProxyTcpFlowCache,
+                key = flowKey,
+                value = LocalProxyTcpFlow(
+                    flowKey = flowKey,
+                    targetIp = targetContext.destinationIp,
+                    targetPort = info.destinationPort,
+                    sourcePort = info.sourcePort,
+                    appName = targetContext.appName,
+                    state = resolveLocalProxyTcpFlowState(current?.state, flags, info.payload.isNotEmpty()),
+                    bridgeHost = localProxyCoexistConfig.host,
+                    bridgePort = localProxyCoexistConfig.port,
+                    lastSequenceNumber = info.tcpSequenceNumber,
+                    lastAcknowledgementNumber = info.tcpAcknowledgementNumber,
+                    lastSeenAt = System.currentTimeMillis()
+                ),
+                maxSize = 512
+            )
+        }
+    }
+
+    private fun resolveLocalProxyTcpFlowState(
+        currentState: String?,
+        flags: Int,
+        hasPayload: Boolean
+    ): String {
+        return when {
+            flags.hasTcpFlag(TCP_FLAG_SYN) && !flags.hasTcpFlag(TCP_FLAG_ACK) -> "syn_seen"
+            flags.hasTcpFlag(TCP_FLAG_SYN) && flags.hasTcpFlag(TCP_FLAG_ACK) -> "syn_ack_seen"
+            flags.hasTcpFlag(TCP_FLAG_FIN) -> "fin_seen"
+            flags.hasTcpFlag(TCP_FLAG_RST) -> "rst_seen"
+            hasPayload -> "payload_seen"
+            else -> currentState ?: "tracked"
+        }
+    }
+
+    private fun buildSyntheticPacketState(info: com.HanFeng.model.PacketInfo): SyntheticPacketState {
+        return SyntheticPacketState(
+            sequenceNumber = info.tcpSequenceNumber ?: 0L,
+            acknowledgementNumber = info.tcpAcknowledgementNumber ?: 0L,
+            payloadLength = info.payload.size.toLong(),
+            now = System.currentTimeMillis()
+        )
+    }
+
+    private fun <TFlow> handleSyntheticSynOpen(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        updateFlow: (TFlow, Long, Long) -> TFlow
+    ) {
+        val current = synchronized(flowCache) {
+            flowCache[flowKey]
+        } ?: return
+        val serverSeq = serverInitialSequenceOf(current) ?: synthesizeServerSequence(flowKey)
+        FlowCacheSupport.putPruned(flowCache, flowKey, updateFlow(current, serverSeq, now), 512)
+        writeTunPacket(
+            PacketCodec.buildTcpResponse(
+                request = request,
+                sequenceNumber = serverSeq,
+                acknowledgementNumber = sequenceNumber + 1,
+                flags = TCP_FLAG_SYN or TCP_FLAG_ACK,
+                windowSize = request.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
+            )
+        )
+    }
+
+    private fun <TFlow> handleSyntheticAckEstablish(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        now: Long,
+        updateFlow: (TFlow) -> TFlow
+    ) {
+        synchronized(flowCache) {
+            val current = flowCache[flowKey] ?: return@synchronized
+            FlowCacheSupport.putPruned(flowCache, flowKey, updateFlow(current), 512)
+        }
+    }
+
+    private fun <TFlow, TSession> handleSyntheticClientFin(
+        flowCache: LinkedHashMap<String, TFlow>,
+        sessionCache: LinkedHashMap<String, TSession>,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        clientSequenceNumber: Long,
+        payloadLength: Long,
+        now: Long,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        serverNextSequenceOf: (TFlow) -> Long?,
+        updateFlow: (TFlow, BridgeLifecycleSupport.ClientFinTransition) -> TFlow,
+        closeSession: (TSession) -> Unit
+    ) {
+        val current = synchronized(flowCache) {
+            flowCache[flowKey]
+        } ?: return
+        val transition = BridgeLifecycleSupport.resolveClientFinTransition(
+            serverInitialSequence = serverInitialSequenceOf(current),
+            serverNextSequence = serverNextSequenceOf(current),
+            clientSequenceNumber = clientSequenceNumber,
+            payloadLength = payloadLength,
+            now = now,
+            synthesizeServerSequence = { synthesizeServerSequence(flowKey) }
+        )
+        FlowCacheSupport.updateIfPresent(flowCache, flowKey) {
+            updateFlow(it, transition)
+        }
+        writeTunPacket(
+            PacketCodec.buildTcpResponse(
+                request = request,
+                sequenceNumber = transition.nextServerSequenceToSend,
+                acknowledgementNumber = transition.clientAcknowledgement,
+                flags = TCP_FLAG_FIN or TCP_FLAG_ACK,
+                windowSize = request.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
+            )
+        )
+        BridgeSessionSupport.removeAndClose(sessionCache, flowKey, closeSession)
+    }
+
+    private fun handleSyntheticTerminalClose(
+        flowKey: String,
+        message: String,
+        closeFlow: (String, String) -> Unit
+    ) {
+        closeFlow(flowKey, message)
+    }
+
+    private fun closeSyntheticFlowAndReturnTrue(
+        flowKey: String,
+        message: String,
+        closeFlow: (String, String) -> Unit
+    ): Boolean {
+        handleSyntheticTerminalClose(flowKey, message, closeFlow)
+        return true
+    }
+
+    private data class SyntheticSynAckState(
+        val sequenceNumber: Long,
+        val acknowledgementNumber: Long,
+        val serverSequenceNumber: Long,
+        val lastSeenAt: Long
+    )
+
+    private fun buildSyntheticSynAckState(
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        serverSequenceNumber: Long,
+        lastSeenAt: Long
+    ): SyntheticSynAckState {
+        return SyntheticSynAckState(
+            sequenceNumber,
+            acknowledgementNumber,
+            serverSequenceNumber,
+            lastSeenAt
+        )
+    }
+
+    private fun applyLocalProxySynAckState(
+        flowState: LocalProxyTcpFlow,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        serverSequenceNumber: Long,
+        lastSeenAt: Long
+    ): LocalProxyTcpFlow {
+        val synAckState = buildSyntheticSynAckState(
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            serverSequenceNumber = serverSequenceNumber,
+            lastSeenAt = lastSeenAt
+        )
+        return flowState.copy(
+            state = "syn_ack_sent",
+            clientInitialSequence = synAckState.sequenceNumber,
+            serverInitialSequence = synAckState.serverSequenceNumber,
+            lastSequenceNumber = synAckState.sequenceNumber,
+            lastAcknowledgementNumber = synAckState.acknowledgementNumber,
+            lastSeenAt = synAckState.lastSeenAt
+        )
+    }
+
+    private fun applyHttpsSynAckState(
+        flowState: HttpsProxyFlow,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        serverSequenceNumber: Long,
+        lastSeenAt: Long
+    ): HttpsProxyFlow {
+        val synAckState = buildSyntheticSynAckState(
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            serverSequenceNumber = serverSequenceNumber,
+            lastSeenAt = lastSeenAt
+        )
+        return flowState.copy(
+            state = "syn_ack_sent",
+            clientInitialSequence = synAckState.sequenceNumber,
+            serverInitialSequence = synAckState.serverSequenceNumber,
+            lastSequenceNumber = synAckState.sequenceNumber,
+            lastAcknowledgementNumber = synAckState.acknowledgementNumber,
+            lastSeenAt = synAckState.lastSeenAt
+        )
+    }
+
+    private data class SyntheticAckEstablishedState(
+        val state: String,
+        val sequenceNumber: Long,
+        val acknowledgementNumber: Long,
+        val lastSeenAt: Long
+    )
+
+    private fun buildSyntheticAckEstablishedState(
+        state: String,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long
+    ): SyntheticAckEstablishedState {
+        return SyntheticAckEstablishedState(
+            state = state,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            lastSeenAt = now
+        )
+    }
+
+    private fun applyLocalProxyAckEstablishedState(
+        flowState: LocalProxyTcpFlow,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long
+    ): LocalProxyTcpFlow {
+        val establishedState = buildSyntheticAckEstablishedState(
+            state = "bridge_connecting",
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            now = now
+        )
+        return flowState.copy(
+            state = establishedState.state,
+            lastSequenceNumber = establishedState.sequenceNumber,
+            lastAcknowledgementNumber = establishedState.acknowledgementNumber,
+            clientNextSequence = establishedState.sequenceNumber,
+            lastSeenAt = establishedState.lastSeenAt
+        )
+    }
+
+    private fun applyHttpsAckEstablishedState(
+        flowState: HttpsProxyFlow,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long
+    ): HttpsProxyFlow {
+        val establishedState = buildSyntheticAckEstablishedState(
+            state = "established",
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            now = now
+        )
+        return flowState.copy(
+            state = establishedState.state,
+            lastSequenceNumber = establishedState.sequenceNumber,
+            lastAcknowledgementNumber = establishedState.acknowledgementNumber,
+            clientNextSequence = establishedState.sequenceNumber,
+            lastSeenAt = establishedState.lastSeenAt
+        )
+    }
+
+    private fun <TFlow> buildSyntheticAckedServerState(
+        nextAckState: ServerAckStateSupport.AckStateTransition,
+        updateFlow: (
+            state: String,
+            lastSequenceNumber: Long,
+            lastAcknowledgementNumber: Long,
+            lastSeenAt: Long
+        ) -> TFlow
+    ): TFlow {
+        return updateFlow(
+            nextAckState.nextState,
+            nextAckState.lastSequenceNumber,
+            nextAckState.lastAcknowledgementNumber,
+            nextAckState.lastSeenAt
+        )
+    }
+
+    private fun <TFlow> buildSyntheticClientFinState(
+        transition: BridgeLifecycleSupport.ClientFinTransition,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        updateFlow: (
+            state: String,
+            lastSequenceNumber: Long,
+            lastAcknowledgementNumber: Long,
+            serverNextSequence: Long?,
+            clientNextSequence: Long,
+            lastSeenAt: Long
+        ) -> TFlow
+    ): TFlow {
+        return updateFlow(
+            transition.state,
+            sequenceNumber,
+            acknowledgementNumber,
+            transition.storedServerNextSequence,
+            transition.clientAcknowledgement,
+            transition.lastSeenAt
+        )
+    }
+
+    private fun <TFlow> buildBufferedClientSegmentsState(
+        updatedBufferedSegments: List<ClientPayloadSegment>,
+        now: Long,
+        updateFlow: (bufferedClientSegments: List<ClientPayloadSegment>, lastSeenAt: Long) -> TFlow
+    ): TFlow {
+        return updateFlow(updatedBufferedSegments, now)
+    }
+
+    private fun <TFlow> buildRetransmittedServerSegmentsState(
+        remainingSegments: List<PendingServerSegment>,
+        now: Long,
+        updateFlow: (pendingServerSegments: List<PendingServerSegment>, lastSeenAt: Long) -> TFlow
+    ): TFlow {
+        return updateFlow(remainingSegments, now)
+    }
+
+    private fun <TFlow> applySyntheticAckedServerState(
+        flowState: TFlow,
+        nextAckState: ServerAckStateSupport.AckStateTransition,
+        updateFlow: (TFlow, ServerAckStateSupport.AckStateTransition) -> TFlow
+    ): TFlow {
+        return updateFlow(flowState, nextAckState)
+    }
+
+    private fun <TFlow> applyBufferedClientSegmentsState(
+        flowState: TFlow,
+        updatedBufferedSegments: List<ClientPayloadSegment>,
+        now: Long,
+        updateFlow: (TFlow, List<ClientPayloadSegment>, Long) -> TFlow
+    ): TFlow {
+        return updateFlow(flowState, updatedBufferedSegments, now)
+    }
+
+    private fun <TFlow> applyRetransmittedServerSegmentsState(
+        flowState: TFlow,
+        remainingSegments: List<PendingServerSegment>,
+        now: Long,
+        updateFlow: (TFlow, List<PendingServerSegment>, Long) -> TFlow
+    ): TFlow {
+        return updateFlow(flowState, remainingSegments, now)
+    }
+
+    private fun <TFlow> applySyntheticClientFinState(
+        flowState: TFlow,
+        transition: BridgeLifecycleSupport.ClientFinTransition,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        updateFlow: (TFlow, BridgeLifecycleSupport.ClientFinTransition, Long, Long) -> TFlow
+    ): TFlow {
+        return updateFlow(flowState, transition, sequenceNumber, acknowledgementNumber)
+    }
+
+    private fun resolveClientPayloadState(bridgeConnected: Boolean): String {
+        return if (bridgeConnected) "payload_acknowledged" else "bridge_connecting"
+    }
+
+    private fun resolveClientPayloadBufferedSegments(
+        flushResult: ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>,
+        bridgeConnected: Boolean
+    ): List<ClientPayloadSegment> {
+        return if (bridgeConnected) {
+            flushResult.remainingSegments
+        } else {
+            mergeBufferedClientSegments(flushResult.remainingSegments, flushResult.forwardSegments)
+        }
+    }
+
+    private fun resolveClientPayloadSequence(
+        flowSequence: Long?,
+        lastForwardedSegment: ClientPayloadSegment?,
+        bridgeConnected: Boolean
+    ): Long? {
+        return if (bridgeConnected) {
+            lastForwardedSegment?.sequenceNumber ?: flowSequence
+        } else {
+            flowSequence
+        }
+    }
+
+    private fun resolveClientPayloadLength(
+        flowLength: Long?,
+        lastForwardedSegment: ClientPayloadSegment?,
+        bridgeConnected: Boolean
+    ): Long? {
+        return if (bridgeConnected) {
+            lastForwardedSegment?.payload?.size?.toLong() ?: flowLength
+        } else {
+            flowLength
+        }
+    }
+
+    private fun applySyntheticAckedServerState(
+        flowState: LocalProxyTcpFlow,
+        nextAckState: ServerAckStateSupport.AckStateTransition
+    ): LocalProxyTcpFlow {
+        return applySyntheticAckedServerState(flowState, nextAckState) { activeFlowState, activeAckState ->
+            buildSyntheticAckedServerState(activeAckState) { state, lastSequenceNumber, lastAcknowledgementNumber, lastSeenAt ->
+                activeFlowState.copy(
+                    state = state,
+                    pendingServerSegments = emptyList(),
+                    lastSequenceNumber = lastSequenceNumber,
+                    lastAcknowledgementNumber = lastAcknowledgementNumber,
+                    lastSeenAt = lastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applySyntheticAckedServerState(
+        flowState: HttpsProxyFlow,
+        nextAckState: ServerAckStateSupport.AckStateTransition
+    ): HttpsProxyFlow {
+        return applySyntheticAckedServerState(flowState, nextAckState) { activeFlowState, activeAckState ->
+            buildSyntheticAckedServerState(activeAckState) { state, lastSequenceNumber, lastAcknowledgementNumber, lastSeenAt ->
+                activeFlowState.copy(
+                    state = state,
+                    pendingServerSegments = emptyList(),
+                    lastSequenceNumber = lastSequenceNumber,
+                    lastAcknowledgementNumber = lastAcknowledgementNumber,
+                    lastSeenAt = lastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applySyntheticClientFinState(
+        flowState: LocalProxyTcpFlow,
+        transition: BridgeLifecycleSupport.ClientFinTransition,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long
+    ): LocalProxyTcpFlow {
+        return applySyntheticClientFinState(flowState, transition, sequenceNumber, acknowledgementNumber) {
+                activeFlowState,
+                activeTransition,
+                activeSequenceNumber,
+                activeAcknowledgementNumber ->
+            buildSyntheticClientFinState(activeTransition, activeSequenceNumber, activeAcknowledgementNumber) {
+                    state,
+                    lastSequenceNumber,
+                    lastAcknowledgementNumber,
+                    serverNextSequence,
+                    clientNextSequence,
+                    lastSeenAt ->
+                activeFlowState.copy(
+                    state = state,
+                    lastSequenceNumber = lastSequenceNumber,
+                    lastAcknowledgementNumber = lastAcknowledgementNumber,
+                    serverNextSequence = serverNextSequence,
+                    clientNextSequence = clientNextSequence,
+                    lastSeenAt = lastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applySyntheticClientFinState(
+        flowState: HttpsProxyFlow,
+        transition: BridgeLifecycleSupport.ClientFinTransition,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long
+    ): HttpsProxyFlow {
+        return applySyntheticClientFinState(flowState, transition, sequenceNumber, acknowledgementNumber) {
+                activeFlowState,
+                activeTransition,
+                activeSequenceNumber,
+                activeAcknowledgementNumber ->
+            buildSyntheticClientFinState(activeTransition, activeSequenceNumber, activeAcknowledgementNumber) {
+                    state,
+                    lastSequenceNumber,
+                    lastAcknowledgementNumber,
+                    serverNextSequence,
+                    clientNextSequence,
+                    lastSeenAt ->
+                activeFlowState.copy(
+                    state = state,
+                    lastSequenceNumber = lastSequenceNumber,
+                    lastAcknowledgementNumber = lastAcknowledgementNumber,
+                    serverNextSequence = serverNextSequence,
+                    clientNextSequence = clientNextSequence,
+                    lastSeenAt = lastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applyBufferedClientSegmentsState(
+        flowState: LocalProxyTcpFlow,
+        updatedBufferedSegments: List<ClientPayloadSegment>,
+        now: Long
+    ): LocalProxyTcpFlow {
+        return applyBufferedClientSegmentsState(flowState, updatedBufferedSegments, now) { activeFlowState, bufferedClientSegments, lastSeenAt ->
+            buildBufferedClientSegmentsState(bufferedClientSegments, lastSeenAt) { nextBufferedClientSegments, nextLastSeenAt ->
+                activeFlowState.copy(
+                    bufferedClientSegments = nextBufferedClientSegments,
+                    lastSeenAt = nextLastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applyBufferedClientSegmentsState(
+        flowState: HttpsProxyFlow,
+        updatedBufferedSegments: List<ClientPayloadSegment>,
+        now: Long
+    ): HttpsProxyFlow {
+        return applyBufferedClientSegmentsState(flowState, updatedBufferedSegments, now) { activeFlowState, bufferedClientSegments, lastSeenAt ->
+            buildBufferedClientSegmentsState(bufferedClientSegments, lastSeenAt) { nextBufferedClientSegments, nextLastSeenAt ->
+                activeFlowState.copy(
+                    bufferedClientSegments = nextBufferedClientSegments,
+                    lastSeenAt = nextLastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applyRetransmittedServerSegmentsState(
+        flowState: LocalProxyTcpFlow,
+        remainingSegments: List<PendingServerSegment>,
+        now: Long
+    ): LocalProxyTcpFlow {
+        return applyRetransmittedServerSegmentsState(flowState, remainingSegments, now) { activeFlowState, pendingServerSegments, lastSeenAt ->
+            buildRetransmittedServerSegmentsState(pendingServerSegments, lastSeenAt) { nextPendingServerSegments, nextLastSeenAt ->
+                activeFlowState.copy(
+                    pendingServerSegments = nextPendingServerSegments,
+                    lastSeenAt = nextLastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applyRetransmittedServerSegmentsState(
+        flowState: HttpsProxyFlow,
+        remainingSegments: List<PendingServerSegment>,
+        now: Long
+    ): HttpsProxyFlow {
+        return applyRetransmittedServerSegmentsState(flowState, remainingSegments, now) { activeFlowState, pendingServerSegments, lastSeenAt ->
+            buildRetransmittedServerSegmentsState(pendingServerSegments, lastSeenAt) { nextPendingServerSegments, nextLastSeenAt ->
+                activeFlowState.copy(
+                    pendingServerSegments = nextPendingServerSegments,
+                    lastSeenAt = nextLastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applyLocalProxyClientPayloadState(
+        flowState: LocalProxyTcpFlow,
+        flushResult: ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>,
+        bridgeConnected: Boolean,
+        lastForwardedSegment: ClientPayloadSegment?,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long
+    ): LocalProxyTcpFlow {
+        return flowState.copy(
+            state = resolveClientPayloadState(bridgeConnected),
+            lastSequenceNumber = sequenceNumber,
+            lastAcknowledgementNumber = acknowledgementNumber,
+            clientNextSequence = flushResult.nextExpectedSequence,
+            bufferedClientSegments = resolveClientPayloadBufferedSegments(flushResult, bridgeConnected),
+            lastClientPayloadSequence = resolveClientPayloadSequence(
+                flowSequence = flowState.lastClientPayloadSequence,
+                lastForwardedSegment = lastForwardedSegment,
+                bridgeConnected = bridgeConnected
+            ),
+            lastClientPayloadLength = resolveClientPayloadLength(
+                flowLength = flowState.lastClientPayloadLength,
+                lastForwardedSegment = lastForwardedSegment,
+                bridgeConnected = bridgeConnected
+            ),
+            lastSeenAt = now
+        )
+    }
+
+    private fun applyHttpsClientPayloadState(
+        flowState: HttpsProxyFlow,
+        flushResult: ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>,
+        bridgeConnected: Boolean,
+        lastForwardedSegment: ClientPayloadSegment?,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long
+    ): HttpsProxyFlow {
+        return flowState.copy(
+            state = "payload_acknowledged",
+            lastSequenceNumber = sequenceNumber,
+            lastAcknowledgementNumber = acknowledgementNumber,
+            clientNextSequence = flushResult.nextExpectedSequence,
+            bufferedClientSegments = resolveClientPayloadBufferedSegments(
+                flushResult = flushResult,
+                bridgeConnected = bridgeConnected
+            ),
+            lastClientPayloadSequence = resolveClientPayloadSequence(
+                flowSequence = flowState.lastClientPayloadSequence,
+                lastForwardedSegment = lastForwardedSegment,
+                bridgeConnected = bridgeConnected
+            ),
+            lastClientPayloadLength = resolveClientPayloadLength(
+                flowLength = flowState.lastClientPayloadLength,
+                lastForwardedSegment = lastForwardedSegment,
+                bridgeConnected = bridgeConnected
+            ),
+            lastSeenAt = now
+        )
+    }
+
+    private fun logHandshakeDecisionAndReturnTrue(
+        key: String,
+        message: String,
+        minIntervalMillis: Long
+    ): Boolean {
+        logDecisionOnce(key, message, minIntervalMillis)
+        return true
+    }
+
+    private fun <TSession, TConnected> ensureBridgeSocketConnected(
+        sessionCache: LinkedHashMap<String, TSession>,
+        flowKey: String,
+        bridgeHost: String?,
+        bridgePort: Int?,
+        connectBridge: (String, Int) -> TConnected,
+        createSession: (TConnected) -> TSession,
+        onConnected: (TSession, TConnected) -> Unit,
+        onFailure: (Throwable) -> Unit
+    ) {
+        synchronized(sessionCache) {
+            if (sessionCache.containsKey(flowKey)) return
+        }
+        val host = bridgeHost ?: return
+        val port = bridgePort ?: return
+        scope.launch {
+            runCatching {
+                val connected = connectBridge(host, port)
+                val session = createSession(connected)
+                BridgeLifecycleSupport.registerConnectedSession(sessionCache, flowKey, session)
+                onConnected(session, connected)
+            }.onFailure(onFailure)
+        }
+    }
+
+    private fun <TSession> forwardPayloadToBridge(
+        sessionCache: LinkedHashMap<String, TSession>,
+        flowKey: String,
+        payload: ByteArray,
+        writePayload: (TSession, ByteArray) -> Unit,
+        onFailure: (TSession, Throwable) -> Unit
+    ) {
+        val session = synchronized(sessionCache) {
+            sessionCache[flowKey]
+        } ?: return
+        BridgeSocketSupport.launchWriter(
+            scope = scope,
+            payload = payload,
+            write = { writePayload(session, payload) },
+            onFailure = { onFailure(session, it) }
+        )
+    }
+
+    private fun buildHttpsBridgeReaderConfig(
+        session: HttpsBridgeSocketSession
+    ): BridgeReaderConfig<HttpsBridgeSocketSession, HttpsProxyFlow> {
+        return BridgeReaderConfig(
+            flowCache = httpsProxyFlowCache,
+            sessionCache = httpsBridgeSocketCache,
+            onPayload = { payload ->
+                emitHttpsBridgePayload(session.flowKey, session.requestTemplate, payload)
+            },
+            onFailure = buildHttpsBridgeFailureHandler(
+                action = "Read HTTPS bridge payload failed",
+                flowKey = session.flowKey,
+                request = session.requestTemplate,
+                stage = "read"
+            ),
+            onResetNotSent = {
+                emitHttpsBridgeFin(session.flowKey, session.requestTemplate)
+            },
+            closeSession = { it.close() },
+            updateFlow = ::updateHttpsBridgeSocketClosedFlow
+        )
+    }
+
+    private fun buildLocalProxyBridgeReaderConfig(
+        session: LocalProxyBridgeSocketSession
+    ): BridgeReaderConfig<LocalProxyBridgeSocketSession, LocalProxyTcpFlow> {
+        return BridgeReaderConfig(
+            flowCache = localProxyTcpFlowCache,
+            sessionCache = localProxyBridgeSocketCache,
+            onPayload = { payload ->
+                emitLocalProxyBridgePayload(session.flowKey, session.requestTemplate, payload)
+            },
+            onFailure = buildLocalProxyBridgeFailureHandler(
+                action = "Read local proxy bridge payload failed",
+                flowKey = session.flowKey,
+                request = session.requestTemplate,
+                stage = "read"
+            ),
+            onResetNotSent = {
+                emitLocalProxyBridgeFin(session.flowKey, session.requestTemplate)
+            },
+            closeSession = { it.close() },
+            updateFlow = ::updateLocalProxyBridgeSocketClosedFlow
+        )
+    }
+
+    private fun <TSession, TFlow> runBridgeReaderConfigured(
+        session: TSession,
+        input: InputStream,
+        flowKey: String,
+        config: BridgeReaderConfig<TSession, TFlow>
+    ) {
+        runBridgeReader(
+            session = session,
+            input = input,
+            flowCache = config.flowCache,
+            sessionCache = config.sessionCache,
+            flowKey = flowKey,
+            onPayload = config.onPayload,
+            onFailure = config.onFailure,
+            onResetNotSent = config.onResetNotSent,
+            closeSession = config.closeSession,
+            updateFlow = config.updateFlow
+        )
+    }
+
+    private fun <TSession, TFlow> runBridgeReader(
+        session: TSession,
+        input: InputStream,
+        flowCache: LinkedHashMap<String, TFlow>,
+        sessionCache: LinkedHashMap<String, TSession>,
+        flowKey: String,
+        onPayload: (ByteArray) -> Unit,
+        onFailure: (Throwable) -> Unit,
+        onResetNotSent: () -> Unit,
+        closeSession: (TSession) -> Unit,
+        updateFlow: (TFlow, Long) -> TFlow
+    ) {
+        BridgeSocketSupport.runReaderLoop(
+            input = input,
+            bufferSize = 16 * 1024,
+            shouldContinue = { scope.isActive && isRunning },
+            onPayload = onPayload,
+            onFailure = onFailure,
+            onComplete = { resetSent ->
+                if (!resetSent) {
+                    onResetNotSent()
+                }
+                BridgeReaderSupport.completeBridgeReader(
+                    flowCache = flowCache,
+                    sessionCache = sessionCache,
+                    flowKey = flowKey,
+                    now = System.currentTimeMillis(),
+                    closeSession = closeSession,
+                    updateFlow = updateFlow
+                )
+            }
+        )
+    }
+
+    private fun runSyntheticHandshakeStep(step: () -> Unit): Boolean {
+        step()
+        return true
+    }
+
+    private data class PreparedTlsMitmSessionInfo(
+        val appName: String,
+        val bridgeHost: String?,
+        val bridgePort: Int?
+    )
+
+    private data class SyntheticPacketState(
+        val sequenceNumber: Long,
+        val acknowledgementNumber: Long,
+        val payloadLength: Long,
+        val now: Long
+    )
+
+    private enum class SyntheticFlowCloseAction {
+        BRIDGE_FIN,
+        CLOSED,
+        RESET
+    }
+
+    private fun <TFlow> handleSyntheticSynOpenAndReturnTrue(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        updateFlow: (TFlow, Long, Long) -> TFlow,
+        afterStep: (() -> Unit)? = null
+    ): Boolean {
+        return runSyntheticHandshakeStep {
+            handleSyntheticSynOpen(
+                flowCache = flowCache,
+                flowKey = flowKey,
+                request = request,
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                now = now,
+                serverInitialSequenceOf = serverInitialSequenceOf,
+                updateFlow = updateFlow
+            )
+            afterStep?.invoke()
+        }
+    }
+
+    private fun <TFlow> handleSyntheticAckEstablishAndReturnTrue(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        now: Long,
+        ensureBridge: () -> Unit,
+        updateFlow: (TFlow) -> TFlow,
+        afterStep: (() -> Unit)? = null
+    ): Boolean {
+        return runSyntheticHandshakeStep {
+            ensureBridge()
+            handleSyntheticAckEstablish(
+                flowCache = flowCache,
+                flowKey = flowKey,
+                now = now,
+                updateFlow = updateFlow
+            )
+            afterStep?.invoke()
+        }
+    }
+
+    private fun <TFlow, TSession> handleSyntheticClientFinAndReturnTrue(
+        flowCache: LinkedHashMap<String, TFlow>,
+        sessionCache: LinkedHashMap<String, TSession>,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        clientSequenceNumber: Long,
+        payloadLength: Long,
+        now: Long,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        serverNextSequenceOf: (TFlow) -> Long?,
+        updateFlow: (TFlow, BridgeLifecycleSupport.ClientFinTransition) -> TFlow,
+        closeSession: (TSession) -> Unit,
+        afterStep: (() -> Unit)? = null
+    ): Boolean {
+        handleSyntheticClientFin(
+            flowCache = flowCache,
+            sessionCache = sessionCache,
+            flowKey = flowKey,
+            request = request,
+            clientSequenceNumber = clientSequenceNumber,
+            payloadLength = payloadLength,
+            now = now,
+            serverInitialSequenceOf = serverInitialSequenceOf,
+            serverNextSequenceOf = serverNextSequenceOf,
+            updateFlow = updateFlow,
+            closeSession = closeSession
+        )
+        afterStep?.invoke()
+        return true
+    }
+
+    private fun <TFlow> handleSyntheticClientPayloadResult(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        current: TFlow,
+        request: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        clientInitialSequenceOf: (TFlow) -> Long?,
+        clientNextSequenceOf: (TFlow) -> Long?,
+        bufferedSegmentsOf: (TFlow) -> List<ClientPayloadSegment>,
+        lastClientPayloadSequenceOf: (TFlow) -> Long?,
+        lastClientPayloadLengthOf: (TFlow) -> Long?,
+        isBridgeConnected: () -> Boolean,
+        forwardPayload: (ByteArray) -> Unit,
+        onBufferOverflow: () -> Unit,
+        onReplayOverflow: () -> Unit,
+        updateOutOfOrderFlow: (TFlow, List<ClientPayloadSegment>) -> TFlow,
+        updateFlushFlow: (TFlow, ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>, Boolean, ClientPayloadSegment?) -> TFlow,
+        onResult: ((SyntheticClientPayloadResult) -> Boolean)? = null
+    ): Boolean {
+        return handleSyntheticResult(onResult) {
+            handleSyntheticClientPayload(
+                flowCache = flowCache,
+                flowKey = flowKey,
+                current = current,
+                request = request,
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                payloadLength = payloadLength,
+                now = now,
+                serverInitialSequenceOf = serverInitialSequenceOf,
+                clientInitialSequenceOf = clientInitialSequenceOf,
+                clientNextSequenceOf = clientNextSequenceOf,
+                bufferedSegmentsOf = bufferedSegmentsOf,
+                lastClientPayloadSequenceOf = lastClientPayloadSequenceOf,
+                lastClientPayloadLengthOf = lastClientPayloadLengthOf,
+                isBridgeConnected = isBridgeConnected,
+                forwardPayload = forwardPayload,
+                onBufferOverflow = onBufferOverflow,
+                onReplayOverflow = onReplayOverflow,
+                updateOutOfOrderFlow = updateOutOfOrderFlow,
+                updateFlushFlow = updateFlushFlow
+            )
+        }
+    }
+
+    private fun <TFlow> handleSyntheticServerAckResult(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        current: TFlow,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long,
+        pendingSegmentsOf: (TFlow) -> List<PendingServerSegment>,
+        serverNextSequenceOf: (TFlow) -> Long?,
+        stateOf: (TFlow) -> String,
+        resendPendingSegments: (List<PendingServerSegment>) -> Unit,
+        updateRetransmitFlow: (TFlow, List<PendingServerSegment>) -> TFlow,
+        updateAckedFlow: (TFlow, ServerAckStateSupport.AckStateTransition) -> TFlow,
+        onResult: ((SyntheticServerAckResult) -> Boolean)? = null
+    ): Boolean {
+        return handleSyntheticResult(onResult) {
+            handleSyntheticServerAck(
+                flowCache = flowCache,
+                flowKey = flowKey,
+                current = current,
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                now = now,
+                pendingSegmentsOf = pendingSegmentsOf,
+                serverNextSequenceOf = serverNextSequenceOf,
+                stateOf = stateOf,
+                resendPendingSegments = resendPendingSegments,
+                updateRetransmitFlow = updateRetransmitFlow,
+                updateAckedFlow = updateAckedFlow
+            )
+        }
+    }
+
+    private fun <TResult> handleSyntheticResult(
+        onResult: ((TResult) -> Boolean)?,
+        computeResult: () -> TResult
+    ): Boolean {
+        val result = computeResult()
+        return onResult?.invoke(result) ?: true
+    }
+
+    private fun logHttpsPayloadHandshakeResult(
+        flowKey: String,
+        current: HttpsProxyFlow,
+        sequenceNumber: Long,
+        payloadLength: Long,
+        payloadResult: SyntheticClientPayloadResult
+    ): Boolean {
+        val updatedBufferedSegments = payloadResult.outOfOrderBufferedSegments
+        if (updatedBufferedSegments != null) {
+            return logHandshakeDecisionAndReturnTrue(
+                key = "https-proxy-handshake:$flowKey:out-of-order",
+                message = "Buffered out-of-order HTTPS proxy payload domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} seq=$sequenceNumber expected=${payloadResult.expectedClientSequence} bufferedSegments=${updatedBufferedSegments.size} bufferedBytes=${bufferedClientPayloadBytes(updatedBufferedSegments)}",
+                minIntervalMillis = 3_000L
+            )
+        }
+        val flushResult = payloadResult.flushResult ?: return true
+        return logHandshakeDecisionAndReturnTrue(
+            key = "https-proxy-handshake:$flowKey:payload-ack",
+            message = if (payloadResult.isRetransmission) {
+                "Acknowledged retransmitted HTTPS proxy payload domain=${current.domain} source=${current.source} size=$payloadLength bridge=${current.bridgeHost}:${current.bridgePort} nextClientSeq=${flushResult.nextExpectedSequence} bufferedSegments=${flushResult.remainingSegments.size} bufferedBytes=${bufferedClientPayloadBytes(flushResult.remainingSegments)}"
+            } else {
+                "Acknowledged HTTPS proxy payload domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} size=$payloadLength bridge=${current.bridgeHost}:${current.bridgePort} nextClientSeq=${flushResult.nextExpectedSequence} bufferedSegments=${flushResult.remainingSegments.size} bufferedBytes=${bufferedClientPayloadBytes(flushResult.remainingSegments)}"
+            },
+            minIntervalMillis = 5_000L
+        )
+    }
+
+    private fun logHttpsServerAckHandshakeResult(
+        flowKey: String,
+        current: HttpsProxyFlow,
+        acknowledgementNumber: Long,
+        ackResult: SyntheticServerAckResult
+    ): Boolean {
+        val retransmittedSegments = ackResult.retransmittedSegments
+        if (retransmittedSegments != null) {
+            return logHandshakeDecisionAndReturnTrue(
+                key = "https-proxy-handshake:$flowKey:server-retransmit",
+                message = "Retransmitted synthetic HTTPS server payload window domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} ack=$acknowledgementNumber expected=${current.serverNextSequence} pendingSegments=${retransmittedSegments.size} pendingBytes=${pendingServerPayloadBytes(retransmittedSegments)}",
+                minIntervalMillis = 3_000L
+            )
+        }
+        return logHandshakeDecisionAndReturnTrue(
+            key = "https-proxy-handshake:$flowKey:server-acked",
+            message = "Acknowledged synthetic HTTPS server payload domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} bridge=${current.bridgeHost}:${current.bridgePort} ack=$acknowledgementNumber pendingSegments=0 pendingBytes=0",
+            minIntervalMillis = 5_000L
+        )
+    }
+
+    private fun logHttpsSynAckHandshakeResult(
+        flowKey: String,
+        current: HttpsProxyFlow
+    ): Boolean {
+        return logHandshakeDecisionAndReturnTrue(
+            key = "https-proxy-handshake:$flowKey:synack",
+            message = "Sent synthetic SYN-ACK for HTTPS proxy flow domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} bridge=${current.bridgeHost}:${current.bridgePort}",
+            minIntervalMillis = 5_000L
+        )
+    }
+
+    private fun logHttpsEstablishedHandshakeResult(
+        flowKey: String,
+        current: HttpsProxyFlow
+    ): Boolean {
+        return logHandshakeDecisionAndReturnTrue(
+            key = "https-proxy-handshake:$flowKey:established",
+            message = "Established synthetic HTTPS proxy flow domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} bridge=${current.bridgeHost}:${current.bridgePort}",
+            minIntervalMillis = 5_000L
+        )
+    }
+
+    private fun logHttpsFinAckHandshakeResult(
+        flowKey: String,
+        current: HttpsProxyFlow
+    ): Boolean {
+        return logHandshakeDecisionAndReturnTrue(
+            key = "https-proxy-handshake:$flowKey:finack",
+            message = "Sent synthetic FIN-ACK for HTTPS proxy flow domain=${current.domain} app=${current.appName.ifBlank { "unknown" }} source=${current.source} bridge=${current.bridgeHost}:${current.bridgePort}",
+            minIntervalMillis = 5_000L
+        )
+    }
+
+    private fun closeLocalProxyFlowForHandshake(
+        flowKey: String,
+        current: LocalProxyTcpFlow,
+        action: SyntheticFlowCloseAction
+    ): Boolean {
+        return closeSyntheticFlowForHandshake(
+            flowKey = flowKey,
+            current = current,
+            action = action,
+            buildMessage = ::buildLocalProxyFlowCloseMessage,
+            closeFlow = ::closeLocalProxyTcpFlow
+        )
+    }
+
+    private fun closeHttpsFlowForHandshake(
+        flowKey: String,
+        current: HttpsProxyFlow,
+        action: SyntheticFlowCloseAction
+    ): Boolean {
+        return closeSyntheticFlowForHandshake(
+            flowKey = flowKey,
+            current = current,
+            action = action,
+            buildMessage = ::buildHttpsFlowCloseMessage,
+            closeFlow = ::closeHttpsProxyFlow
+        )
+    }
+
+    private fun closeSyntheticFlowForHandshake(
+        flowKey: String,
+        message: String,
+        closeFlow: (String, String) -> Unit
+    ): Boolean {
+        return closeSyntheticFlowAndReturnTrue(
+            flowKey = flowKey,
+            message = message,
+            closeFlow = closeFlow
+        )
+    }
+
+    private fun buildSyntheticFlowCloseMessage(
+        action: SyntheticFlowCloseAction,
+        bridgeFinMessage: String,
+        closedMessage: String,
+        resetMessage: String
+    ): String {
+        return when (action) {
+            SyntheticFlowCloseAction.BRIDGE_FIN -> bridgeFinMessage
+            SyntheticFlowCloseAction.CLOSED -> closedMessage
+            SyntheticFlowCloseAction.RESET -> resetMessage
+        }
+    }
+
+    private fun <TFlow> closeSyntheticFlowForHandshake(
+        flowKey: String,
+        current: TFlow,
+        action: SyntheticFlowCloseAction,
+        buildMessage: (TFlow, SyntheticFlowCloseAction) -> String,
+        closeFlow: (String, String) -> Unit
+    ): Boolean {
+        return closeSyntheticFlowForHandshake(
+            flowKey = flowKey,
+            message = buildMessage(current, action),
+            closeFlow = closeFlow
+        )
+    }
+
+    private fun buildLocalProxyFlowCloseMessage(
+        current: LocalProxyTcpFlow,
+        action: SyntheticFlowCloseAction
+    ): String {
+        return buildSyntheticFlowCloseMessage(
+            action = action,
+            bridgeFinMessage = "Closed bridge-finished ${buildLocalProxyFlowLabel("${current.targetIp}:${current.targetPort}")}",
+            closedMessage = "Closed synthetic ${buildLocalProxyFlowLabel("${current.targetIp}:${current.targetPort}")}",
+            resetMessage = "Reset synthetic ${buildLocalProxyFlowLabel("${current.targetIp}:${current.targetPort}")}"
+        )
+    }
+
+    private fun buildHttpsFlowCloseMessage(
+        current: HttpsProxyFlow,
+        action: SyntheticFlowCloseAction
+    ): String {
+        return buildSyntheticFlowCloseMessage(
+            action = action,
+            bridgeFinMessage = "Closed bridge-finished ${buildHttpsFlowLabel(current.domain)}",
+            closedMessage = "Closed synthetic ${buildHttpsFlowLabel(current.domain)}",
+            resetMessage = "Reset synthetic ${buildHttpsFlowLabel(current.domain)}"
+        )
+    }
+
+    private fun buildLocalProxyOverflowReset(
+        flowKey: String,
+        info: com.HanFeng.model.PacketInfo,
+        current: LocalProxyTcpFlow,
+        stage: String
+    ): () -> Unit {
+        return buildOverflowResetAction {
+            emitLocalProxyTargetReset(
+                flowKey = flowKey,
+                request = info,
+                stage = stage,
+                target = "${current.targetIp}:${current.targetPort}"
+            )
+        }
+    }
+
+    private fun buildHttpsOverflowReset(
+        flowKey: String,
+        info: com.HanFeng.model.PacketInfo,
+        current: HttpsProxyFlow,
+        stage: String
+    ): () -> Unit {
+        return buildOverflowResetAction {
+            emitHttpsBridgeReset(
+                flowKey,
+                info,
+                buildHttpsProxyResetMessage(stage = stage, domain = current.domain)
+            )
+        }
+    }
+
+    private fun buildOverflowResetAction(reset: () -> Unit): () -> Unit = reset
+
+    private fun buildCloseFlowAction(closeFlow: () -> Boolean): () -> Boolean = closeFlow
+
+    private fun buildSyntheticCloseActions(
+        onBridgeFinSentAck: () -> Boolean,
+        onFinAckSentBridgeAck: () -> Boolean,
+        onClientRst: () -> Boolean
+    ): SyntheticHandshakeCloseActions {
+        return SyntheticHandshakeCloseActions(
+            onBridgeFinSentAck = onBridgeFinSentAck,
+            onFinAckSentBridgeAck = onFinAckSentBridgeAck,
+            onClientRst = onClientRst
+        )
+    }
+
+    private fun <TFlow> buildSyntheticCloseActions(
+        flowKey: String,
+        current: TFlow,
+        closeFlowAction: (String, TFlow, SyntheticFlowCloseAction) -> () -> Boolean
+    ): SyntheticHandshakeCloseActions {
+        return buildSyntheticCloseActions(
+            onBridgeFinSentAck = closeFlowAction(flowKey, current, SyntheticFlowCloseAction.BRIDGE_FIN),
+            onFinAckSentBridgeAck = closeFlowAction(flowKey, current, SyntheticFlowCloseAction.CLOSED),
+            onClientRst = closeFlowAction(flowKey, current, SyntheticFlowCloseAction.RESET)
+        )
+    }
+
+    private fun closeLocalProxyFlowAction(
+        flowKey: String,
+        current: LocalProxyTcpFlow,
+        action: SyntheticFlowCloseAction
+    ): () -> Boolean = buildCloseFlowAction {
+        closeLocalProxyFlowForHandshake(flowKey, current, action)
+    }
+
+    private fun closeHttpsFlowAction(
+        flowKey: String,
+        current: HttpsProxyFlow,
+        action: SyntheticFlowCloseAction
+    ): () -> Boolean = buildCloseFlowAction {
+        closeHttpsFlowForHandshake(flowKey, current, action)
+    }
+
+    private fun buildLocalProxyCloseActions(
+        flowKey: String,
+        current: LocalProxyTcpFlow
+    ): SyntheticHandshakeCloseActions {
+        return buildSyntheticCloseActions(flowKey = flowKey, current = current, closeFlowAction = ::closeLocalProxyFlowAction)
+    }
+
+    private fun buildHttpsCloseActions(
+        flowKey: String,
+        current: HttpsProxyFlow
+    ): SyntheticHandshakeCloseActions {
+        return buildSyntheticCloseActions(flowKey = flowKey, current = current, closeFlowAction = ::closeHttpsFlowAction)
+    }
+
+    private fun buildHttpsHandshakeCallbacks(
+        flowKey: String,
+        current: HttpsProxyFlow,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long
+    ): SyntheticHandshakeCallbacks {
+        return SyntheticHandshakeCallbacks(
+            afterSynOpen = {
+                logHttpsSynAckHandshakeResult(flowKey, current)
+            },
+            afterAckEstablish = {
+                logHttpsEstablishedHandshakeResult(flowKey, current)
+            },
+            onPayloadResult = { payloadResult ->
+                logHttpsPayloadHandshakeResult(
+                    flowKey = flowKey,
+                    current = current,
+                    sequenceNumber = sequenceNumber,
+                    payloadLength = payloadLength,
+                    payloadResult = payloadResult
+                )
+            },
+            onServerAckResult = { ackResult ->
+                logHttpsServerAckHandshakeResult(
+                    flowKey = flowKey,
+                    current = current,
+                    acknowledgementNumber = acknowledgementNumber,
+                    ackResult = ackResult
+                )
+            },
+            afterClientFin = {
+                logHttpsFinAckHandshakeResult(flowKey, current)
+            }
+        )
+    }
+
+    private fun buildLocalProxyHandshakeConfig(
+        flowKey: String,
+        current: LocalProxyTcpFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long
+    ): SyntheticHandshakeAssemblyConfig<LocalProxyTcpFlow, LocalProxyBridgeSocketSession> {
+        return buildLocalProxyHandshakeAssemblyConfig(
+            flowKey = flowKey,
+            current = current,
+            info = info,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            now = now
+        )
+    }
+
+    private fun buildHttpsHandshakeConfig(
+        flowKey: String,
+        current: HttpsProxyFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long
+    ): SyntheticHandshakeAssemblyConfig<HttpsProxyFlow, HttpsBridgeSocketSession> {
+        return buildHttpsHandshakeAssemblyConfig(
+            flowKey = flowKey,
+            current = current,
+            info = info,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            payloadLength = payloadLength,
+            now = now
+        )
+    }
+
+    private fun buildLocalProxyHandshakeAssemblyConfig(
+        flowKey: String,
+        current: LocalProxyTcpFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long
+    ): SyntheticHandshakeAssemblyConfig<LocalProxyTcpFlow, LocalProxyBridgeSocketSession> {
+        return SyntheticHandshakeAssemblyConfig(
+            flowCache = localProxyTcpFlowCache,
+            sessionCache = localProxyBridgeSocketCache,
+            selectors = buildSyntheticFlowSelectors(
+                sequence = localProxySequenceSelectors(),
+                bufferedSegmentsOf = { it.bufferedClientSegments },
+                lastClientPayloadSequenceOf = { it.lastClientPayloadSequence },
+                lastClientPayloadLengthOf = { it.lastClientPayloadLength },
+                pendingSegmentsOf = { it.pendingServerSegments },
+                stateOf = { it.state }
+            ),
+            ensureBridge = {
+                ensureLocalProxyBridgeSocket(flowKey, current, info)
+            },
+            isBridgeConnected = { isLocalProxyBridgeConnected(flowKey) },
+            forwardPayload = { payload -> forwardPayloadToLocalProxyBridge(flowKey, payload) },
+            onBufferOverflow = buildLocalProxyOverflowReset(flowKey, info, current, "Buffered client window overflow"),
+            onReplayOverflow = buildLocalProxyOverflowReset(flowKey, info, current, "Buffered client replay overflow"),
+            updateSynAckFlow = buildSynAckStateUpdater(sequenceNumber, acknowledgementNumber, ::applyLocalProxySynAckState),
+            updateAckEstablishedFlow = buildAckEstablishedStateUpdater(sequenceNumber, acknowledgementNumber, now, ::applyLocalProxyAckEstablishedState),
+            updateOutOfOrderFlow = { flowState, updatedBufferedSegments ->
+                applyBufferedClientSegmentsState(flowState, updatedBufferedSegments, now)
+            },
+            updateFlushFlow = buildClientPayloadFlushUpdater(
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                now = now,
+                updateFlow = ::applyLocalProxyClientPayloadState
+            ),
+            resendPendingSegments = { segments ->
+                resendPendingLocalProxyBridgePayload(info, current, segments)
+            },
+            updateRetransmitFlow = { flowState, remainingSegments ->
+                applyRetransmittedServerSegmentsState(flowState, remainingSegments, now)
+            },
+            updateAckedFlow = { flowState, nextAckState ->
+                applySyntheticAckedServerState(flowState, nextAckState)
+            },
+            updateClientFinFlow = { flowState, transition ->
+                applySyntheticClientFinState(flowState, transition, sequenceNumber, acknowledgementNumber)
+            },
+            closeActions = buildLocalProxyCloseActions(flowKey, current)
+        )
+    }
+
+    private fun buildHttpsHandshakeAssemblyConfig(
+        flowKey: String,
+        current: HttpsProxyFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long
+    ): SyntheticHandshakeAssemblyConfig<HttpsProxyFlow, HttpsBridgeSocketSession> {
+        return SyntheticHandshakeAssemblyConfig(
+            flowCache = httpsProxyFlowCache,
+            sessionCache = httpsBridgeSocketCache,
+            selectors = buildSyntheticFlowSelectors(
+                sequence = httpsSequenceSelectors(),
+                bufferedSegmentsOf = { it.bufferedClientSegments },
+                lastClientPayloadSequenceOf = { it.lastClientPayloadSequence },
+                lastClientPayloadLengthOf = { it.lastClientPayloadLength },
+                pendingSegmentsOf = { it.pendingServerSegments },
+                stateOf = { it.state }
+            ),
+            ensureBridge = {
+                ensureHttpsBridgeSocket(flowKey, current, info)
+            },
+            isBridgeConnected = { true },
+            forwardPayload = { payload -> forwardPayloadToHttpsBridge(flowKey, payload) },
+            onBufferOverflow = buildHttpsOverflowReset(flowKey, info, current, "Buffered client window overflow"),
+            onReplayOverflow = buildHttpsOverflowReset(flowKey, info, current, "Buffered client replay overflow"),
+            updateSynAckFlow = buildSynAckStateUpdater(sequenceNumber, acknowledgementNumber, ::applyHttpsSynAckState),
+            updateAckEstablishedFlow = buildAckEstablishedStateUpdater(sequenceNumber, acknowledgementNumber, now, ::applyHttpsAckEstablishedState),
+            updateOutOfOrderFlow = { flowState, updatedBufferedSegments ->
+                applyBufferedClientSegmentsState(flowState, updatedBufferedSegments, now)
+            },
+            updateFlushFlow = buildClientPayloadFlushUpdater(
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                now = now,
+                updateFlow = ::applyHttpsClientPayloadState
+            ),
+            resendPendingSegments = { segments ->
+                resendPendingHttpsBridgePayload(info, current, segments)
+            },
+            updateRetransmitFlow = { flowState, remainingSegments ->
+                applyRetransmittedServerSegmentsState(flowState, remainingSegments, now)
+            },
+            updateAckedFlow = { flowState, nextAckState ->
+                applySyntheticAckedServerState(flowState, nextAckState)
+            },
+            updateClientFinFlow = { flowState, transition ->
+                applySyntheticClientFinState(flowState, transition, sequenceNumber, acknowledgementNumber)
+            },
+            closeActions = buildHttpsCloseActions(flowKey, current),
+            callbacks = buildHttpsHandshakeCallbacks(
+                flowKey = flowKey,
+                current = current,
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                payloadLength = payloadLength
+            )
+        )
+    }
+
+    private fun <TFlow> buildBufferedClientSegmentsUpdater(
+        now: Long,
+        updateFlow: (TFlow, List<ClientPayloadSegment>, Long) -> TFlow
+    ): (TFlow, List<ClientPayloadSegment>) -> TFlow {
+        return { flowState, updatedBufferedSegments ->
+            updateFlow(flowState, updatedBufferedSegments, now)
+        }
+    }
+
+    private fun <TFlow> buildRetransmittedServerSegmentsUpdater(
+        now: Long,
+        updateFlow: (TFlow, List<PendingServerSegment>, Long) -> TFlow
+    ): (TFlow, List<PendingServerSegment>) -> TFlow {
+        return { flowState, remainingSegments ->
+            updateFlow(flowState, remainingSegments, now)
+        }
+    }
+
+    private fun <TFlow> buildAckedServerStateUpdater(
+        updateFlow: (TFlow, ServerAckStateSupport.AckStateTransition) -> TFlow
+    ): (TFlow, ServerAckStateSupport.AckStateTransition) -> TFlow {
+        return { flowState, nextAckState ->
+            updateFlow(flowState, nextAckState)
+        }
+    }
+
+    private fun <TFlow> buildClientFinStateUpdater(
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        updateFlow: (TFlow, BridgeLifecycleSupport.ClientFinTransition, Long, Long) -> TFlow
+    ): (TFlow, BridgeLifecycleSupport.ClientFinTransition) -> TFlow {
+        return { flowState, transition ->
+            updateFlow(flowState, transition, sequenceNumber, acknowledgementNumber)
+        }
+    }
+
+    private fun <TFlow> buildClientPayloadFlushUpdater(
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long,
+        updateFlow: (TFlow, ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>, Boolean, ClientPayloadSegment?, Long, Long, Long) -> TFlow
+    ): (TFlow, ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>, Boolean, ClientPayloadSegment?) -> TFlow {
+        return { flowState, flushResult, bridgeConnected, lastForwardedSegment ->
+            updateFlow(flowState, flushResult, bridgeConnected, lastForwardedSegment, sequenceNumber, acknowledgementNumber, now)
+        }
+    }
+
+    private fun <TFlow> buildSynAckStateUpdater(
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        updateFlow: (TFlow, Long, Long, Long, Long) -> TFlow
+    ): (TFlow, Long, Long) -> TFlow {
+        return { flowState, serverSequenceNumber, lastSeenAt ->
+            updateFlow(
+                flowState,
+                sequenceNumber,
+                acknowledgementNumber,
+                serverSequenceNumber,
+                lastSeenAt
+            )
+        }
+    }
+
+    private fun <TFlow> buildAckEstablishedStateUpdater(
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long,
+        updateFlow: (TFlow, Long, Long, Long) -> TFlow
+    ): (TFlow) -> TFlow {
+        return { flowState ->
+            updateFlow(flowState, sequenceNumber, acknowledgementNumber, now)
+        }
+    }
+
+    private fun buildSyntheticAction(action: () -> Boolean): () -> Boolean = action
+
+    private fun <TFlow> buildSynOpenAction(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        updateFlow: (TFlow, Long, Long) -> TFlow,
+        afterStep: (() -> Unit)? = null
+    ): () -> Boolean = buildSyntheticAction {
+        handleSyntheticSynOpenAndReturnTrue(
+            flowCache = flowCache,
+            flowKey = flowKey,
+            request = request,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            now = now,
+            serverInitialSequenceOf = serverInitialSequenceOf,
+            updateFlow = updateFlow,
+            afterStep = afterStep
+        )
+    }
+
+    private fun <TFlow> buildAckEstablishAction(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        now: Long,
+        ensureBridge: () -> Unit,
+        updateFlow: (TFlow) -> TFlow,
+        afterStep: (() -> Unit)? = null
+    ): () -> Boolean = buildSyntheticAction {
+        handleSyntheticAckEstablishAndReturnTrue(
+            flowCache = flowCache,
+            flowKey = flowKey,
+            now = now,
+            ensureBridge = ensureBridge,
+            updateFlow = updateFlow,
+            afterStep = afterStep
+        )
+    }
+
+    private fun <TFlow, TSession : ClosableBridgeSession> buildClientFinAction(
+        flowCache: LinkedHashMap<String, TFlow>,
+        sessionCache: LinkedHashMap<String, TSession>,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        clientSequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        serverNextSequenceOf: (TFlow) -> Long?,
+        updateFlow: (TFlow, BridgeLifecycleSupport.ClientFinTransition) -> TFlow,
+        afterStep: (() -> Unit)? = null
+    ): () -> Boolean = buildSyntheticAction {
+        handleSyntheticClientFinAndReturnTrue(
+            flowCache = flowCache,
+            sessionCache = sessionCache,
+            flowKey = flowKey,
+            request = request,
+            clientSequenceNumber = clientSequenceNumber,
+            payloadLength = payloadLength,
+            now = now,
+            serverInitialSequenceOf = serverInitialSequenceOf,
+            serverNextSequenceOf = serverNextSequenceOf,
+            updateFlow = updateFlow,
+            closeSession = { it.close() },
+            afterStep = afterStep
+        )
+    }
+
+    private fun <TFlow> buildClientPayloadAction(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        current: TFlow,
+        request: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        clientInitialSequenceOf: (TFlow) -> Long?,
+        clientNextSequenceOf: (TFlow) -> Long?,
+        bufferedSegmentsOf: (TFlow) -> List<ClientPayloadSegment>,
+        lastClientPayloadSequenceOf: (TFlow) -> Long?,
+        lastClientPayloadLengthOf: (TFlow) -> Long?,
+        isBridgeConnected: () -> Boolean,
+        forwardPayload: (ByteArray) -> Unit,
+        onBufferOverflow: () -> Unit,
+        onReplayOverflow: () -> Unit,
+        updateOutOfOrderFlow: (TFlow, List<ClientPayloadSegment>) -> TFlow,
+        updateFlushFlow: (TFlow, ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>, Boolean, ClientPayloadSegment?) -> TFlow,
+        onResult: ((SyntheticClientPayloadResult) -> Boolean)? = null
+    ): () -> Boolean = buildSyntheticAction {
+        handleSyntheticClientPayloadResult(
+            flowCache = flowCache,
+            flowKey = flowKey,
+            current = current,
+            request = request,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            payloadLength = payloadLength,
+            now = now,
+            serverInitialSequenceOf = serverInitialSequenceOf,
+            clientInitialSequenceOf = clientInitialSequenceOf,
+            clientNextSequenceOf = clientNextSequenceOf,
+            bufferedSegmentsOf = bufferedSegmentsOf,
+            lastClientPayloadSequenceOf = lastClientPayloadSequenceOf,
+            lastClientPayloadLengthOf = lastClientPayloadLengthOf,
+            isBridgeConnected = isBridgeConnected,
+            forwardPayload = forwardPayload,
+            onBufferOverflow = onBufferOverflow,
+            onReplayOverflow = onReplayOverflow,
+            updateOutOfOrderFlow = updateOutOfOrderFlow,
+            updateFlushFlow = updateFlushFlow,
+            onResult = onResult
+        )
+    }
+
+    private fun <TFlow> buildServerAckAction(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        current: TFlow,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long,
+        pendingSegmentsOf: (TFlow) -> List<PendingServerSegment>,
+        serverNextSequenceOf: (TFlow) -> Long?,
+        stateOf: (TFlow) -> String,
+        resendPendingSegments: (List<PendingServerSegment>) -> Unit,
+        updateRetransmitFlow: (TFlow, List<PendingServerSegment>) -> TFlow,
+        updateAckedFlow: (TFlow, ServerAckStateSupport.AckStateTransition) -> TFlow,
+        onResult: ((SyntheticServerAckResult) -> Boolean)? = null
+    ): () -> Boolean = buildSyntheticAction {
+        handleSyntheticServerAckResult(
+            flowCache = flowCache,
+            flowKey = flowKey,
+            current = current,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            now = now,
+            pendingSegmentsOf = pendingSegmentsOf,
+            serverNextSequenceOf = serverNextSequenceOf,
+            stateOf = stateOf,
+            resendPendingSegments = resendPendingSegments,
+            updateRetransmitFlow = updateRetransmitFlow,
+            updateAckedFlow = updateAckedFlow,
+            onResult = onResult
+        )
+    }
+
+    private fun isLocalProxyBridgeConnected(flowKey: String): Boolean {
+        return synchronized(localProxyBridgeSocketCache) {
+            localProxyBridgeSocketCache.containsKey(flowKey)
+        }
+    }
+
+    private data class SyntheticHandshakeCloseActions(
+        val onBridgeFinSentAck: () -> Boolean,
+        val onFinAckSentBridgeAck: () -> Boolean,
+        val onClientRst: () -> Boolean
+    )
+
+    private data class SyntheticHandshakeCallbacks(
+        val afterSynOpen: (() -> Unit)? = null,
+        val afterAckEstablish: (() -> Unit)? = null,
+        val onPayloadResult: ((SyntheticClientPayloadResult) -> Boolean)? = null,
+        val onServerAckResult: ((SyntheticServerAckResult) -> Boolean)? = null,
+        val afterClientFin: (() -> Unit)? = null
+    )
+
+    private data class FlowSequenceSelectors<TFlow>(
+        val serverInitialSequenceOf: (TFlow) -> Long?,
+        val serverNextSequenceOf: (TFlow) -> Long?,
+        val clientInitialSequenceOf: (TFlow) -> Long?,
+        val clientNextSequenceOf: (TFlow) -> Long?
+    )
+
+    private data class SyntheticFlowSelectors<TFlow>(
+        val sequence: FlowSequenceSelectors<TFlow>,
+        val bufferedSegmentsOf: (TFlow) -> List<ClientPayloadSegment>,
+        val lastClientPayloadSequenceOf: (TFlow) -> Long?,
+        val lastClientPayloadLengthOf: (TFlow) -> Long?,
+        val pendingSegmentsOf: (TFlow) -> List<PendingServerSegment>,
+        val stateOf: (TFlow) -> String
+    )
+
+    private data class BridgeFlowSelectors<TFlow>(
+        val sequence: FlowSequenceSelectors<TFlow>,
+        val pendingSegmentsOf: (TFlow) -> List<PendingServerSegment>? = { emptyList() },
+        val stateOf: ((TFlow) -> String)? = null
+    )
+
+    private fun localProxySequenceSelectors(): FlowSequenceSelectors<LocalProxyTcpFlow> {
+        return FlowSequenceSelectors(
+            serverInitialSequenceOf = { it.serverInitialSequence },
+            serverNextSequenceOf = { it.serverNextSequence },
+            clientInitialSequenceOf = { it.clientInitialSequence },
+            clientNextSequenceOf = { it.clientNextSequence }
+        )
+    }
+
+    private fun httpsSequenceSelectors(): FlowSequenceSelectors<HttpsProxyFlow> {
+        return FlowSequenceSelectors(
+            serverInitialSequenceOf = { it.serverInitialSequence },
+            serverNextSequenceOf = { it.serverNextSequence },
+            clientInitialSequenceOf = { it.clientInitialSequence },
+            clientNextSequenceOf = { it.clientNextSequence }
+        )
+    }
+
+    private fun <TFlow> buildSyntheticFlowSelectors(
+        sequence: FlowSequenceSelectors<TFlow>,
+        bufferedSegmentsOf: (TFlow) -> List<ClientPayloadSegment>,
+        lastClientPayloadSequenceOf: (TFlow) -> Long?,
+        lastClientPayloadLengthOf: (TFlow) -> Long?,
+        pendingSegmentsOf: (TFlow) -> List<PendingServerSegment>,
+        stateOf: (TFlow) -> String
+    ): SyntheticFlowSelectors<TFlow> {
+        return SyntheticFlowSelectors(
+            sequence = sequence,
+            bufferedSegmentsOf = bufferedSegmentsOf,
+            lastClientPayloadSequenceOf = lastClientPayloadSequenceOf,
+            lastClientPayloadLengthOf = lastClientPayloadLengthOf,
+            pendingSegmentsOf = pendingSegmentsOf,
+            stateOf = stateOf
+        )
+    }
+
+    private data class SyntheticHandshakeAssembly<TFlow, TSession : ClosableBridgeSession>(
+        val flowCache: LinkedHashMap<String, TFlow>,
+        val sessionCache: LinkedHashMap<String, TSession>,
+        val flowKey: String,
+        val current: TFlow,
+        val request: com.HanFeng.model.PacketInfo,
+        val sequenceNumber: Long,
+        val acknowledgementNumber: Long,
+        val payloadLength: Long,
+        val now: Long,
+        val ensureBridge: () -> Unit,
+        val isBridgeConnected: () -> Boolean,
+        val forwardPayload: (ByteArray) -> Unit,
+        val onBufferOverflow: () -> Unit,
+        val onReplayOverflow: () -> Unit,
+        val selectors: SyntheticFlowSelectors<TFlow>,
+        val updateSynAckFlow: (TFlow, Long, Long) -> TFlow,
+        val updateAckEstablishedFlow: (TFlow) -> TFlow,
+        val updateOutOfOrderFlow: (TFlow, List<ClientPayloadSegment>) -> TFlow,
+        val updateFlushFlow: (TFlow, ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>, Boolean, ClientPayloadSegment?) -> TFlow,
+        val resendPendingSegments: (List<PendingServerSegment>) -> Unit,
+        val updateRetransmitFlow: (TFlow, List<PendingServerSegment>) -> TFlow,
+        val updateAckedFlow: (TFlow, ServerAckStateSupport.AckStateTransition) -> TFlow,
+        val updateClientFinFlow: (TFlow, BridgeLifecycleSupport.ClientFinTransition) -> TFlow,
+        val closeActions: SyntheticHandshakeCloseActions,
+        val callbacks: SyntheticHandshakeCallbacks = SyntheticHandshakeCallbacks()
+    )
+
+    private data class SyntheticHandshakeAssemblyConfig<TFlow, TSession : ClosableBridgeSession>(
+        val flowCache: LinkedHashMap<String, TFlow>,
+        val sessionCache: LinkedHashMap<String, TSession>,
+        val selectors: SyntheticFlowSelectors<TFlow>,
+        val ensureBridge: () -> Unit,
+        val isBridgeConnected: () -> Boolean,
+        val forwardPayload: (ByteArray) -> Unit,
+        val onBufferOverflow: () -> Unit,
+        val onReplayOverflow: () -> Unit,
+        val updateSynAckFlow: (TFlow, Long, Long) -> TFlow,
+        val updateAckEstablishedFlow: (TFlow) -> TFlow,
+        val updateOutOfOrderFlow: (TFlow, List<ClientPayloadSegment>) -> TFlow,
+        val updateFlushFlow: (TFlow, ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>, Boolean, ClientPayloadSegment?) -> TFlow,
+        val resendPendingSegments: (List<PendingServerSegment>) -> Unit,
+        val updateRetransmitFlow: (TFlow, List<PendingServerSegment>) -> TFlow,
+        val updateAckedFlow: (TFlow, ServerAckStateSupport.AckStateTransition) -> TFlow,
+        val updateClientFinFlow: (TFlow, BridgeLifecycleSupport.ClientFinTransition) -> TFlow,
+        val closeActions: SyntheticHandshakeCloseActions,
+        val callbacks: SyntheticHandshakeCallbacks = SyntheticHandshakeCallbacks()
+    )
+
+    private fun <TFlow, TSession : ClosableBridgeSession> buildSyntheticHandshakeAssemblyBase(
+        flowCache: LinkedHashMap<String, TFlow>,
+        sessionCache: LinkedHashMap<String, TSession>,
+        flowKey: String,
+        current: TFlow,
+        request: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long,
+        ensureBridge: () -> Unit,
+        isBridgeConnected: () -> Boolean,
+        forwardPayload: (ByteArray) -> Unit,
+        onBufferOverflow: () -> Unit,
+        onReplayOverflow: () -> Unit,
+        selectors: SyntheticFlowSelectors<TFlow>,
+        updateSynAckFlow: (TFlow, Long, Long) -> TFlow,
+        updateAckEstablishedFlow: (TFlow) -> TFlow,
+        updateOutOfOrderFlow: (TFlow, List<ClientPayloadSegment>) -> TFlow,
+        updateFlushFlow: (TFlow, ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>, Boolean, ClientPayloadSegment?) -> TFlow,
+        resendPendingSegments: (List<PendingServerSegment>) -> Unit,
+        updateRetransmitFlow: (TFlow, List<PendingServerSegment>) -> TFlow,
+        updateAckedFlow: (TFlow, ServerAckStateSupport.AckStateTransition) -> TFlow,
+        updateClientFinFlow: (TFlow, BridgeLifecycleSupport.ClientFinTransition) -> TFlow,
+        closeActions: SyntheticHandshakeCloseActions,
+        callbacks: SyntheticHandshakeCallbacks = SyntheticHandshakeCallbacks()
+    ): SyntheticHandshakeAssembly<TFlow, TSession> {
+        return SyntheticHandshakeAssembly(
+            flowCache = flowCache,
+            sessionCache = sessionCache,
+            flowKey = flowKey,
+            current = current,
+            request = request,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            payloadLength = payloadLength,
+            now = now,
+            ensureBridge = ensureBridge,
+            isBridgeConnected = isBridgeConnected,
+            forwardPayload = forwardPayload,
+            onBufferOverflow = onBufferOverflow,
+            onReplayOverflow = onReplayOverflow,
+            selectors = selectors,
+            updateSynAckFlow = updateSynAckFlow,
+            updateAckEstablishedFlow = updateAckEstablishedFlow,
+            updateOutOfOrderFlow = updateOutOfOrderFlow,
+            updateFlushFlow = updateFlushFlow,
+            resendPendingSegments = resendPendingSegments,
+            updateRetransmitFlow = updateRetransmitFlow,
+            updateAckedFlow = updateAckedFlow,
+            updateClientFinFlow = updateClientFinFlow,
+            closeActions = closeActions,
+            callbacks = callbacks
+        )
+    }
+
+    private fun <TFlow, TSession : ClosableBridgeSession> buildSyntheticHandshakeAssemblyCommon(
+        flowKey: String,
+        current: TFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long,
+        config: SyntheticHandshakeAssemblyConfig<TFlow, TSession>
+    ): SyntheticHandshakeAssembly<TFlow, TSession> {
+        return buildSyntheticHandshakeAssemblyBase(
+            flowCache = config.flowCache,
+            sessionCache = config.sessionCache,
+            flowKey = flowKey,
+            current = current,
+            request = info,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            payloadLength = payloadLength,
+            now = now,
+            ensureBridge = config.ensureBridge,
+            isBridgeConnected = config.isBridgeConnected,
+            forwardPayload = config.forwardPayload,
+            onBufferOverflow = config.onBufferOverflow,
+            onReplayOverflow = config.onReplayOverflow,
+            selectors = config.selectors,
+            updateSynAckFlow = config.updateSynAckFlow,
+            updateAckEstablishedFlow = config.updateAckEstablishedFlow,
+            updateOutOfOrderFlow = config.updateOutOfOrderFlow,
+            updateFlushFlow = config.updateFlushFlow,
+            resendPendingSegments = config.resendPendingSegments,
+            updateRetransmitFlow = config.updateRetransmitFlow,
+            updateAckedFlow = config.updateAckedFlow,
+            updateClientFinFlow = config.updateClientFinFlow,
+            closeActions = config.closeActions,
+            callbacks = config.callbacks
+        )
+    }
+
+    private fun <TFlow, TSession : ClosableBridgeSession> buildSyntheticLifecycleActions(
+        assembly: SyntheticHandshakeAssembly<TFlow, TSession>
+    ): Triple<() -> Boolean, () -> Boolean, () -> Boolean> {
+        return Triple(
+            buildSynOpenAction(
+                flowCache = assembly.flowCache,
+                flowKey = assembly.flowKey,
+                request = assembly.request,
+                sequenceNumber = assembly.sequenceNumber,
+                acknowledgementNumber = assembly.acknowledgementNumber,
+                now = assembly.now,
+                serverInitialSequenceOf = assembly.selectors.sequence.serverInitialSequenceOf,
+                updateFlow = assembly.updateSynAckFlow,
+                afterStep = assembly.callbacks.afterSynOpen
+            ),
+            buildAckEstablishAction(
+                flowCache = assembly.flowCache,
+                flowKey = assembly.flowKey,
+                now = assembly.now,
+                ensureBridge = assembly.ensureBridge,
+                updateFlow = assembly.updateAckEstablishedFlow,
+                afterStep = assembly.callbacks.afterAckEstablish
+            ),
+            buildClientFinAction(
+                flowCache = assembly.flowCache,
+                sessionCache = assembly.sessionCache,
+                flowKey = assembly.flowKey,
+                request = assembly.request,
+                clientSequenceNumber = assembly.sequenceNumber,
+                acknowledgementNumber = assembly.acknowledgementNumber,
+                payloadLength = assembly.payloadLength,
+                now = assembly.now,
+                serverInitialSequenceOf = assembly.selectors.sequence.serverInitialSequenceOf,
+                serverNextSequenceOf = assembly.selectors.sequence.serverNextSequenceOf,
+                updateFlow = assembly.updateClientFinFlow,
+                afterStep = assembly.callbacks.afterClientFin
+            )
+        )
+    }
+
+    private fun <TFlow, TSession : ClosableBridgeSession> buildSyntheticDataActions(
+        assembly: SyntheticHandshakeAssembly<TFlow, TSession>
+    ): Pair<() -> Boolean, () -> Boolean> {
+        return Pair(
+            buildClientPayloadAction(
+                flowCache = assembly.flowCache,
+                flowKey = assembly.flowKey,
+                current = assembly.current,
+                request = assembly.request,
+                sequenceNumber = assembly.sequenceNumber,
+                acknowledgementNumber = assembly.acknowledgementNumber,
+                payloadLength = assembly.payloadLength,
+                now = assembly.now,
+                serverInitialSequenceOf = assembly.selectors.sequence.serverInitialSequenceOf,
+                clientInitialSequenceOf = assembly.selectors.sequence.clientInitialSequenceOf,
+                clientNextSequenceOf = assembly.selectors.sequence.clientNextSequenceOf,
+                bufferedSegmentsOf = assembly.selectors.bufferedSegmentsOf,
+                lastClientPayloadSequenceOf = assembly.selectors.lastClientPayloadSequenceOf,
+                lastClientPayloadLengthOf = assembly.selectors.lastClientPayloadLengthOf,
+                isBridgeConnected = assembly.isBridgeConnected,
+                forwardPayload = assembly.forwardPayload,
+                onBufferOverflow = assembly.onBufferOverflow,
+                onReplayOverflow = assembly.onReplayOverflow,
+                updateOutOfOrderFlow = assembly.updateOutOfOrderFlow,
+                updateFlushFlow = assembly.updateFlushFlow,
+                onResult = assembly.callbacks.onPayloadResult
+            ),
+            buildServerAckAction(
+                flowCache = assembly.flowCache,
+                flowKey = assembly.flowKey,
+                current = assembly.current,
+                sequenceNumber = assembly.sequenceNumber,
+                acknowledgementNumber = assembly.acknowledgementNumber,
+                now = assembly.now,
+                pendingSegmentsOf = assembly.selectors.pendingSegmentsOf,
+                serverNextSequenceOf = assembly.selectors.sequence.serverNextSequenceOf,
+                stateOf = assembly.selectors.stateOf,
+                resendPendingSegments = assembly.resendPendingSegments,
+                updateRetransmitFlow = assembly.updateRetransmitFlow,
+                updateAckedFlow = assembly.updateAckedFlow,
+                onResult = assembly.callbacks.onServerAckResult
+            )
+        )
+    }
+
+    private fun <TFlow, TSession : ClosableBridgeSession> buildSyntheticHandshakeHandlers(
+        assembly: SyntheticHandshakeAssembly<TFlow, TSession>
+    ): SyntheticHandshakeHandlers {
+        val (onSynOpen, onAckEstablish, onClientFin) = buildSyntheticLifecycleActions(assembly)
+        val (onClientPayload, onServerAck) = buildSyntheticDataActions(assembly)
+        return SyntheticHandshakeHandlers(
+            onSynOpen = onSynOpen,
+            onAckEstablish = onAckEstablish,
+            onClientPayload = onClientPayload,
+            onServerAck = onServerAck,
+            onBridgeFinSentAck = assembly.closeActions.onBridgeFinSentAck,
+            onClientFin = onClientFin,
+            onFinAckSentBridgeAck = assembly.closeActions.onFinAckSentBridgeAck,
+            onClientRst = assembly.closeActions.onClientRst
+        )
+    }
+
+    private fun <TFlow, TSession : ClosableBridgeSession> buildSyntheticHandshakeAssembly(
+        flowKey: String,
+        current: TFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long,
+        config: SyntheticHandshakeAssemblyConfig<TFlow, TSession>
+    ): SyntheticHandshakeAssembly<TFlow, TSession> {
+        return buildSyntheticHandshakeAssemblyCommon(
+            flowKey = flowKey,
+            current = current,
+            info = info,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            payloadLength = payloadLength,
+            now = now,
+            config = config
+        )
+    }
+
+    private fun <TFlow, TSession : ClosableBridgeSession> buildSyntheticHandshakeHandlers(
+        flowKey: String,
+        current: TFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long,
+        config: SyntheticHandshakeAssemblyConfig<TFlow, TSession>
+    ): SyntheticHandshakeHandlers {
+        return buildSyntheticHandshakeHandlers(
+            buildSyntheticHandshakeAssembly(
+                flowKey = flowKey,
+                current = current,
+                info = info,
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                payloadLength = payloadLength,
+                now = now,
+                config = config
+            )
+        )
+    }
+
+    private fun buildLocalProxyHandshakeHandlers(
+        flowKey: String,
+        current: LocalProxyTcpFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long
+    ): SyntheticHandshakeHandlers {
+        return buildSyntheticHandshakeHandlers(
+            flowKey = flowKey,
+            current = current,
+            info = info,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            payloadLength = payloadLength,
+            now = now,
+            config = buildLocalProxyHandshakeConfig(
+                flowKey = flowKey,
+                current = current,
+                info = info,
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                now = now
+            )
+        )
+    }
+
+    private fun buildHttpsHandshakeHandlers(
+        flowKey: String,
+        current: HttpsProxyFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long
+    ): SyntheticHandshakeHandlers {
+        return buildSyntheticHandshakeHandlers(
+            flowKey = flowKey,
+            current = current,
+            info = info,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            payloadLength = payloadLength,
+            now = now,
+            config = buildHttpsHandshakeConfig(
+                flowKey = flowKey,
+                current = current,
+                info = info,
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                payloadLength = payloadLength,
+                now = now
+            )
+        )
+    }
+
+    private data class SyntheticHandshakeHandlers(
+        val onSynOpen: () -> Boolean,
+        val onAckEstablish: () -> Boolean,
+        val onClientPayload: () -> Boolean,
+        val onServerAck: () -> Boolean,
+        val onBridgeFinSentAck: () -> Boolean,
+        val onClientFin: () -> Boolean,
+        val onFinAckSentBridgeAck: () -> Boolean,
+        val onClientRst: () -> Boolean
+    )
+
+    private fun dispatchSyntheticHandshakeEvent(
+        event: HttpsHandshakeEngine.Event,
+        currentState: String,
+        handlers: SyntheticHandshakeHandlers
+    ): Boolean {
+        return when (event) {
+            HttpsHandshakeEngine.Event.NONE -> false
+            HttpsHandshakeEngine.Event.SYN_OPEN -> handlers.onSynOpen()
+            HttpsHandshakeEngine.Event.ACK_ESTABLISH -> handlers.onAckEstablish()
+            HttpsHandshakeEngine.Event.CLIENT_PAYLOAD -> handlers.onClientPayload()
+            HttpsHandshakeEngine.Event.SERVER_ACK -> handlers.onServerAck()
+            HttpsHandshakeEngine.Event.BRIDGE_FIN_ACK -> when (currentState) {
+                "bridge_fin_sent" -> handlers.onBridgeFinSentAck()
+                "fin_ack_sent" -> handlers.onFinAckSentBridgeAck()
+                else -> false
+            }
+            HttpsHandshakeEngine.Event.CLIENT_FIN -> handlers.onClientFin()
+            HttpsHandshakeEngine.Event.CLIENT_RST -> handlers.onClientRst()
+        }
+    }
+
+    private fun <TFlow> executeSyntheticHandshake(
+        info: com.HanFeng.model.PacketInfo,
+        destinationPort: Int,
+        current: TFlow?,
+        currentState: String,
+        validateCurrent: () -> Boolean = { true },
+        buildHandlers: (SyntheticPacketState, TFlow) -> SyntheticHandshakeHandlers
+    ): Boolean {
+        val handshakeDecision = decideSyntheticHandshake(info, destinationPort, current != null, bridgePortOf(current), currentState)
+        if (!handshakeDecision.shouldHandle) return false
+        val activeCurrent = current ?: return false
+        if (!validateCurrent()) return false
+        val packetState = buildSyntheticPacketState(info)
+        return dispatchSyntheticHandshakeEvent(
+            event = handshakeDecision.event,
+            currentState = currentState,
+            handlers = buildHandlers(packetState, activeCurrent)
+        )
+    }
+
+    private fun bridgePortOf(flow: Any?): Int? {
+        return when (flow) {
+            is LocalProxyTcpFlow -> flow.bridgePort
+            is HttpsProxyFlow -> flow.bridgePort
+            else -> null
+        }
+    }
+
+    private data class SyntheticClientPayloadResult(
+        val expectedClientSequence: Long,
+        val isRetransmission: Boolean,
+        val outOfOrderBufferedSegments: List<ClientPayloadSegment>?,
+        val flushResult: ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>?
+    )
+
+    private data class SyntheticServerAckResult(
+        val retransmittedSegments: List<PendingServerSegment>?
+    )
+
+    private data class SyntheticClientPayloadContext<TFlow>(
+        val flowCache: LinkedHashMap<String, TFlow>,
+        val flowKey: String,
+        val current: TFlow,
+        val request: com.HanFeng.model.PacketInfo,
+        val sequenceNumber: Long,
+        val acknowledgementNumber: Long,
+        val payloadLength: Long,
+        val now: Long,
+        val bufferedSegmentsOf: (TFlow) -> List<ClientPayloadSegment>,
+        val lastClientPayloadSequenceOf: (TFlow) -> Long?,
+        val lastClientPayloadLengthOf: (TFlow) -> Long?,
+        val isBridgeConnected: () -> Boolean,
+        val forwardPayload: (ByteArray) -> Unit,
+        val onBufferOverflow: () -> Unit,
+        val onReplayOverflow: () -> Unit,
+        val updateOutOfOrderFlow: (TFlow, List<ClientPayloadSegment>) -> TFlow,
+        val updateFlushFlow: (TFlow, ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>, Boolean, ClientPayloadSegment?) -> TFlow
+    )
+
+    private data class SyntheticServerAckContext<TFlow>(
+        val flowCache: LinkedHashMap<String, TFlow>,
+        val flowKey: String,
+        val current: TFlow,
+        val sequenceNumber: Long,
+        val acknowledgementNumber: Long,
+        val now: Long,
+        val pendingSegmentsOf: (TFlow) -> List<PendingServerSegment>,
+        val serverNextSequenceOf: (TFlow) -> Long?,
+        val stateOf: (TFlow) -> String,
+        val resendPendingSegments: (List<PendingServerSegment>) -> Unit,
+        val updateRetransmitFlow: (TFlow, List<PendingServerSegment>) -> TFlow,
+        val updateAckedFlow: (TFlow, ServerAckStateSupport.AckStateTransition) -> TFlow
+    )
+
+    private fun <TFlow> handleSyntheticClientPayload(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        current: TFlow,
+        request: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        clientInitialSequenceOf: (TFlow) -> Long?,
+        clientNextSequenceOf: (TFlow) -> Long?,
+        bufferedSegmentsOf: (TFlow) -> List<ClientPayloadSegment>,
+        lastClientPayloadSequenceOf: (TFlow) -> Long?,
+        lastClientPayloadLengthOf: (TFlow) -> Long?,
+        isBridgeConnected: () -> Boolean,
+        forwardPayload: (ByteArray) -> Unit,
+        onBufferOverflow: () -> Unit,
+        onReplayOverflow: () -> Unit,
+        updateOutOfOrderFlow: (TFlow, List<ClientPayloadSegment>) -> TFlow,
+        updateFlushFlow: (TFlow, ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>, Boolean, ClientPayloadSegment?) -> TFlow
+    ): SyntheticClientPayloadResult {
+        val context = SyntheticClientPayloadContext(
+            flowCache = flowCache,
+            flowKey = flowKey,
+            current = current,
+            request = request,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            payloadLength = payloadLength,
+            now = now,
+            bufferedSegmentsOf = bufferedSegmentsOf,
+            lastClientPayloadSequenceOf = lastClientPayloadSequenceOf,
+            lastClientPayloadLengthOf = lastClientPayloadLengthOf,
+            isBridgeConnected = isBridgeConnected,
+            forwardPayload = forwardPayload,
+            onBufferOverflow = onBufferOverflow,
+            onReplayOverflow = onReplayOverflow,
+            updateOutOfOrderFlow = updateOutOfOrderFlow,
+            updateFlushFlow = updateFlushFlow
+        )
+        val serverSeq = serverInitialSequenceOf(current) ?: synthesizeServerSequence(flowKey)
+        val expectedClientSeq = clientNextSequenceOf(current) ?: ((clientInitialSequenceOf(current) ?: sequenceNumber) + 1)
+        val isRetransmission = sequenceNumber < expectedClientSeq || (
+            lastClientPayloadSequenceOf(current) == sequenceNumber &&
+                lastClientPayloadLengthOf(current) == payloadLength
+            )
+        if (sequenceNumber > expectedClientSeq) {
+            return handleSyntheticOutOfOrderClientPayload(context, serverSeq, expectedClientSeq, isRetransmission)
+        }
+        val inboundSegments = mutableListOf<ClientPayloadSegment>()
+        var nextAckNumber = expectedClientSeq
+        if (!isRetransmission && request.payload.isNotEmpty()) {
+            inboundSegments += ClientPayloadSegment(sequenceNumber, request.payload)
+            nextAckNumber = maxOf(nextAckNumber, sequenceNumber + payloadLength)
+        }
+        return handleSyntheticFlushableClientPayload(
+            context = context,
+            serverSeq = serverSeq,
+            expectedClientSeq = expectedClientSeq,
+            isRetransmission = isRetransmission,
+            inboundSegments = inboundSegments,
+            nextAckNumber = nextAckNumber
+        )
+    }
+
+    private fun <TFlow> handleSyntheticServerAck(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        current: TFlow,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long,
+        pendingSegmentsOf: (TFlow) -> List<PendingServerSegment>,
+        serverNextSequenceOf: (TFlow) -> Long?,
+        stateOf: (TFlow) -> String,
+        resendPendingSegments: (List<PendingServerSegment>) -> Unit,
+        updateRetransmitFlow: (TFlow, List<PendingServerSegment>) -> TFlow,
+        updateAckedFlow: (TFlow, ServerAckStateSupport.AckStateTransition) -> TFlow
+    ): SyntheticServerAckResult {
+        val context = SyntheticServerAckContext(
+            flowCache = flowCache,
+            flowKey = flowKey,
+            current = current,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            now = now,
+            pendingSegmentsOf = pendingSegmentsOf,
+            serverNextSequenceOf = serverNextSequenceOf,
+            stateOf = stateOf,
+            resendPendingSegments = resendPendingSegments,
+            updateRetransmitFlow = updateRetransmitFlow,
+            updateAckedFlow = updateAckedFlow
+        )
+        return handleSyntheticRetransmitServerAck(context)
+            ?: handleSyntheticAdvancedServerAck(context)
+    }
+
+    private fun <TFlow> handleSyntheticOutOfOrderClientPayload(
+        context: SyntheticClientPayloadContext<TFlow>,
+        serverSeq: Long,
+        expectedClientSeq: Long,
+        isRetransmission: Boolean
+    ): SyntheticClientPayloadResult {
+        val updatedBufferedSegments = ClientPayloadReplaySupport.bufferOutOfOrderPayload(
+            existingSegments = context.bufferedSegmentsOf(context.current),
+            payload = context.request.payload,
+            sequenceNumber = context.sequenceNumber,
+            mergeWithSegment = ::mergeBufferedClientSegments,
+            createSegment = ::ClientPayloadSegment,
+            bufferedBytes = ::bufferedClientPayloadBytes,
+            maxBufferedClientBytes = MAX_BUFFERED_CLIENT_BYTES
+        )
+        if (updatedBufferedSegments == null) {
+            context.onBufferOverflow()
+            return SyntheticClientPayloadResult(expectedClientSeq, isRetransmission, null, null)
+        }
+        FlowCacheSupport.putPruned(
+            context.flowCache,
+            context.flowKey,
+            context.updateOutOfOrderFlow(context.current, updatedBufferedSegments),
+            512
+        )
+        writeSyntheticClientAck(context.request, serverSeq + 1, expectedClientSeq)
+        return SyntheticClientPayloadResult(expectedClientSeq, isRetransmission, updatedBufferedSegments, null)
+    }
+
+    private fun <TFlow> handleSyntheticFlushableClientPayload(
+        context: SyntheticClientPayloadContext<TFlow>,
+        serverSeq: Long,
+        expectedClientSeq: Long,
+        isRetransmission: Boolean,
+        inboundSegments: List<ClientPayloadSegment>,
+        nextAckNumber: Long
+    ): SyntheticClientPayloadResult {
+        val flushResult = ClientPayloadReplaySupport.drainReplayPayload(
+            existingSegments = context.bufferedSegmentsOf(context.current),
+            inboundSegments = inboundSegments,
+            acknowledgementNumber = nextAckNumber,
+            mergeSegments = ::mergeBufferedClientSegments,
+            drainSegments = { segments, expectedSequence ->
+                drainBufferedClientSegments(segments, expectedSequence).let {
+                    ClientPayloadReplaySupport.DrainResult(
+                        nextExpectedSequence = it.nextExpectedSequence,
+                        forwardSegments = it.forwardSegments,
+                        remainingSegments = it.remainingSegments
+                    )
+                }
+            },
+            bufferedBytes = ::bufferedClientPayloadBytes,
+            maxBufferedClientBytes = MAX_BUFFERED_CLIENT_BYTES
+        )
+        if (flushResult == null) {
+            context.onReplayOverflow()
+            return SyntheticClientPayloadResult(expectedClientSeq, isRetransmission, null, null)
+        }
+        val bridgeConnected = context.isBridgeConnected()
+        if (bridgeConnected) {
+            flushResult.forwardSegments.forEach { segment ->
+                context.forwardPayload(segment.payload)
+            }
+        }
+        val lastForwardedSegment = flushResult.forwardSegments.lastOrNull()
+        FlowCacheSupport.putPruned(
+            context.flowCache,
+            context.flowKey,
+            context.updateFlushFlow(context.current, flushResult, bridgeConnected, lastForwardedSegment),
+            512
+        )
+        writeSyntheticClientAck(context.request, serverSeq + 1, flushResult.nextExpectedSequence)
+        return SyntheticClientPayloadResult(expectedClientSeq, isRetransmission, null, flushResult)
+    }
+
+    private fun writeSyntheticClientAck(
+        request: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long
+    ) {
+        writeTunPacket(
+            PacketCodec.buildTcpResponse(
+                request = request,
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                flags = TCP_FLAG_ACK,
+                windowSize = request.tcpWindowSize ?: DEFAULT_TCP_WINDOW_SIZE
+            )
+        )
+    }
+
+    private fun <TFlow> handleSyntheticRetransmitServerAck(
+        context: SyntheticServerAckContext<TFlow>
+    ): SyntheticServerAckResult? {
+        val pendingSegments = context.pendingSegmentsOf(context.current)
+        val serverNextSequence = context.serverNextSequenceOf(context.current)
+        if (pendingSegments.isEmpty() || serverNextSequence == null || context.acknowledgementNumber >= serverNextSequence) {
+            return null
+        }
+        val retransmitState = ServerAckStateSupport.trimPendingSegmentsForAck(
+            pendingSegments = pendingSegments,
+            acknowledgementNumber = context.acknowledgementNumber,
+            trim = ::trimAcknowledgedServerSegments
+        ) ?: return null
+        context.resendPendingSegments(retransmitState.remainingSegments)
+        FlowCacheSupport.updateIfPresent(context.flowCache, context.flowKey) {
+            context.updateRetransmitFlow(it, retransmitState.remainingSegments)
+        }
+        return SyntheticServerAckResult(retransmitState.remainingSegments)
+    }
+
+    private fun <TFlow> handleSyntheticAdvancedServerAck(
+        context: SyntheticServerAckContext<TFlow>
+    ): SyntheticServerAckResult {
+        val nextAckState = ServerAckStateSupport.nextAckState(
+            currentState = context.stateOf(context.current),
+            sequenceNumber = context.sequenceNumber,
+            acknowledgementNumber = context.acknowledgementNumber,
+            now = context.now
+        )
+        FlowCacheSupport.updateIfPresent(context.flowCache, context.flowKey) {
+            context.updateAckedFlow(it, nextAckState)
+        }
+        return SyntheticServerAckResult(null)
+    }
+
+    private data class BridgePayloadEmission<TFlow>(
+        val flow: TFlow,
+        val pendingSummary: Pair<Int, Int>
+    )
+
+    private data class BridgePayloadDispatch(
+        val freshSegments: List<PendingServerSegment>
+    )
+
+    private data class BridgeSequenceState(
+        val nextServerSequence: Long,
+        val clientAcknowledgement: Long
+    )
+
+    private data class BridgeFlowSequenceContext<TFlow>(
+        val flow: TFlow,
+        val sequenceState: BridgeSequenceState
+    )
+
+    private fun resolveBridgeSequenceState(
+        flowKey: String,
+        serverInitialSequence: Long?,
+        serverNextSequence: Long?,
+        clientInitialSequence: Long?,
+        clientNextSequence: Long?
+    ): BridgeSequenceState {
+        val serverSeqBase = serverInitialSequence ?: synthesizeServerSequence(flowKey)
+        return BridgeSequenceState(
+            nextServerSequence = serverNextSequence ?: (serverSeqBase + 1),
+            clientAcknowledgement = clientNextSequence ?: ((clientInitialSequence ?: 0L) + 1)
+        )
+    }
+
+    private fun <TFlow> resolveBridgeFlowSequenceContext(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        serverNextSequenceOf: (TFlow) -> Long?,
+        clientInitialSequenceOf: (TFlow) -> Long?,
+        clientNextSequenceOf: (TFlow) -> Long?
+    ): BridgeFlowSequenceContext<TFlow>? {
+        val flow = synchronized(flowCache) {
+            flowCache[flowKey]
+        } ?: return null
+        return BridgeFlowSequenceContext(
+            flow = flow,
+            sequenceState = resolveBridgeSequenceState(
+                flowKey = flowKey,
+                serverInitialSequence = serverInitialSequenceOf(flow),
+                serverNextSequence = serverNextSequenceOf(flow),
+                clientInitialSequence = clientInitialSequenceOf(flow),
+                clientNextSequence = clientNextSequenceOf(flow)
+            )
+        )
+    }
+
+    private fun <TFlow> resolveFlowFromCache(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String
+    ): TFlow? {
+        return synchronized(flowCache) {
+            flowCache[flowKey]
+        }
+    }
+
+    private fun closeBridgeSession(session: Any) {
+        when (session) {
+            is HttpsBridgeSocketSession -> session.close()
+            is LocalProxyBridgeSocketSession -> session.close()
+        }
+    }
+
+    private fun writeBridgeFinPacket(
+        request: com.HanFeng.model.PacketInfo,
+        sequenceState: BridgeSequenceState
+    ) {
+        writeTunPacket(
+            PacketCodec.buildTcpResponse(
+                request = request,
+                sequenceNumber = sequenceState.nextServerSequence,
+                acknowledgementNumber = sequenceState.clientAcknowledgement,
+                flags = TCP_FLAG_FIN or TCP_FLAG_ACK,
+                windowSize = DEFAULT_TCP_WINDOW_SIZE
+            )
+        )
+    }
+
+    private fun <TFlow> updateBridgeFinFlow(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        sequenceState: BridgeSequenceState,
+        updateFlow: (TFlow, BridgeTerminalStateSupport.BridgeFinTransition) -> TFlow
+    ) {
+        val transition = BridgeTerminalStateSupport.nextBridgeFinTransition(
+            nextServerSequence = sequenceState.nextServerSequence,
+            now = System.currentTimeMillis()
+        )
+        FlowCacheSupport.updateIfPresent(flowCache, flowKey) {
+            updateFlow(it, transition)
+        }
+    }
+
+    private fun <TFlow> resolveBridgeResetPacketState(
+        flow: TFlow,
+        flowKey: String,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        serverNextSequenceOf: (TFlow) -> Long?,
+        clientInitialSequenceOf: (TFlow) -> Long?,
+        clientNextSequenceOf: (TFlow) -> Long?
+    ): BridgeReaderSupport.ResetPacketState {
+        return BridgeReaderSupport.resolveResetPacketState(
+            serverInitialSequence = serverInitialSequenceOf(flow),
+            serverNextSequence = serverNextSequenceOf(flow),
+            clientInitialSequence = clientInitialSequenceOf(flow),
+            clientNextSequence = clientNextSequenceOf(flow),
+            synthesizeServerSequence = { synthesizeServerSequence(flowKey) }
+        )
+    }
+
+    private fun writeBridgeResetPacket(
+        request: com.HanFeng.model.PacketInfo,
+        packetState: BridgeReaderSupport.ResetPacketState
+    ) {
+        writeTunPacket(
+            BridgeResetSupport.buildResetPacket(
+                request,
+                packetState,
+                TCP_FLAG_RST,
+                TCP_FLAG_ACK,
+                DEFAULT_TCP_WINDOW_SIZE
+            )
+        )
+    }
+
+    private fun <TFlow> dispatchBridgeReset(
+        flow: TFlow,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        serverInitialSequenceOf: (TFlow) -> Long?,
+        serverNextSequenceOf: (TFlow) -> Long?,
+        clientInitialSequenceOf: (TFlow) -> Long?,
+        clientNextSequenceOf: (TFlow) -> Long?
+    ) {
+        val packetState = resolveBridgeResetPacketState(
+            flow = flow,
+            flowKey = flowKey,
+            serverInitialSequenceOf = serverInitialSequenceOf,
+            serverNextSequenceOf = serverNextSequenceOf,
+            clientInitialSequenceOf = clientInitialSequenceOf,
+            clientNextSequenceOf = clientNextSequenceOf
+        )
+        writeBridgeResetPacket(request, packetState)
+    }
+
+    private fun dispatchBridgePayload(
+        request: com.HanFeng.model.PacketInfo,
+        payload: ByteArray,
+        sequenceState: BridgeSequenceState
+    ): BridgePayloadDispatch {
+        val freshSegments = buildServerPayloadSegments(sequenceState.nextServerSequence, payload)
+        writeServerPayloadSegments(request, sequenceState.clientAcknowledgement, freshSegments)
+        return BridgePayloadDispatch(freshSegments)
+    }
+
+    private fun <TFlow> buildBridgePayloadEmission(
+        flow: TFlow,
+        mergedPendingSegments: List<PendingServerSegment>
+    ): BridgePayloadEmission<TFlow> {
+        return BridgePayloadEmission(
+            flow = flow,
+            pendingSummary = mergedPendingSegments.size to pendingServerPayloadBytes(mergedPendingSegments)
+        )
+    }
+
+    private fun <TFlow> updateBridgePayloadFlow(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        flow: TFlow,
+        payload: ByteArray,
+        sequenceState: BridgeSequenceState,
+        dispatch: BridgePayloadDispatch,
+        pendingSegmentsOf: (TFlow) -> List<PendingServerSegment>,
+        onOverflow: (TFlow) -> Unit,
+        updateFlow: (TFlow, List<PendingServerSegment>, Long, Long, ByteArray, Long) -> TFlow
+    ): BridgePayloadEmission<TFlow>? {
+        var emission: BridgePayloadEmission<TFlow>? = null
+        synchronized(flowCache) {
+            val current = flowCache[flowKey] ?: return@synchronized
+            val updateResult = BridgeFlowStateSupport.updateServerPayloadState(
+                flow = current,
+                freshSegments = dispatch.freshSegments,
+                currentPendingSegments = pendingSegmentsOf(current),
+                mergePendingSegments = ::mergePendingServerSegments,
+                pendingBytes = ::pendingServerPayloadBytes,
+                maxBufferedServerBytes = MAX_BUFFERED_SERVER_BYTES,
+                nextServerSequence = sequenceState.nextServerSequence,
+                payload = payload,
+                now = System.currentTimeMillis(),
+                updateFlow = updateFlow
+            )
+            if (updateResult == null) {
+                onOverflow(current)
+                return@synchronized
+            }
+            FlowCacheSupport.putPruned(flowCache, flowKey, updateResult.nextFlow, 512)
+            emission = buildBridgePayloadEmission(flow, updateResult.mergedPendingSegments)
+        }
+        return emission
+    }
+
+    private fun <TFlow> emitBridgePayloadCommon(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        payload: ByteArray,
+        selectors: BridgeFlowSelectors<TFlow>,
+        onOverflow: (TFlow) -> Unit,
+        updateFlow: (TFlow, List<PendingServerSegment>, Long, Long, ByteArray, Long) -> TFlow
+    ): BridgePayloadEmission<TFlow>? {
+        val context = resolveBridgeFlowSequenceContext(
+            flowCache = flowCache,
+            flowKey = flowKey,
+            serverInitialSequenceOf = selectors.sequence.serverInitialSequenceOf,
+            serverNextSequenceOf = selectors.sequence.serverNextSequenceOf,
+            clientInitialSequenceOf = selectors.sequence.clientInitialSequenceOf,
+            clientNextSequenceOf = selectors.sequence.clientNextSequenceOf
+        ) ?: return null
+        val flow = context.flow
+        val sequenceState = context.sequenceState
+        val dispatch = dispatchBridgePayload(request, payload, sequenceState)
+        return updateBridgePayloadFlow(
+            flowCache = flowCache,
+            flowKey = flowKey,
+            flow = flow,
+            payload = payload,
+            sequenceState = sequenceState,
+            dispatch = dispatch,
+            pendingSegmentsOf = { selectors.pendingSegmentsOf(it) ?: emptyList() },
+            onOverflow = onOverflow,
+            updateFlow = updateFlow
+        )
+    }
+
+    private fun <TFlow> emitBridgeFinCommon(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        selectors: BridgeFlowSelectors<TFlow>,
+        updateFlow: (TFlow, BridgeTerminalStateSupport.BridgeFinTransition) -> TFlow
+    ): TFlow? {
+        val context = resolveBridgeFlowSequenceContext(
+            flowCache = flowCache,
+            flowKey = flowKey,
+            serverInitialSequenceOf = selectors.sequence.serverInitialSequenceOf,
+            serverNextSequenceOf = selectors.sequence.serverNextSequenceOf,
+            clientInitialSequenceOf = selectors.sequence.clientInitialSequenceOf,
+            clientNextSequenceOf = selectors.sequence.clientNextSequenceOf
+        ) ?: return null
+        val flow = context.flow
+        val stateOf = selectors.stateOf ?: return null
+        if (!BridgeTerminalStateSupport.shouldEmitBridgeFin(stateOf(flow))) return null
+        val sequenceState = context.sequenceState
+        writeBridgeFinPacket(request, sequenceState)
+        updateBridgeFinFlow(flowCache, flowKey, sequenceState, updateFlow)
+        return flow
+    }
+
+    private fun <TFlow, TSession : Any> closeBridgeFlowCommon(
+        flowCache: LinkedHashMap<String, TFlow>,
+        sessionCache: LinkedHashMap<String, TSession>,
+        flowKey: String,
+        message: String,
+        logKey: String
+    ) {
+        BridgeTerminalStateSupport.closeFlow(
+            flowCache = flowCache,
+            sessionCache = sessionCache,
+            flowKey = flowKey,
+            closeSession = ::closeBridgeSession
+        )
+        logDecisionOnce(
+            key = logKey,
+            message = message,
+            minIntervalMillis = 5_000L
+        )
+    }
+
+    private fun <TFlow> emitBridgeResetCommon(
+        flowCache: LinkedHashMap<String, TFlow>,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        message: String,
+        selectors: BridgeFlowSelectors<TFlow>,
+        closeFlow: (String, String) -> Unit
+    ) {
+        val flow = resolveFlowFromCache(flowCache, flowKey) ?: return
+        dispatchBridgeReset(
+            flow = flow,
+            flowKey = flowKey,
+            request = request,
+            serverInitialSequenceOf = selectors.sequence.serverInitialSequenceOf,
+            serverNextSequenceOf = selectors.sequence.serverNextSequenceOf,
+            clientInitialSequenceOf = selectors.sequence.clientInitialSequenceOf,
+            clientNextSequenceOf = selectors.sequence.clientNextSequenceOf
+        )
+        closeFlow(flowKey, message)
+    }
+
     private fun bufferedClientPayloadBytes(segments: List<ClientPayloadSegment>): Int {
-        return segments.sumOf { it.payload.size }
+        return TcpSyntheticFlowEngine.payloadBytes(segments.map { it.payload })
     }
 
     private fun pendingServerPayloadBytes(segments: List<PendingServerSegment>): Int {
-        return segments.sumOf { it.payload.size }
+        return TcpSyntheticFlowEngine.payloadBytes(segments.map { it.payload })
     }
 
     private fun writeTunPacket(packet: ByteArray) {
-        val output = tunOutputStream ?: return
-        synchronized(tunWriteLock) {
-            output.write(packet)
-        }
+        tunPacketWriter.write(tunOutputStream, packet)
     }
 
     private fun rememberHttpDecryptTargets(
@@ -2841,10 +5406,11 @@ class AdBlockVpnService : VpnService() {
         val routeEntries = mutableListOf<HttpDecryptRouteRepository.RouteEntry>()
         synchronized(httpDecryptIpCache) {
             pruneHttpDecryptTargetsLocked()
+            val cacheEntries = mutableListOf<Pair<String, HttpDecryptTarget>>()
             addresses.forEach { address ->
                 val ip = formatAddress(address)
                 val prefixLength = address.size * 8
-                httpDecryptIpCache[ip] = HttpDecryptTarget(
+                cacheEntries += ip to HttpDecryptTarget(
                     domain = question.domain.lowercase(),
                     vendor = effectiveVendor,
                     appName = appName,
@@ -2859,10 +5425,7 @@ class AdBlockVpnService : VpnService() {
                     expiresAt = expiresAt
                 )
             }
-            while (httpDecryptIpCache.size > 1024) {
-                val firstKey = httpDecryptIpCache.entries.firstOrNull()?.key ?: break
-                httpDecryptIpCache.remove(firstKey)
-            }
+            ExpiringTargetCacheSupport.putAllPrunedLocked(httpDecryptIpCache, cacheEntries, 1024)
         }
         if (HttpDecryptRouteRepository.upsertRoutes(this, routeEntries)) {
             requestHttpDecryptRouteReload(
@@ -2872,40 +5435,43 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun pruneHttpDecryptTargetsLocked() {
-        val now = System.currentTimeMillis()
-        httpDecryptIpCache.entries.removeIf { it.value.expiresAt <= now }
+        ExpiringTargetCacheSupport.pruneExpiredLocked(
+            cache = httpDecryptIpCache,
+            now = System.currentTimeMillis(),
+            expiresAt = { it.expiresAt }
+        )
     }
 
     private fun maybePruneRouteCaches() {
         val now = System.currentTimeMillis()
-        if (now - lastRouteCachePruneCheckAt < 5_000L) return
+        if (!RouteCacheMaintenanceSupport.shouldRunCheck(now, lastRouteCachePruneCheckAt)) return
         lastRouteCachePruneCheckAt = now
         synchronized(adIpTargetCache) {
             pruneAdIpTargetsLocked()
         }
-        if (now - lastHttpDecryptPruneAt >= routeCachePruneIntervalMillis) {
-            synchronized(httpDecryptIpCache) {
-                if (now - lastHttpDecryptPruneAt >= routeCachePruneIntervalMillis) {
-                    pruneHttpDecryptTargetsLocked()
-                    lastHttpDecryptPruneAt = now
-                }
-            }
+        synchronized(httpDecryptIpCache) {
+            lastHttpDecryptPruneAt = RouteCacheMaintenanceSupport.pruneIfDue(
+                now = now,
+                lastPruneAt = lastHttpDecryptPruneAt,
+                pruneIntervalMillis = routeCachePruneIntervalMillis,
+                prune = ::pruneHttpDecryptTargetsLocked
+            )
         }
-        if (now - lastHttpsDecryptPruneAt >= routeCachePruneIntervalMillis) {
-            synchronized(httpsDecryptIpCache) {
-                if (now - lastHttpsDecryptPruneAt >= routeCachePruneIntervalMillis) {
-                    pruneHttpsDecryptTargetsLocked()
-                    lastHttpsDecryptPruneAt = now
-                }
-            }
+        synchronized(httpsDecryptIpCache) {
+            lastHttpsDecryptPruneAt = RouteCacheMaintenanceSupport.pruneIfDue(
+                now = now,
+                lastPruneAt = lastHttpsDecryptPruneAt,
+                pruneIntervalMillis = routeCachePruneIntervalMillis,
+                prune = ::pruneHttpsDecryptTargetsLocked
+            )
         }
-        if (now - lastQuicRoutePruneAt >= routeCachePruneIntervalMillis) {
-            synchronized(quicRouteCache) {
-                if (now - lastQuicRoutePruneAt >= routeCachePruneIntervalMillis) {
-                    pruneQuicTargetsLocked()
-                    lastQuicRoutePruneAt = now
-                }
-            }
+        synchronized(quicRouteCache) {
+            lastQuicRoutePruneAt = RouteCacheMaintenanceSupport.pruneIfDue(
+                now = now,
+                lastPruneAt = lastQuicRoutePruneAt,
+                pruneIntervalMillis = routeCachePruneIntervalMillis,
+                prune = ::pruneQuicTargetsLocked
+            )
         }
     }
 
@@ -2942,12 +5508,13 @@ class AdBlockVpnService : VpnService() {
         val routeEntries = mutableListOf<HttpDecryptRouteRepository.RouteEntry>()
         synchronized(httpDecryptIpCache) {
             pruneHttpDecryptTargetsLocked()
+            val cacheEntries = mutableListOf<Pair<String, HttpDecryptTarget>>()
             matchedAliases.forEach { matchedAlias ->
                 val vendor = matchedAliasContexts.getValue(matchedAlias).vendor
                 addresses.forEach { address ->
                     val ip = formatAddress(address)
                     val prefixLength = address.size * 8
-                    httpDecryptIpCache[ip] = HttpDecryptTarget(
+                    cacheEntries += ip to HttpDecryptTarget(
                         domain = matchedAlias,
                         vendor = vendor,
                         appName = appName,
@@ -2963,10 +5530,7 @@ class AdBlockVpnService : VpnService() {
                     )
                 }
             }
-            while (httpDecryptIpCache.size > 1024) {
-                val firstKey = httpDecryptIpCache.entries.firstOrNull()?.key ?: break
-                httpDecryptIpCache.remove(firstKey)
-            }
+            ExpiringTargetCacheSupport.putAllPrunedLocked(httpDecryptIpCache, cacheEntries, 1024)
         }
         val shouldForceImmediateReload = matchedAliases.any { matchedAlias ->
             val aliasContext = matchedAliasContexts.getValue(matchedAlias)
@@ -3011,10 +5575,11 @@ class AdBlockVpnService : VpnService() {
         val routeEntries = mutableListOf<HttpsDecryptRouteRepository.RouteEntry>()
         synchronized(httpsDecryptIpCache) {
             pruneHttpsDecryptTargetsLocked()
+            val cacheEntries = mutableListOf<Pair<String, HttpsDecryptTarget>>()
             addresses.forEach { address ->
                 val ip = formatAddress(address)
                 val prefixLength = address.size * 8
-                httpsDecryptIpCache[ip] = HttpsDecryptTarget(
+                cacheEntries += ip to HttpsDecryptTarget(
                     domain = question.domain.lowercase(),
                     vendor = effectiveVendor,
                     appName = appName,
@@ -3029,10 +5594,7 @@ class AdBlockVpnService : VpnService() {
                     expiresAt = expiresAt
                 )
             }
-            while (httpsDecryptIpCache.size > 1024) {
-                val firstKey = httpsDecryptIpCache.entries.firstOrNull()?.key ?: break
-                httpsDecryptIpCache.remove(firstKey)
-            }
+            ExpiringTargetCacheSupport.putAllPrunedLocked(httpsDecryptIpCache, cacheEntries, 1024)
         }
         if (HttpsDecryptRouteRepository.upsertRoutes(this, routeEntries)) {
             requestHttpDecryptRouteReload(
@@ -3042,8 +5604,11 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun pruneHttpsDecryptTargetsLocked() {
-        val now = System.currentTimeMillis()
-        httpsDecryptIpCache.entries.removeIf { it.value.expiresAt <= now }
+        ExpiringTargetCacheSupport.pruneExpiredLocked(
+            cache = httpsDecryptIpCache,
+            now = System.currentTimeMillis(),
+            expiresAt = { it.expiresAt }
+        )
     }
 
     private fun rememberQuicTargets(
@@ -3064,19 +5629,19 @@ class AdBlockVpnService : VpnService() {
         val expiresAt = min(now + DnsMessageParser.extractCacheTtlMillis(response), now + 180_000L)
         synchronized(quicRouteCache) {
             pruneQuicTargetsLocked()
-            addresses.forEach { address ->
-                quicRouteCache[formatAddress(address)] = QuicRouteTarget(
-                    domain = question.domain.lowercase(),
-                    vendor = effectiveVendor,
-                    appName = appName,
-                    source = "direct",
-                    expiresAt = expiresAt
-                )
-            }
-            while (quicRouteCache.size > 2048) {
-                val firstKey = quicRouteCache.entries.firstOrNull()?.key ?: break
-                quicRouteCache.remove(firstKey)
-            }
+            ExpiringTargetCacheSupport.putAllPrunedLocked(
+                cache = quicRouteCache,
+                entries = addresses.map { address ->
+                    formatAddress(address) to QuicRouteTarget(
+                        domain = question.domain.lowercase(),
+                        vendor = effectiveVendor,
+                        appName = appName,
+                        source = "direct",
+                        expiresAt = expiresAt
+                    )
+                },
+                maxSize = 2048
+            )
         }
     }
 
@@ -3096,19 +5661,19 @@ class AdBlockVpnService : VpnService() {
         val expiresAt = min(now + DnsMessageParser.extractCacheTtlMillis(response), now + 180_000L)
         synchronized(adIpTargetCache) {
             pruneAdIpTargetsLocked()
-            addresses.forEach { address ->
-                adIpTargetCache[formatAddress(address)] = AdIpTarget(
-                    domain = domain,
-                    vendor = effectiveVendor,
-                    appName = appName,
-                    source = "direct",
-                    expiresAt = expiresAt
-                )
-            }
-            while (adIpTargetCache.size > 2048) {
-                val firstKey = adIpTargetCache.entries.firstOrNull()?.key ?: break
-                adIpTargetCache.remove(firstKey)
-            }
+            ExpiringTargetCacheSupport.putAllPrunedLocked(
+                cache = adIpTargetCache,
+                entries = addresses.map { address ->
+                    formatAddress(address) to AdIpTarget(
+                        domain = domain,
+                        vendor = effectiveVendor,
+                        appName = appName,
+                        source = "direct",
+                        expiresAt = expiresAt
+                    )
+                },
+                maxSize = 2048
+            )
         }
     }
 
@@ -3133,10 +5698,11 @@ class AdBlockVpnService : VpnService() {
         val expiresAt = min(now + DnsMessageParser.extractCacheTtlMillis(response), now + 180_000L)
         synchronized(adIpTargetCache) {
             pruneAdIpTargetsLocked()
+            val cacheEntries = mutableListOf<Pair<String, AdIpTarget>>()
             matchedAliases.forEach { matchedAlias ->
                 val vendor = matchedAliasContexts.getValue(matchedAlias).vendor
                 addresses.forEach { address ->
-                    adIpTargetCache[formatAddress(address)] = AdIpTarget(
+                    cacheEntries += formatAddress(address) to AdIpTarget(
                         domain = matchedAlias,
                         vendor = vendor,
                         appName = appName,
@@ -3145,10 +5711,7 @@ class AdBlockVpnService : VpnService() {
                     )
                 }
             }
-            while (adIpTargetCache.size > 2048) {
-                val firstKey = adIpTargetCache.entries.firstOrNull()?.key ?: break
-                adIpTargetCache.remove(firstKey)
-            }
+            ExpiringTargetCacheSupport.putAllPrunedLocked(adIpTargetCache, cacheEntries, 2048)
         }
     }
 
@@ -3196,10 +5759,11 @@ class AdBlockVpnService : VpnService() {
         val expiresAt = min(now + DnsMessageParser.extractCacheTtlMillis(response), now + 180_000L)
         synchronized(quicRouteCache) {
             pruneQuicTargetsLocked()
+            val cacheEntries = mutableListOf<Pair<String, QuicRouteTarget>>()
             matchedAliases.forEach { matchedAlias ->
                 val vendor = matchedAliasContexts.getValue(matchedAlias).vendor
                 addresses.forEach { address ->
-                    quicRouteCache[formatAddress(address)] = QuicRouteTarget(
+                    cacheEntries += formatAddress(address) to QuicRouteTarget(
                         domain = matchedAlias,
                         vendor = vendor,
                         appName = appName,
@@ -3208,21 +5772,24 @@ class AdBlockVpnService : VpnService() {
                     )
                 }
             }
-            while (quicRouteCache.size > 2048) {
-                val firstKey = quicRouteCache.entries.firstOrNull()?.key ?: break
-                quicRouteCache.remove(firstKey)
-            }
+            ExpiringTargetCacheSupport.putAllPrunedLocked(quicRouteCache, cacheEntries, 2048)
         }
     }
 
     private fun pruneQuicTargetsLocked() {
-        val now = System.currentTimeMillis()
-        quicRouteCache.entries.removeIf { it.value.expiresAt <= now }
+        ExpiringTargetCacheSupport.pruneExpiredLocked(
+            cache = quicRouteCache,
+            now = System.currentTimeMillis(),
+            expiresAt = { it.expiresAt }
+        )
     }
 
     private fun pruneAdIpTargetsLocked() {
-        val now = System.currentTimeMillis()
-        adIpTargetCache.entries.removeIf { it.value.expiresAt <= now }
+        ExpiringTargetCacheSupport.pruneExpiredLocked(
+            cache = adIpTargetCache,
+            now = System.currentTimeMillis(),
+            expiresAt = { it.expiresAt }
+        )
     }
 
     private fun rememberHttpsDecryptAliasTargets(
@@ -3251,12 +5818,13 @@ class AdBlockVpnService : VpnService() {
         val routeEntries = mutableListOf<HttpsDecryptRouteRepository.RouteEntry>()
         synchronized(httpsDecryptIpCache) {
             pruneHttpsDecryptTargetsLocked()
+            val cacheEntries = mutableListOf<Pair<String, HttpsDecryptTarget>>()
             matchedAliases.forEach { matchedAlias ->
                 val vendor = matchedAliasContexts.getValue(matchedAlias).vendor
                 addresses.forEach { address ->
                     val ip = formatAddress(address)
                     val prefixLength = address.size * 8
-                    httpsDecryptIpCache[ip] = HttpsDecryptTarget(
+                    cacheEntries += ip to HttpsDecryptTarget(
                         domain = matchedAlias,
                         vendor = vendor,
                         appName = appName,
@@ -3272,10 +5840,7 @@ class AdBlockVpnService : VpnService() {
                     )
                 }
             }
-            while (httpsDecryptIpCache.size > 1024) {
-                val firstKey = httpsDecryptIpCache.entries.firstOrNull()?.key ?: break
-                httpsDecryptIpCache.remove(firstKey)
-            }
+            ExpiringTargetCacheSupport.putAllPrunedLocked(httpsDecryptIpCache, cacheEntries, 1024)
         }
         val shouldForceImmediateReload = matchedAliases.any { matchedAlias ->
             val aliasContext = matchedAliasContexts.getValue(matchedAlias)
@@ -3377,6 +5942,8 @@ class AdBlockVpnService : VpnService() {
         if (RuleRepository.isSensitiveAuthDomain(normalizedDomain)) return false
         if (RuleRepository.shouldProtectMediaTraffic(normalizedDomain)) return false
         if (RuleRepository.shouldProtectBusinessTraffic(normalizedDomain)) return false
+        if (RuleRepository.isGameCoreDomain(normalizedDomain)) return false
+        if (RuleRepository.isSocialCoreDomain(normalizedDomain) && !RuleRepository.isCommunityAppHint(appName)) return false
 
         val novelSignals = evaluateNovelBlockingSignals(
             domain = normalizedDomain,
@@ -3386,6 +5953,10 @@ class AdBlockVpnService : VpnService() {
             includeForceNovelQuic = includeForceNovelQuic
         )
         if (novelSignals.aggressiveNovelBlock || novelSignals.forcedNovelQuicBlock || novelSignals.protectedNovelUrlBlock) {
+            return true
+        }
+
+        if (RuleRepository.shouldTreatAsGeneralAdTraffic(normalizedDomain, vendor, appName)) {
             return true
         }
 
@@ -3414,76 +5985,57 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
-    private fun queryUpstreamDns(payload: ByteArray): UpstreamDnsResult? {
-        resolveDnsServers().forEach { server ->
-            repeat(2) { attempt ->
-                val socket = acquireDnsSocket(server) ?: return@repeat
-                runCatching {
-                    socket.soTimeout = if (attempt == 0) 1200 else 1800
-                    socket.connect(server, 53)
-                    socket.send(DatagramPacket(payload, payload.size))
-                    val receiveBuffer = ByteArray(4096)
-                    val packet = DatagramPacket(receiveBuffer, receiveBuffer.size)
-                    socket.receive(packet)
-                    markUpstreamSuccess(server)
-                    releaseDnsSocket(server, socket)
-                    return UpstreamDnsResult(server, packet.data.copyOf(packet.length))
-                }.onFailure {
-                    socket.disconnect()
-                    markUpstreamFailure(server)
-                    if (attempt == 1) {
-                        logDecisionOnce(
-                            key = "upstream-dns-failed:${server.hostAddress}",
-                            message = "Upstream DNS ${server.hostAddress} failed: ${it.message ?: it.javaClass.simpleName}",
-                            minIntervalMillis = 60_000L
-                        )
-                    }
-                    releaseDnsSocket(server, socket)
-                }
+    private fun queryUpstreamDns(payload: ByteArray): UpstreamDnsSupport.UpstreamDnsResult? {
+        return UpstreamDnsSupport.queryUpstreamDns(
+            payload = payload,
+            servers = resolveDnsServers(),
+            acquireSocket = ::acquireDnsSocket,
+            releaseSocket = ::releaseDnsSocket,
+            markSuccess = ::markUpstreamSuccess,
+            markFailure = ::markUpstreamFailure,
+            onServerFailed = { server, error ->
+                logDecisionOnce(
+                    key = "upstream-dns-failed:${server.hostAddress}",
+                    message = "Upstream DNS ${server.hostAddress} failed: ${error.message ?: error.javaClass.simpleName}",
+                    minIntervalMillis = 60_000L
+                )
             }
-        }
-        return null
+        )
     }
 
     private fun acquireDnsSocket(server: InetAddress): DatagramSocket? {
-        synchronized(dnsSocketPoolLock) {
-            val poolEntry = dnsSocketPool.poll()
-            if (poolEntry != null) {
-                if (poolEntry.first == server && !poolEntry.second.isClosed) {
-                    return poolEntry.second
-                }
-                poolEntry.second.close()
+        return UpstreamDnsSupport.acquireDnsSocket(
+            pool = dnsSocketPool,
+            lock = dnsSocketPoolLock,
+            server = server,
+            createSocket = {
+                runCatching {
+                    DatagramSocket().also { protect(it) }
+                }.getOrNull()
             }
-        }
-        return runCatching {
-            DatagramSocket().also { protect(it) }
-        }.getOrNull()
+        )
     }
 
     private fun releaseDnsSocket(server: InetAddress, socket: DatagramSocket) {
-        if (socket.isClosed) return
-        synchronized(dnsSocketPoolLock) {
-            if (dnsSocketPool.size < 4) {
-                dnsSocketPool.offer(server to socket)
-            } else {
-                socket.close()
-            }
-        }
+        UpstreamDnsSupport.releaseDnsSocket(
+            pool = dnsSocketPool,
+            lock = dnsSocketPoolLock,
+            server = server,
+            socket = socket
+        )
     }
 
     private fun logDecisionOnce(key: String, message: String, minIntervalMillis: Long) {
         val now = System.currentTimeMillis()
-        synchronized(decisionLogCache) {
-            val previous = decisionLogCache[key]
-            if (previous != null && now - previous < minIntervalMillis) {
-                return
-            }
-            decisionLogCache[key] = now
-            while (decisionLogCache.size > 256) {
-                val firstKey = decisionLogCache.entries.firstOrNull()?.key ?: break
-                decisionLogCache.remove(firstKey)
-            }
+        val shouldLog = synchronized(decisionLogCache) {
+            DecisionLogSupport.shouldLogLocked(
+                cache = decisionLogCache,
+                key = key,
+                now = now,
+                minIntervalMillis = minIntervalMillis
+            )
         }
+        if (!shouldLog) return
         LogRepository.append(this, message)
     }
 
@@ -3505,7 +6057,12 @@ class AdBlockVpnService : VpnService() {
                 .thenBy { it.hostAddress ?: it.hostName }
         )
         synchronized(dnsServerCacheLock) {
-            cachedDnsServers = CachedDnsServers(sorted, now + dnsServerCacheTtlMillis)
+            cachedDnsServers = DnsRuntimeSupport.cacheResolvedServers(
+                lock = dnsServerCacheLock,
+                servers = sorted,
+                now = now,
+                ttlMillis = dnsServerCacheTtlMillis
+            )
         }
         logDecisionOnce(
             key = "resolve-dns-servers:${sorted.joinToString(",") { it.hostAddress ?: it.hostName }}",
@@ -3516,84 +6073,62 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun readCachedDnsResponse(question: com.HanFeng.model.DnsQuestion, queryPayload: ByteArray): ByteArray? {
-        val now = System.currentTimeMillis()
-        val key = DnsMessageParser.buildCacheKey(question)
-        synchronized(dnsResponseCache) {
-            dnsResponseCache.entries.removeIf { it.value.expiresAt + staleCacheGraceMillis <= now }
-            val cached = dnsResponseCache[key] ?: return null
-            if (cached.expiresAt <= now) return null
-            return DnsMessageParser.restoreCachedResponseForQuery(cached.payload, queryPayload)
-        }
+        return DnsRuntimeSupport.readCachedDnsResponse(
+            cache = dnsResponseCache,
+            question = question,
+            queryPayload = queryPayload,
+            now = System.currentTimeMillis(),
+            staleCacheGraceMillis = staleCacheGraceMillis
+        )
     }
 
     private fun readStaleCachedDnsResponse(question: com.HanFeng.model.DnsQuestion, queryPayload: ByteArray): ByteArray? {
-        val now = System.currentTimeMillis()
-        val key = DnsMessageParser.buildCacheKey(question)
-        synchronized(dnsResponseCache) {
-            dnsResponseCache.entries.removeIf { it.value.expiresAt + staleCacheGraceMillis <= now }
-            val cached = dnsResponseCache[key] ?: return null
-            if (cached.expiresAt > now) return null
-            return DnsMessageParser.restoreCachedResponseForQuery(cached.payload, queryPayload)
-        }
+        return DnsRuntimeSupport.readStaleCachedDnsResponse(
+            cache = dnsResponseCache,
+            question = question,
+            queryPayload = queryPayload,
+            now = System.currentTimeMillis(),
+            staleCacheGraceMillis = staleCacheGraceMillis
+        )
     }
 
     private fun cacheDnsResponse(question: com.HanFeng.model.DnsQuestion, response: ByteArray) {
-        val expiresAt = when {
-            DnsMessageParser.isCacheableResponse(response, question) -> System.currentTimeMillis() + DnsMessageParser.extractCacheTtlMillis(response)
-            DnsMessageParser.isNegativeCacheableResponse(response, question) -> System.currentTimeMillis() + DnsMessageParser.negativeCacheTtlMillis()
-            else -> return
-        }
-        val normalized = DnsMessageParser.normalizeResponseForCache(response)
-        synchronized(dnsResponseCache) {
-            dnsResponseCache[DnsMessageParser.buildCacheKey(question)] = CachedDnsResponse(normalized, expiresAt)
-            while (dnsResponseCache.size > 256) {
-                val firstKey = dnsResponseCache.entries.firstOrNull()?.key ?: break
-                dnsResponseCache.remove(firstKey)
-            }
-        }
+        DnsRuntimeSupport.cacheDnsResponse(
+            cache = dnsResponseCache,
+            question = question,
+            response = response,
+            now = System.currentTimeMillis()
+        )
     }
 
     private fun markUpstreamSuccess(server: InetAddress) {
-        val key = server.hostAddress ?: server.hostName
-        val now = System.currentTimeMillis()
-        synchronized(upstreamServerStates) {
-            upstreamServerStates[key] = UpstreamServerState(
-                failureCount = 0,
-                cooldownUntil = 0L,
-                lastSuccessAt = now
-            )
-        }
+        DnsRuntimeSupport.markUpstreamSuccess(upstreamServerStates, server, System.currentTimeMillis())
     }
 
     private fun markUpstreamFailure(server: InetAddress) {
-        val key = server.hostAddress ?: server.hostName
-        val now = System.currentTimeMillis()
-        synchronized(upstreamServerStates) {
-            val current = upstreamServerStates[key] ?: UpstreamServerState()
-            val failures = (current.failureCount + 1).coerceAtMost(6)
-            val cooldown = now + (400L shl (failures - 1)).coerceAtMost(15_000L)
-            upstreamServerStates[key] = current.copy(
-                failureCount = failures,
-                cooldownUntil = cooldown
-            )
-        }
+        DnsRuntimeSupport.markUpstreamFailure(upstreamServerStates, server, System.currentTimeMillis())
     }
 
-    private fun currentUpstreamState(server: InetAddress): UpstreamServerState {
-        val key = server.hostAddress ?: server.hostName
-        synchronized(upstreamServerStates) {
-            return upstreamServerStates[key] ?: UpstreamServerState()
-        }
+    private fun currentUpstreamState(server: InetAddress): DnsRuntimeSupport.UpstreamServerState {
+        return DnsRuntimeSupport.currentUpstreamState(upstreamServerStates, server)
     }
 
     private fun isLocalProxyEndpoint(host: String, port: Int): Boolean {
-        val configPort = localProxyCoexistConfig.port
-        return port == configPort && (host == localProxyCoexistConfig.host || host == "127.0.0.1" || host == "::1")
+        return TrafficDecisionEngine.isLocalProxyEndpoint(
+            host = host,
+            port = port,
+            configHost = localProxyCoexistConfig.host,
+            configPort = localProxyCoexistConfig.port
+        )
     }
 
     private fun isLocalLoopOrProxyEndpoint(host: String, port: Int): Boolean {
-        if (host == "127.0.0.1" || host == "::1") return true
-        return isLocalProxyEndpoint(host, port)
+        return TrafficDecisionEngine.isLocalLoopOrProxyEndpoint(
+            host = host,
+            port = port,
+            configHost = localProxyCoexistConfig.host,
+            configPort = localProxyCoexistConfig.port
+        )
     }
 
     private fun isKnownPublicDnsEndpoint(host: String): Boolean {
@@ -3789,7 +6324,29 @@ class AdBlockVpnService : VpnService() {
         return (address[fullBytes].toInt() and mask) == (networkAddress[fullBytes].toInt() and mask)
     }
 
-    private fun formatAddress(bytes: ByteArray): String = InetAddress.getByAddress(bytes).hostAddress ?: ""
+    private val ipv4FormatCache = ConcurrentHashMap<Int, String>(512)
+
+    private fun formatAddress(bytes: ByteArray): String {
+        if (bytes.size == 4) {
+            val key = ((bytes[0].toInt() and 0xFF) shl 24) or ((bytes[1].toInt() and 0xFF) shl 16) or ((bytes[2].toInt() and 0xFF) shl 8) or (bytes[3].toInt() and 0xFF)
+            ipv4FormatCache[key]?.let { return it }
+            val result = "${bytes[0].toInt() and 0xFF}.${bytes[1].toInt() and 0xFF}.${bytes[2].toInt() and 0xFF}.${bytes[3].toInt() and 0xFF}"
+            ipv4FormatCache[key] = result
+            return result
+        }
+        if (bytes.size == 16) {
+            val sb = StringBuilder(45)
+            for (i in bytes.indices step 2) {
+                if (i > 0) sb.append(':')
+                val hi = bytes[i].toInt() and 0xFF
+                val lo = bytes[i + 1].toInt() and 0xFF
+                val combined = (hi shl 8) or lo
+                if (combined != 0) sb.append(combined.toString(16))
+            }
+            return sb.toString()
+        }
+        return InetAddress.getByAddress(bytes).hostAddress ?: ""
+    }
 
     private fun resolveDestinationAppContext(info: com.HanFeng.model.PacketInfo): DestinationAppContext? {
         val destinationIp = formatAddress(info.destinationAddress)
@@ -3897,6 +6454,7 @@ class AdBlockVpnService : VpnService() {
             if (uid > 0) return buildAppLabel(uid)
             return null
         }
+        refreshShizukuConnectionOwnerReadyIfNeeded()
         return runCatching {
             val protocol = if (info.protocol == OsConstants.IPPROTO_UDP) OsConstants.IPPROTO_UDP else OsConstants.IPPROTO_TCP
             val localHost = InetAddress.getByAddress(info.sourceAddress).hostAddress ?: return@runCatching null
@@ -3917,6 +6475,7 @@ class AdBlockVpnService : VpnService() {
                 if (uid <= 0) {
                     ShizukuConnectionOwnerRepository.invalidateService()
                     shizukuConnectionOwnerReady = false
+                    lastShizukuConnectionOwnerRetryAt = System.currentTimeMillis()
                 }
             }
             cacheOwnerUid(cacheKeys, uid)
@@ -3930,6 +6489,7 @@ class AdBlockVpnService : VpnService() {
         }.getOrElse {
             cacheOwnerUidFailure(cacheKeys)
             shizukuConnectionOwnerReady = false
+            lastShizukuConnectionOwnerRetryAt = System.currentTimeMillis()
             logDecisionOnce(
                 key = "resolve-app-failed:${info.sourcePort}:${info.destinationPort}",
                 message = "Resolve app failed: ${it.message ?: it.javaClass.simpleName}",
@@ -4278,19 +6838,35 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun refreshRuntimeFeatureFlags() {
-        httpDecryptEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(this)
-        mitmCertificateInstalled = HttpsMitmRepository.isCertificateInstalled(this)
-        shizukuConnectionOwnerReady = ShizukuConnectionOwnerRepository.isReady(this) &&
-            ShizukuRepository.canAttemptUserService(this)
-        shizukuAdControlReady = ShizukuAdControlRepository.isReady(this) &&
-            ShizukuRepository.canUseEnhancedMode(this)
-        shizukuStrictAppAdBlockEnabled = shizukuAdControlReady &&
-            AppSettingsRepository.isShizukuStrictAppAdBlockEnabled(this)
-        localProxyCoexistConfig = WhitelistRepository.getLocalProxyCoexistConfig(this)
-        localProxyTargetPackages = WhitelistRepository.getLocalProxyTargetPackages(this)
-        lightweightPassThroughMode = RuleRepository.getRuleCount(this) == 0 &&
-            !httpDecryptEnabled &&
-            !localProxyCoexistConfig.enabled
+        val flags = NetworkRuntimeSettingsStore.load(this)
+        httpDecryptEnabled = flags.httpDecryptEnabled
+        mitmCertificateInstalled = flags.mitmCertificateInstalled
+        shizukuConnectionOwnerReady = flags.shizukuConnectionOwnerReady
+        shizukuAdControlReady = flags.shizukuAdControlReady
+        if (shizukuConnectionOwnerReady) {
+            lastShizukuConnectionOwnerRetryAt = 0L
+        }
+        if (shizukuAdControlReady) {
+            lastShizukuAdControlRetryAt = 0L
+        }
+        shizukuStrictAppAdBlockEnabled = flags.shizukuStrictAppAdBlockEnabled
+        localProxyCoexistConfig = flags.localProxyConfig
+        localProxyTargetPackages = flags.localProxyTargetPackages
+        lightweightPassThroughMode = flags.lightweightPassThroughMode
+    }
+
+    private fun refreshShizukuConnectionOwnerReadyIfNeeded() {
+        if (shizukuConnectionOwnerReady) return
+        val now = System.currentTimeMillis()
+        if (now - lastShizukuConnectionOwnerRetryAt < SHIZUKU_CONNECTION_OWNER_RETRY_INTERVAL_MILLIS) return
+        lastShizukuConnectionOwnerRetryAt = now
+        if (!ShizukuConnectionOwnerRepository.isReady(this)) return
+        runCatching {
+            ShizukuConnectionOwnerRepository.ensureBound(this)
+            ShizukuConnectionOwnerRepository.isServiceAlive()
+        }.onSuccess { alive ->
+            shizukuConnectionOwnerReady = alive
+        }
     }
 
     private fun probeLocalProxyCoexistAsync() {
@@ -4365,7 +6941,9 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun shouldCaptureFullTrafficForLocalProxy(): Boolean {
-        return localProxyCoexistConfig.enabled && localProxyTargetPackages.isNotEmpty()
+        return NetworkModeCoordinator.shouldCaptureFullTraffic(
+            NetworkRuntimeSettingsStore.load(this)
+        )
     }
 
     companion object {
@@ -4391,6 +6969,7 @@ class AdBlockVpnService : VpnService() {
         private const val UNDERLYING_NETWORK_REFRESH_MIN_INTERVAL_MILLIS = 1_500L
         private const val FOREGROUND_NOTIFICATION_REFRESH_MIN_INTERVAL_MILLIS = 3_000L
         private const val OWNER_UID_FAILURE_TTL_MILLIS = 60_000L
+        private const val SHIZUKU_CONNECTION_OWNER_RETRY_INTERVAL_MILLIS = 45_000L
         private const val HTTPS_BRIDGE_CONNECT_TIMEOUT_MILLIS = 4_000
         private const val MAX_BUFFERED_CLIENT_SEGMENTS = 32
         private const val MAX_BUFFERED_SERVER_SEGMENTS = 32
@@ -4401,22 +6980,6 @@ class AdBlockVpnService : VpnService() {
         var isRunning: Boolean = false
     }
 
-    private data class CachedDnsResponse(
-        val payload: ByteArray,
-        val expiresAt: Long
-    )
-
-    private data class UpstreamServerState(
-        val failureCount: Int = 0,
-        val cooldownUntil: Long = 0L,
-        val lastSuccessAt: Long = 0L
-    )
-
-    private data class CachedDnsServers(
-        val servers: List<InetAddress>,
-        val expiresAt: Long
-    )
-
     private data class UnderlyingNetworkCandidate(
         val network: Network,
         val capabilities: NetworkCapabilities
@@ -4425,11 +6988,6 @@ class AdBlockVpnService : VpnService() {
     private data class MatchedIpRule(
         val rule: com.HanFeng.model.BlockRule,
         val appName: String
-    )
-
-    private data class UpstreamDnsResult(
-        val server: InetAddress,
-        val response: ByteArray
     )
 
     private data class BlockedIpNetwork(
@@ -4512,6 +7070,10 @@ class AdBlockVpnService : VpnService() {
         val payload: ByteArray
     )
 
+    private interface ClosableBridgeSession {
+        fun close()
+    }
+
     private data class ClientPayloadSegment(
         val sequenceNumber: Long,
         val payload: ByteArray
@@ -4529,8 +7091,8 @@ class AdBlockVpnService : VpnService() {
         val socket: Socket,
         val input: java.io.InputStream,
         val output: java.io.OutputStream
-    ) {
-        fun close() {
+    ) : ClosableBridgeSession {
+        override fun close() {
             runCatching { input.close() }
             runCatching { output.close() }
             runCatching { socket.close() }
@@ -4567,45 +7129,12 @@ class AdBlockVpnService : VpnService() {
         val socket: Socket,
         val input: java.io.InputStream,
         val output: java.io.OutputStream
-    ) {
-        fun close() {
+    ) : ClosableBridgeSession {
+        override fun close() {
             runCatching { input.close() }
             runCatching { output.close() }
             runCatching { socket.close() }
         }
     }
 
-    private data class LocalProxyConnectedSocket(
-        val socket: Socket,
-        val protocol: String
-    )
-
-    private fun java.io.InputStream.readFully(buffer: ByteArray) {
-        var offset = 0
-        while (offset < buffer.size) {
-            val count = read(buffer, offset, buffer.size - offset)
-            if (count <= 0) throw IllegalStateException("Unexpected EOF")
-            offset += count
-        }
-    }
-
-    private fun java.io.InputStream.readUntilHeaderTerminator(maxBytes: Int): ByteArray {
-        val output = ByteArrayOutputStream()
-        var matched = 0
-        while (output.size() < maxBytes) {
-            val next = read()
-            if (next < 0) throw IllegalStateException("Unexpected EOF")
-            output.write(next)
-            matched = when {
-                matched == 0 && next == '\r'.code -> 1
-                matched == 1 && next == '\n'.code -> 2
-                matched == 2 && next == '\r'.code -> 3
-                matched == 3 && next == '\n'.code -> 4
-                next == '\r'.code -> 1
-                else -> 0
-            }
-            if (matched == 4) return output.toByteArray()
-        }
-        throw IllegalStateException("HTTP CONNECT header too large")
-    }
 }

@@ -257,45 +257,96 @@ object PacketCodec {
     }
 
     private fun udpChecksumIpv4(packet: ByteArray, payloadSize: Int): Int {
-        val pseudo = ByteArray(12 + 8 + payloadSize)
-        packet.copyOfRange(12, 20).copyInto(pseudo, 0)
-        pseudo[8] = 0
-        pseudo[9] = 17
-        writeShort(pseudo, 10, 8 + payloadSize)
-        packet.copyOfRange(20, packet.size).copyInto(pseudo, 12)
-        return checksum(pseudo, 0, pseudo.size)
+        val udpLength = 8 + payloadSize
+        var sum = 0L
+        for (i in 12 until 20 step 2) {
+            sum += ((packet[i].toLong() and 0xFF) shl 8) or (packet[i + 1].toLong() and 0xFF)
+        }
+        sum += 17L
+        sum += udpLength.toLong() and 0xFFFF
+        return checksumWithUdpPayload(packet, 20, udpLength, sum)
     }
 
     private fun udpChecksumIpv6(packet: ByteArray, payloadSize: Int): Int {
-        val pseudo = ByteArray(40 + 8 + payloadSize)
-        packet.copyOfRange(8, 24).copyInto(pseudo, 0)
-        packet.copyOfRange(24, 40).copyInto(pseudo, 16)
-        pseudo[35] = (8 + payloadSize).toByte()
-        pseudo[39] = 17
-        packet.copyOfRange(40, packet.size).copyInto(pseudo, 40)
-        return checksum(pseudo, 0, pseudo.size)
+        val udpLength = 8 + payloadSize
+        var sum = 0L
+        for (i in 8 until 24 step 2) {
+            sum += ((packet[i].toLong() and 0xFF) shl 8) or (packet[i + 1].toLong() and 0xFF)
+        }
+        for (i in 24 until 40 step 2) {
+            sum += ((packet[i].toLong() and 0xFF) shl 8) or (packet[i + 1].toLong() and 0xFF)
+        }
+        sum += ((udpLength.toLong() and 0xFFFF) shl 16).ushr(16)
+        sum += (udpLength.toLong() and 0xFFFF)
+        sum += (17L)
+        return checksumWithUdpPayload(packet, 40, udpLength, sum)
+    }
+
+    private fun checksumWithUdpPayload(packet: ByteArray, transportOffset: Int, udpLength: Int, partialSum: Long): Int {
+        var sum = partialSum
+        var index = transportOffset
+        val endExclusive = transportOffset + udpLength
+        while (index < endExclusive - 1) {
+            sum += ((packet[index].toLong() and 0xFF) shl 8) or (packet[index + 1].toLong() and 0xFF)
+            index += 2
+        }
+        if (udpLength % 2 == 1) {
+            sum += (packet[index].toLong() and 0xFF) shl 8
+        }
+        while (sum ushr 16 != 0L) {
+            sum = (sum and 0xFFFF) + (sum ushr 16)
+        }
+        return sum.inv().toInt() and 0xFFFF
     }
 
     private fun tcpChecksumIpv4(packet: ByteArray, payloadSize: Int): Int {
         val tcpLength = 20 + payloadSize
-        val pseudo = ByteArray(12 + tcpLength)
-        packet.copyOfRange(12, 20).copyInto(pseudo, 0)
-        pseudo[8] = 0
-        pseudo[9] = 6
-        writeShort(pseudo, 10, tcpLength)
-        packet.copyOfRange(20, 20 + tcpLength).copyInto(pseudo, 12)
-        return checksum(pseudo, 0, pseudo.size)
+        var sum = 0L
+        for (i in 12 until 20 step 2) {
+            sum += ((packet[i].toLong() and 0xFF) shl 8) or (packet[i + 1].toLong() and 0xFF)
+        }
+        sum += 6L
+        sum += tcpLength.toLong() and 0xFFFF
+        var index = 20
+        val endExclusive = 20 + tcpLength
+        while (index < endExclusive - 1) {
+            sum += ((packet[index].toLong() and 0xFF) shl 8) or (packet[index + 1].toLong() and 0xFF)
+            index += 2
+        }
+        if (tcpLength % 2 == 1) {
+            sum += (packet[index].toLong() and 0xFF) shl 8
+        }
+        while (sum ushr 16 != 0L) {
+            sum = (sum and 0xFFFF) + (sum ushr 16)
+        }
+        return sum.inv().toInt() and 0xFFFF
     }
 
     private fun tcpChecksumIpv6(packet: ByteArray, payloadSize: Int): Int {
         val tcpLength = 20 + payloadSize
-        val pseudo = ByteArray(40 + tcpLength)
-        packet.copyOfRange(8, 24).copyInto(pseudo, 0)
-        packet.copyOfRange(24, 40).copyInto(pseudo, 16)
-        writeInt(pseudo, 32, tcpLength.toLong())
-        pseudo[39] = 6
-        packet.copyOfRange(40, 40 + tcpLength).copyInto(pseudo, 40)
-        return checksum(pseudo, 0, pseudo.size)
+        var sum = 0L
+        for (i in 8 until 24 step 2) {
+            sum += ((packet[i].toLong() and 0xFF) shl 8) or (packet[i + 1].toLong() and 0xFF)
+        }
+        for (i in 24 until 40 step 2) {
+            sum += ((packet[i].toLong() and 0xFF) shl 8) or (packet[i + 1].toLong() and 0xFF)
+        }
+        sum += ((tcpLength.toLong() and 0xFFFF) shl 16).ushr(16)
+        sum += (tcpLength.toLong() and 0xFFFF)
+        sum += 6L
+        var index = 40
+        val endExclusive = 40 + tcpLength
+        while (index < endExclusive - 1) {
+            sum += ((packet[index].toLong() and 0xFF) shl 8) or (packet[index + 1].toLong() and 0xFF)
+            index += 2
+        }
+        if (tcpLength % 2 == 1) {
+            sum += (packet[index].toLong() and 0xFF) shl 8
+        }
+        while (sum ushr 16 != 0L) {
+            sum = (sum and 0xFFFF) + (sum ushr 16)
+        }
+        return sum.inv().toInt() and 0xFFFF
     }
 
     private fun checksum(buffer: ByteArray, offset: Int, length: Int): Int {

@@ -19,7 +19,7 @@ import com.HanFeng.data.RemoteRuleSourceRepository
 import com.HanFeng.data.RuleRepository
 import com.HanFeng.databinding.ActivityRemoteRuleSourcesBinding
 import com.HanFeng.model.RemoteRuleSourceConfig
-import com.HanFeng.service.AdBlockVpnService
+import com.HanFeng.core.network.NetworkKernel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -91,25 +91,28 @@ class RemoteRuleSourcesActivity : BaseActivity() {
     }
 
     private fun toggleSource(source: RemoteRuleSourceConfig) {
+        val sourceId = source.id.trim()
+        if (sourceId.isBlank()) {
+            showShortToast("规则源标识无效")
+            return
+        }
         val enabling = !source.enabled
         RuleRepository.updateRemoteRuleSource(this, source.copy(enabled = enabling, lastError = null))
         if (enabling) {
             loadSources()
-            syncSources(source.id, manual = true)
+            showShortToast("规则源已启用，正在同步规则")
+            syncSources(sourceId, manual = true)
             return
         }
-        val removedCount = RuleRepository.removeRulesForRemoteSource(this, source.id)
+        val removedCount = RuleRepository.removeRulesForRemoteSource(this, sourceId)
         loadSources()
         reloadVpnIfRunning(removedCount > 0)
-        Toast.makeText(this, "已停用规则源，并移除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
+        showShortToast("已停用规则源，并移除 $removedCount 条规则")
     }
 
     private fun syncSources(sourceId: String? = null, manual: Boolean = false, allowWhitelistDomains: Boolean = false) {
-        val whitelistImportMode = if (allowWhitelistDomains) {
-            RemoteRuleSourceRepository.WhitelistImportMode.ALLOW
-        } else {
-            RemoteRuleSourceRepository.WhitelistImportMode.BLOCK
-        }
+        // 始终允许白名单规则：信任规则源作者，与 AdGuard 行为一致
+        val whitelistImportMode = RemoteRuleSourceRepository.WhitelistImportMode.ALLOW  // 总是使用 ALLOW 模式
         syncSources(sourceId, manual, whitelistImportMode)
     }
 
@@ -119,8 +122,12 @@ class RemoteRuleSourcesActivity : BaseActivity() {
         whitelistImportMode: RemoteRuleSourceRepository.WhitelistImportMode
     ) {
         binding.loadingOverlay.isVisible = true
+        val syncTarget = if (sourceId == null) "all sources" else "source=$sourceId"
+        LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] started: $syncTarget, manual=$manual, whitelistMode=$whitelistImportMode")
+        LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] userAction=$manual, timeout=60s/120s")
+        
         if (manual) {
-            Toast.makeText(this, if (sourceId == null) "正在同步规则源" else "正在更新规则源", Toast.LENGTH_SHORT).show()
+            showShortToast(if (sourceId == null) "正在同步规则源" else "正在同步规则")
         }
         lifecycleScope.launch {
             runCatching {
@@ -135,24 +142,45 @@ class RemoteRuleSourcesActivity : BaseActivity() {
                 }
             }.onSuccess { results ->
                 binding.loadingOverlay.isVisible = false
+                LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] completed: results=${results.size}")
+                
+                results.forEach { result ->
+                    LogRepository.append(this@RemoteRuleSourcesActivity, 
+                        "[Sync] result: name=${result.source.name}, success=${result.success}, " +
+                        "addedCount=${result.addedCount}, filteredCount=${result.filteredCount}")
+                    
+                    if (result.errorMessage != null) {
+                        LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] error: ${result.errorMessage}")
+                    }
+                }
+                
                 val whitelistConflicts = results.filter { it.whitelistConflictRules > 0 }
                 if (whitelistConflicts.isNotEmpty() && whitelistImportMode == RemoteRuleSourceRepository.WhitelistImportMode.BLOCK) {
+                    LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] whitelist conflicts detected=${whitelistConflicts.size}")
                     showWhitelistConflictDialog(sourceId, manual, whitelistConflicts)
                     return@onSuccess
                 }
                 loadSources()
                 reloadVpnIfRunning(results.any { it.success })
                 if (manual) {
-                    Toast.makeText(
-                        this@RemoteRuleSourcesActivity,
-                        buildSyncSummary(results, whitelistImportMode),
-                        Toast.LENGTH_LONG
-                    ).show()
+                    runCatching {
+                        val failureResult = results.firstOrNull { !it.success }
+                        if (failureResult != null) {
+                            LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] showing failure toast: ${failureResult.errorMessage}")
+                            showShortToast(failureResult.errorMessage ?: "规则源同步失败")
+                        } else {
+                            showShortToast(buildSyncSummary(results, whitelistImportMode))
+                        }
+                    }.onFailure {
+                        LogRepository.append(this@RemoteRuleSourcesActivity, "Show sync summary failed: ${it.message ?: it.javaClass.simpleName}")
+                    }
                 }
             }.onFailure {
                 binding.loadingOverlay.isVisible = false
-                LogRepository.append(this@RemoteRuleSourcesActivity, "Remote rule source sync failed: ${it.message ?: it.javaClass.simpleName}")
-                Toast.makeText(this@RemoteRuleSourcesActivity, it.message ?: "规则源更新失败", Toast.LENGTH_LONG).show()
+                val errorMsg = "[Sync] failed: ${it.message ?: it.javaClass.simpleName}"
+                LogRepository.append(this@RemoteRuleSourcesActivity, errorMsg)
+                LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] troubleshooting: 请检查网络连接、规则源 URL 是否正确")
+                showShortToast(it.message ?: "规则源更新失败")
             }
         }
     }
@@ -182,50 +210,50 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             .show()
             .also { dialog ->
                 dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val name = nameInput.text?.toString().orEmpty().trim()
-                val url = urlInput.text?.toString().orEmpty().trim()
-                when {
-                    name.isBlank() -> {
-                        Toast.makeText(this, "请输入规则源名称", Toast.LENGTH_SHORT).show()
-                    }
-                    url.isBlank() -> {
-                        Toast.makeText(this, "请输入规则源地址", Toast.LENGTH_SHORT).show()
-                    }
-                    !url.startsWith("http://") && !url.startsWith("https://") -> {
-                        Toast.makeText(this, "规则源地址格式不正确", Toast.LENGTH_SHORT).show()
-                    }
-                    else -> {
-                        lifecycleScope.launch {
-                            val duplicated = withContext(Dispatchers.Default) {
-                                RuleRepository.getRemoteRuleSources(applicationContext).any {
-                                    it.url.equals(url, ignoreCase = true) && it.id != source?.id
+                    val name = nameInput.text?.toString().orEmpty().trim()
+                    val url = urlInput.text?.toString().orEmpty().trim()
+                    when {
+                        name.isBlank() -> {
+                            showShortToast("请输入规则源名称")
+                        }
+                        url.isBlank() -> {
+                            showShortToast("请输入规则源地址")
+                        }
+                        !url.startsWith("http://") && !url.startsWith("https://") -> {
+                            showShortToast("规则源地址格式不正确")
+                        }
+                        else -> {
+                            lifecycleScope.launch {
+                                val duplicated = withContext(Dispatchers.Default) {
+                                    RuleRepository.getRemoteRuleSources(applicationContext).any {
+                                        it.url.equals(url, ignoreCase = true) && it.id != source?.id
+                                    }
                                 }
-                            }
-                            if (duplicated) {
-                                Toast.makeText(this@RemoteRuleSourcesActivity, "这个规则源地址已经存在", Toast.LENGTH_SHORT).show()
-                                return@launch
-                            }
-                            if (source == null) {
-                                addRemoteRuleSource(name, url)
-                            } else {
-                                val oldUrl = source.url.trim()
-                                val updated = source.copy(name = name, url = url, lastError = null)
-                                RuleRepository.updateRemoteRuleSource(this@RemoteRuleSourcesActivity, updated)
-                                loadSources()
-                                if (!source.enabled) {
-                                    Toast.makeText(this@RemoteRuleSourcesActivity, "规则源已更新，当前处于停用状态", Toast.LENGTH_SHORT).show()
-                                } else if (!oldUrl.equals(url, ignoreCase = true)) {
-                                    Toast.makeText(this@RemoteRuleSourcesActivity, "规则源地址已更新，正在重新拉取", Toast.LENGTH_SHORT).show()
-                                    syncSources(source.id, manual = true)
+                                if (duplicated) {
+                                    showShortToast("这个规则源地址已经存在")
+                                    return@launch
+                                }
+                                if (source == null) {
+                                    addRemoteRuleSource(name, url)
                                 } else {
-                                    Toast.makeText(this@RemoteRuleSourcesActivity, "规则源已更新", Toast.LENGTH_SHORT).show()
+                                    val oldUrl = source.url.trim()
+                                    val updated = source.copy(name = name, url = url, lastError = null)
+                                    RuleRepository.updateRemoteRuleSource(this@RemoteRuleSourcesActivity, updated)
+                                    loadSources()
+                                    if (!source.enabled) {
+                                        showShortToast("规则源已更新，当前处于停用状态")
+                                    } else if (!oldUrl.equals(url, ignoreCase = true)) {
+                                        showShortToast("规则源地址已更新，正在重新拉取")
+                                        syncSources(source.id, manual = true)
+                                    } else {
+                                        showShortToast("规则源已更新")
+                                    }
                                 }
+                                dialog.dismiss()
                             }
-                            dialog.dismiss()
                         }
                     }
                 }
-            }
             }
     }
 
@@ -238,7 +266,7 @@ class RemoteRuleSourcesActivity : BaseActivity() {
         )
         RuleRepository.addRemoteRuleSource(this, source)
         loadSources()
-        syncSources(source.id, manual = true)
+        syncSources(source.id.trim(), manual = true, allowWhitelistDomains = true)
     }
 
     private fun showEditSourceDialog(source: RemoteRuleSourceConfig) {
@@ -246,51 +274,117 @@ class RemoteRuleSourcesActivity : BaseActivity() {
     }
 
     private fun confirmDeleteSource(source: RemoteRuleSourceConfig) {
-        if (RuleRepository.isBuiltInRemoteRuleSource(source.id)) {
-            androidx.appcompat.app.AlertDialog.Builder(this)
-                .setTitle("默认规则源")
-                .setMessage("这条规则源属于内置默认规则源，可以停用或立即同步。")
-                .setPositiveButton("知道了", null)
-                .show()
+        val sourceId = source.id.trim()
+        if (sourceId.isBlank()) {
+            showShortToast("规则源标识无效")
             return
         }
-        lifecycleScope.launch {
-            val sourceRules = withContext(Dispatchers.Default) {
-                RuleRepository.getRulesForRemoteSource(applicationContext, source.id)
+        
+        val logPrefix = "[DeleteSource] sourceId=$sourceId, name=${source.name}"
+        LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - 开始删除流程")
+        
+        try {
+            // Step 1: 获取规则列表
+            LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 1: 获取规则列表")
+            
+            lifecycleScope.launch {
+                try {
+                    val sourceRules = withContext(Dispatchers.Default) {
+                        val rules = RuleRepository.getRulesForRemoteSource(applicationContext, sourceId)
+                        LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 1 完成：找到 ${rules.size} 条规则")
+                        rules
+                    }
+                    
+                    if (isFinishing || isDestroyed) {
+                        LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - 取消：Activity is finishing/destroyed")
+                        return@launch
+                    }
+                    
+                    // Step 2: 构建对话框消息
+                    LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 2: 构建对话框")
+                    
+                    val sampleText = sourceRules.take(8).joinToString("\n") { rule -> "- ${rule.domain}" }
+                    val message = buildString {
+                        append("规则源：${source.name}\n")
+                        append("地址：${source.url}\n")
+                        append("\n当前已同步规则：${sourceRules.size} 条")
+                        if (sampleText.isNotBlank()) {
+                            append("\n\n规则示例：\n")
+                            append(sampleText)
+                        }
+                        append("\n\n请选择删除方式。")
+                    }
+                    
+                    // Step 3: 创建并显示对话框
+                    LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 3: 显示对话框")
+                    
+                    val dialogBuilder = StableDialog.builder(this@RemoteRuleSourcesActivity)
+                        .setTitle("删除规则源")
+                        .setMessage(message)
+                        .setPositiveButton("删除规则源和规则") { dialog, _ ->
+                            LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 4: 点击 [删除规则源和规则]")
+                            dialog.dismiss()
+                            lifecycleScope.launch {
+                                try {
+                                    val removedCount = withContext(Dispatchers.Default) {
+                                        val removed = RuleRepository.removeRulesForRemoteSource(applicationContext, sourceId)
+                                        RuleRepository.removeRemoteRuleSource(applicationContext, sourceId)
+                                        LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 5: 已删除规则源，rules=$removed")
+                                        removed
+                                    }
+                                    if (isFinishing || isDestroyed) return@launch
+                                    loadSources()
+                                    reloadVpnIfRunning(removedCount > 0)
+                                    LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 6: 删除完成，removed=$removedCount")
+                                    showShortToast("已删除规则源，并移除 $removedCount 条规则")
+                                } catch (e: Exception) {
+                                    LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 5 失败：${e.message ?: e.javaClass.simpleName}")
+                                    showShortToast("删除失败：${e.message}")
+                                }
+                            }
+                        }
+                        .setNeutralButton("只删规则源") { dialog, _ ->
+                            LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 4: 点击 [只删规则源]")
+                            dialog.dismiss()
+                            lifecycleScope.launch {
+                                try {
+                                    withContext(Dispatchers.Default) {
+                                        RuleRepository.removeRemoteRuleSource(applicationContext, sourceId)
+                                        LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 5: 已删除规则源配置")
+                                    }
+                                    if (isFinishing || isDestroyed) return@launch
+                                    loadSources()
+                                    LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 6: 删除完成")
+                                    showShortToast("规则源已删除，规则已保留")
+                                } catch (e: Exception) {
+                                    LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 5 失败：${e.message ?: e.javaClass.simpleName}")
+                                    showShortToast("删除失败：${e.message}")
+                                }
+                            }
+                        }
+                        .setNegativeButton("取消") { dialog, _ ->
+                            LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 4: 点击 [取消]")
+                            dialog.dismiss()
+                        }
+                    
+                    try {
+                        dialogBuilder.showSafely(this@RemoteRuleSourcesActivity, "Show delete dialog failed")
+                        LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 3 完成：对话框已显示")
+                    } catch (e: Exception) {
+                        val errorMsg = "显示对话框失败：${e.message ?: e.javaClass.simpleName}"
+                        LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - $errorMsg")
+                        showShortToast(errorMsg)
+                    }
+                } catch (e: Exception) {
+                    val errorMsg = "获取规则失败：${e.message ?: e.javaClass.simpleName}"
+                    LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - Step 1 失败：$errorMsg")
+                    showShortToast(errorMsg)
+                }
             }
-            if (isFinishing || isDestroyed) return@launch
-            val sampleText = sourceRules.take(8).joinToString("\n") { rule -> "- ${rule.domain}" }
-            val message = buildString {
-                append("规则源：")
-                append(source.name)
-                append("\n地址：")
-                append(source.url)
-                append("\n\n当前已同步规则：")
-                append(sourceRules.size)
-                append(" 条")
-                if (sampleText.isNotBlank()) {
-                    append("\n\n规则示例：\n")
-                    append(sampleText)
-                }
-                append("\n\n请选择删除方式。")
-            }
-            androidx.appcompat.app.AlertDialog.Builder(this@RemoteRuleSourcesActivity)
-                .setTitle("删除规则源")
-                .setMessage(message)
-                .setPositiveButton("删除规则源和规则") { _, _ ->
-                    val removedCount = RuleRepository.removeRulesForRemoteSource(this@RemoteRuleSourcesActivity, source.id)
-                    RuleRepository.removeRemoteRuleSource(this@RemoteRuleSourcesActivity, source.id)
-                    loadSources()
-                    reloadVpnIfRunning(removedCount > 0)
-                    Toast.makeText(this@RemoteRuleSourcesActivity, "已删除规则源，并移除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
-                }
-                .setNeutralButton("只删规则源") { _, _ ->
-                    RuleRepository.removeRemoteRuleSource(this@RemoteRuleSourcesActivity, source.id)
-                    loadSources()
-                    Toast.makeText(this@RemoteRuleSourcesActivity, "规则源已删除，规则已保留", Toast.LENGTH_SHORT).show()
-                }
-                .setNegativeButton("取消", null)
-                .show()
+        } catch (e: Exception) {
+            val errorMsg = "删除操作异常：${e.message ?: e.javaClass.simpleName}"
+            LogRepository.append(this@RemoteRuleSourcesActivity, "$logPrefix - 异常：$errorMsg")
+            showShortToast(errorMsg)
         }
     }
 
@@ -320,7 +414,7 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             }
         }
 
-        androidx.appcompat.app.AlertDialog.Builder(this)
+        StableDialog.builder(this)
             .setTitle("发现疑似白名单规则")
             .setMessage(displayText)
             .setPositiveButton("继续拦截") { _, _ ->
@@ -330,7 +424,7 @@ class RemoteRuleSourcesActivity : BaseActivity() {
                 syncSources(sourceId, manual, RemoteRuleSourceRepository.WhitelistImportMode.REMOVE_CONFLICTS)
             }
             .setNegativeButton("取消", null)
-            .show()
+            .showSafely(this, "Show remote whitelist conflict dialog failed")
     }
 
     private fun buildSyncSummary(
@@ -341,6 +435,7 @@ class RemoteRuleSourcesActivity : BaseActivity() {
         if (successCount == 0) {
             return results.firstOrNull()?.errorMessage ?: "规则源更新失败"
         }
+        val totalAdded = results.filter { it.success }.sumOf { it.addedCount }
         val conflictCount = results.sumOf { it.whitelistConflictRules }
         val suffix = when {
             conflictCount <= 0 -> ""
@@ -352,12 +447,12 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             }
             else -> ""
         }
-        return "规则源更新完成，成功 $successCount / ${results.size}$suffix"
+        return "规则源更新完成，共导入 $totalAdded 条规则，成功 $successCount / ${results.size}$suffix"
     }
 
     private fun reloadVpnIfRunning(shouldReload: Boolean) {
-        if (!shouldReload || !AdBlockVpnService.isRunning) return
-        startService(Intent(this, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+        if (!shouldReload) return
+        NetworkKernel.reloadIfRunning(this)
     }
 
     private val Int.dp: Int

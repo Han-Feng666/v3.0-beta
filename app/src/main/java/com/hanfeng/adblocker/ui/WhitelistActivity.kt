@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.widget.Button
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.HanFeng.core.network.NetworkKernel
 import androidx.core.view.ViewCompat
 import androidx.core.view.isVisible
 import androidx.core.view.WindowInsetsCompat
@@ -16,7 +17,6 @@ import com.HanFeng.R
 import com.HanFeng.model.InstalledApp
 import com.HanFeng.data.WhitelistRepository
 import com.HanFeng.databinding.ActivityWhitelistBinding
-import com.HanFeng.service.AdBlockVpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -79,7 +79,11 @@ class WhitelistActivity : BaseActivity() {
         binding.root.findViewById<Button>(R.id.btnLocalProxyCoexist)?.apply {
             isVisible = coexistMode
             setOnClickListener {
-                startActivity(Intent(this@WhitelistActivity, LocalProxyCoexistActivity::class.java))
+                runCatching {
+                    startActivity(Intent(this@WhitelistActivity, LocalProxyCoexistActivity::class.java))
+                }.onFailure {
+                    Toast.makeText(this@WhitelistActivity, "打开本地代理共存失败", Toast.LENGTH_SHORT).show()
+                }
             }
         }
         binding.searchInput.doAfterTextChanged {
@@ -105,6 +109,7 @@ class WhitelistActivity : BaseActivity() {
                     WhitelistRepository.loadInstalledApps(applicationContext, prioritizeCoexist = coexistMode)
                 }
             }.getOrElse {
+                if (isFinishing || isDestroyed) return@launch
                 binding.loadingOverlay.isVisible = false
                 Toast.makeText(this@WhitelistActivity, "应用列表加载失败", Toast.LENGTH_SHORT).show()
                 return@launch
@@ -192,11 +197,10 @@ class WhitelistActivity : BaseActivity() {
     }
 
     private fun scheduleVpnReload() {
-        if (!AdBlockVpnService.isRunning) return
         pendingReloadJob?.cancel()
         pendingReloadJob = lifecycleScope.launch {
             delay(350)
-            startService(Intent(this@WhitelistActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
+            NetworkKernel.reloadIfRunning(this@WhitelistActivity)
         }
     }
 

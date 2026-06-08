@@ -82,6 +82,8 @@ object ShizukuConnectionOwnerRepository {
         binding = false
     }
 
+    fun isServiceAlive(): Boolean = liveService() != null
+
     fun getConnectionOwnerUid(
         context: Context,
         protocol: Int,

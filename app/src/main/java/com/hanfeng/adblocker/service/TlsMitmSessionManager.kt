@@ -73,18 +73,19 @@ object TlsMitmSessionManager {
                 ?: return null
             current to result
         }
-        if (preparedState.second == null) {
+        val preparedContext = preparedState.second
+        if (preparedContext == null) {
             LogRepository.append(
                 context,
                 "Skipped TLS MITM bridge due to active cooldown host=${preparedState.first.host} flow=$flowKey source=${preparedState.first.source} reason=${preparedState.first.bypassReason ?: "unknown"}"
             )
             return preparedState.first
         }
-        val bridgeBinding = HttpsTlsBridgeManager.ensureBridge(context, preparedState.first, preparedState.second!!, protectSocket)
+        val bridgeBinding = HttpsTlsBridgeManager.ensureBridge(context, preparedState.first, preparedContext, protectSocket)
         val prepared = synchronized(sessions) {
             val updated = preparedState.first.copy(
                 state = "bridge_listening",
-                tlsProtocol = preparedState.second!!.protocol,
+                tlsProtocol = preparedContext.protocol,
                 localBridgeHost = bridgeBinding.host,
                 localBridgePort = bridgeBinding.port,
                 bridgePreparedAt = System.currentTimeMillis()
@@ -217,9 +218,7 @@ object TlsMitmSessionManager {
         HttpsTlsBridgeManager.closeAll(context)
     }
 
-    fun requireContext(): Context {
-        return appContext ?: error("TLS session context not initialized")
-    }
+    fun getContextOrNull(): Context? = appContext
 
     fun getSession(flowKey: String): TlsMitmSession? {
         synchronized(sessions) {

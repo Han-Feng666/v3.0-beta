@@ -8,6 +8,8 @@
     <color name="hf_manual_rule">#CC0D47A1</color>
     <color name="hf_import_rule">#CC2E7D32</color>
     <color name="hf_selected">#33FFB300</color>
+    <color name="hf_blocked_red">#D32F2F</color>
+    <color name="hf_allowed_green">#2E7D32</color>
     <color name="hf_background_start">#FFE6EEF9</color>
     <color name="hf_background_end">#FFD8EDE8</color>
 </resources>

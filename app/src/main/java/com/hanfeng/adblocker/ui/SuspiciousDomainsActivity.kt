@@ -17,11 +17,11 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
+import com.HanFeng.core.network.NetworkKernel
 import com.HanFeng.data.RuleRepository
 import com.HanFeng.databinding.ActivitySuspiciousDomainsBinding
 import com.HanFeng.databinding.ItemSuspiciousDomainBinding
 import com.HanFeng.model.RuleSource
-import com.HanFeng.service.AdBlockVpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -89,24 +89,27 @@ class SuspiciousDomainsActivity : BaseActivity() {
             addDomains(selectedDomains.toList())
         }
         binding.btnAddRecommended.setOnClickListener {
-            val recommended = adapter.currentList.filter {
-                it.domain !in addedDomains && RuleRepository.isHighConfidenceSuspiciousDomain(
-                    domain = it.domain,
-                    vendor = it.lastVendor,
-                    novelHits = it.novelHits,
-                    count = it.count,
-                    appName = it.lastAppName,
-                    dnsHits = it.dnsHits,
-                    aliasHits = it.aliasHits,
-                    tlsSniHits = it.tlsSniHits,
-                    httpHits = it.httpHits,
-                    pathHits = it.pathHits,
-                    redirectHits = it.redirectHits,
-                    appSignalHits = it.appSignalHits,
-                    vendorSignalHits = it.vendorSignalHits,
-                    confidenceBoost = it.confidenceBoost,
-                    refererDomain = it.refererDomain
+            val recommended = adapter.currentList.filter { sample ->
+                val isHighConfidence = RuleRepository.isHighConfidenceSuspiciousDomain(
+                    domain = sample.domain,
+                    vendor = sample.lastVendor,
+                    novelHits = sample.novelHits,
+                    count = sample.count,
+                    appName = sample.lastAppName,
+                    dnsHits = sample.dnsHits,
+                    aliasHits = sample.aliasHits,
+                    tlsSniHits = sample.tlsSniHits,
+                    httpHits = sample.httpHits,
+                    pathHits = sample.pathHits,
+                    redirectHits = sample.redirectHits,
+                    appSignalHits = sample.appSignalHits,
+                    vendorSignalHits = sample.vendorSignalHits,
+                    confidenceBoost = sample.confidenceBoost,
+                    refererDomain = sample.refererDomain
                 )
+                val isCommunityApp = RuleRepository.isCommunityAppHint(sample.lastAppName)
+                val hasSomeSignals = sample.count >= 2 || sample.httpHits >= 1 || sample.pathHits >= 1
+                isHighConfidence || (isCommunityApp && hasSomeSignals)
             }.map { it.domain }
             addDomains(recommended)
         }
@@ -130,6 +133,7 @@ class SuspiciousDomainsActivity : BaseActivity() {
                     .toSet()
                 samples to added
             }
+            if (isFinishing || isDestroyed) return@launch
             allSamples = snapshot.first
             addedDomains = snapshot.second
             selectedDomains.removeAll(addedDomains)
@@ -170,14 +174,13 @@ class SuspiciousDomainsActivity : BaseActivity() {
             val added = withContext(Dispatchers.Default) {
                 RuleRepository.addRules(applicationContext, pendingDomains, RuleSource.MANUAL)
             }
-            if (added.isNotEmpty()) {
-                hasChanges = true
-                selectedDomains.removeAll(added.map { it.domain }.toSet())
-                if (AdBlockVpnService.isRunning) {
-                    startService(Intent(this@SuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
-                }
-                Toast.makeText(this@SuspiciousDomainsActivity, "已添加 ${added.size} 条拦截规则", Toast.LENGTH_SHORT).show()
-            } else {
+            if (isFinishing || isDestroyed) return@launch
+                if (added.isNotEmpty()) {
+                    hasChanges = true
+                    selectedDomains.removeAll(added.map { it.domain }.toSet())
+                    NetworkKernel.reloadIfRunning(this@SuspiciousDomainsActivity)
+                    Toast.makeText(this@SuspiciousDomainsActivity, "已添加 ${added.size} 条拦截规则", Toast.LENGTH_SHORT).show()
+                } else {
                 Toast.makeText(this@SuspiciousDomainsActivity, "这些域名已经在规则里了", Toast.LENGTH_SHORT).show()
             }
             loadSamples()
@@ -185,29 +188,44 @@ class SuspiciousDomainsActivity : BaseActivity() {
     }
 
     private fun updateSummary(visible: List<RuleRepository.SuspiciousDomainSample>) {
-        val actionableSelectedCount = selectedDomains.count { it !in addedDomains }
-        val selectableVisibleCount = visible.count { it.domain !in addedDomains }
-        val recommendedVisibleCount = visible.count {
-            it.domain !in addedDomains && RuleRepository.isHighConfidenceSuspiciousDomain(
-                domain = it.domain,
-                vendor = it.lastVendor,
-                novelHits = it.novelHits,
-                count = it.count,
-                appName = it.lastAppName,
-                dnsHits = it.dnsHits,
-                aliasHits = it.aliasHits,
-                tlsSniHits = it.tlsSniHits,
-                httpHits = it.httpHits,
-                pathHits = it.pathHits,
-                redirectHits = it.redirectHits,
-                appSignalHits = it.appSignalHits,
-                vendorSignalHits = it.vendorSignalHits,
-                confidenceBoost = it.confidenceBoost,
-                refererDomain = it.refererDomain
+        val recommendCount = visible.count { sample ->
+            val isHighConfidence = RuleRepository.isHighConfidenceSuspiciousDomain(
+                domain = sample.domain,
+                vendor = sample.lastVendor,
+                novelHits = sample.novelHits,
+                count = sample.count,
+                appName = sample.lastAppName,
+                dnsHits = sample.dnsHits,
+                aliasHits = sample.aliasHits,
+                tlsSniHits = sample.tlsSniHits,
+                httpHits = sample.httpHits,
+                pathHits = sample.pathHits,
+                redirectHits = sample.redirectHits,
+                appSignalHits = sample.appSignalHits,
+                vendorSignalHits = sample.vendorSignalHits,
+                confidenceBoost = sample.confidenceBoost,
+                refererDomain = sample.refererDomain
             )
+            val isCommunityApp = RuleRepository.isCommunityAppHint(sample.lastAppName)
+            val hasSomeSignals = sample.count >= 2 || sample.httpHits >= 1 || sample.pathHits >= 1
+            isHighConfidence || (isCommunityApp && hasSomeSignals)
+        }
+        binding.selectionSummary.text = buildString {
+            append("共 ")
+            append(visible.size)
+            append(" 条")
+            if (recommendCount > 0) {
+                append("，推荐添加 ")
+                append(recommendCount)
+                append(" 条")
+            }
         }
         val novelVisibleCount = visible.count { it.novelHits > 0 || RuleRepository.isNovelVendor(it.lastVendor) }
-        binding.selectionSummary.text = "已选择 ${actionableSelectedCount} 项，可选 ${selectableVisibleCount} 项，当前可见 ${visible.size} 项，推荐 ${recommendedVisibleCount} 项，小说专项 ${novelVisibleCount} 项"
+        val selectableVisibleCount = visible.count { it.domain !in addedDomains }
+        val recommendedVisibleCount = recommendCount - visible.count { it.domain in addedDomains && RuleRepository.isHighConfidenceSuspiciousDomain(it.domain, it.lastVendor, it.novelHits, it.count, it.lastAppName, it.dnsHits, it.aliasHits, it.tlsSniHits, it.httpHits, it.pathHits, it.redirectHits, it.appSignalHits, it.vendorSignalHits, it.confidenceBoost, it.refererDomain) }
+        val actionableSelectedCount = selectedDomains.count { domain ->
+            visible.any { it.domain == domain && domain !in addedDomains }
+        }
         binding.btnSelectVisible.isEnabled = selectableVisibleCount > 0
         binding.btnSelectVisible.alpha = if (selectableVisibleCount > 0) 1f else 0.6f
         binding.btnClearSelection.isEnabled = actionableSelectedCount > 0

@@ -17,11 +17,11 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.HanFeng.core.network.NetworkKernel
 import com.HanFeng.data.LogRepository
 import com.HanFeng.data.RuleRepository
 import com.HanFeng.databinding.ActivityImpactNormalNetworkBinding
 import com.HanFeng.databinding.ItemImpactNormalNetworkBinding
-import com.HanFeng.service.AdBlockVpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -33,6 +33,7 @@ class ImpactNormalNetworkActivity : BaseActivity() {
     private var candidates: List<RuleRepository.RemoteRuleRemovalCandidate> = emptyList()
     private var visibleCandidates: List<RuleRepository.RemoteRuleRemovalCandidate> = emptyList()
     private val selectedRuleIds = linkedSetOf<String>()
+    private var isLoading = false
     private var currentFilter = CandidateFilter.ALL
     private var currentGrouping = CandidateGrouping.NONE
 
@@ -50,7 +51,11 @@ class ImpactNormalNetworkActivity : BaseActivity() {
             isSelected = { selectedRuleIds.contains(it.rule.id) },
             onToggle = { candidate, checked ->
                 val ruleId = candidate.rule.id
-                if (checked) selectedRuleIds += ruleId else selectedRuleIds -= ruleId
+                if (checked && !selectedRuleIds.contains(ruleId)) {
+                    selectedRuleIds += ruleId
+                } else if (!checked) {
+                    selectedRuleIds -= ruleId
+                }
                 updateDeleteButton()
             }
         )
@@ -79,16 +84,33 @@ class ImpactNormalNetworkActivity : BaseActivity() {
     }
 
     private fun loadCandidates() {
+        if (isLoading) return
+        isLoading = true
+        setLoadingState(true)
+        
         lifecycleScope.launch {
-            val loaded = withContext(Dispatchers.Default) {
-                RuleRepository.getImpactNormalNetworkCandidates(applicationContext)
+            try {
+                val loaded = withContext(Dispatchers.Default) {
+                    RuleRepository.getImpactNormalNetworkCandidates(applicationContext)
+                }
+                if (isFinishing || isDestroyed) return@launch
+                candidates = loaded
+                isLoading = false
+                setLoadingState(false)
+                applyFilter(currentFilter, preserveSelection = false)
+                updateDeleteButton()
+            } catch (e: Exception) {
+                isLoading = false
+                setLoadingState(false)
+                Toast.makeText(this@ImpactNormalNetworkActivity, "加载失败：${e.message}", Toast.LENGTH_LONG).show()
             }
-            candidates = loaded
-            selectedRuleIds.clear()
-            selectedRuleIds += loaded.map { it.rule.id }
-            applyFilter(currentFilter, preserveSelection = true)
-            updateDeleteButton()
         }
+    }
+
+    private fun setLoadingState(loading: Boolean) {
+        binding.loadingProgress.visibility = if (loading) View.VISIBLE else View.GONE
+        binding.list.visibility = if (loading) View.GONE else View.VISIBLE
+        binding.emptyText.visibility = if (loading) View.GONE else if (visibleCandidates.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun applyFilter(filter: CandidateFilter, preserveSelection: Boolean = false) {
@@ -105,7 +127,7 @@ class ImpactNormalNetworkActivity : BaseActivity() {
         if (!preserveSelection) {
             selectedRuleIds.retainAll(visibleCandidates.map { it.rule.id }.toSet())
         }
-        adapter.submitList(visibleCandidates)
+        adapter.submitListWithForceUpdate(visibleCandidates)
         binding.emptyText.visibility = if (visibleCandidates.isEmpty()) View.VISIBLE else View.GONE
         binding.summaryText.text = buildSummaryText(visibleCandidates.size)
         updateFilterButtons()
@@ -157,8 +179,11 @@ class ImpactNormalNetworkActivity : BaseActivity() {
     }
 
     private fun selectAll() {
-        selectedRuleIds.clear()
-        selectedRuleIds += visibleCandidates.map { it.rule.id }
+        val visibleIds = visibleCandidates.map { it.rule.id }.toSet()
+        val unselectedInVisible = visibleIds - selectedRuleIds
+        if (unselectedInVisible.isNotEmpty()) {
+            selectedRuleIds += unselectedInVisible
+        }
         adapter.notifyDataSetChanged()
         updateDeleteButton()
     }
@@ -170,9 +195,14 @@ class ImpactNormalNetworkActivity : BaseActivity() {
     }
 
     private fun confirmDeleteSelectedRules() {
-        val selected = visibleCandidates.filter { it.rule.id in selectedRuleIds }
+        if (isLoading) {
+            Toast.makeText(this, "正在加载中，请稍后再试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val selected = candidates.filter { it.rule.id in selectedRuleIds }
+        LogRepository.append(this, "confirmDeleteSelectedRules: selectedRuleIds=${selectedRuleIds.size}, filtered=${selected.size}")
         if (selected.isEmpty()) {
-            Toast.makeText(this, "请至少选择一条规则", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "请先勾选需要删除的规则", Toast.LENGTH_SHORT).show()
             return
         }
         val preview = selected.take(8).joinToString("\n") { candidate ->
@@ -190,40 +220,68 @@ class ImpactNormalNetworkActivity : BaseActivity() {
                 append(" 条已省略")
             }
         }
-        MaterialAlertDialogBuilder(this)
-            .setTitle("确认删除所选规则")
-            .setMessage(message)
-            .setPositiveButton("确认删除") { _, _ -> deleteSelectedRules(selected) }
-            .setNegativeButton("取消", null)
-            .show()
+        try {
+            val dialog = runCatching {
+                StableDialog.builder(this@ImpactNormalNetworkActivity)
+                    .setTitle("确认删除所选规则")
+                    .setMessage(message)
+                    .setPositiveButton("确认删除") { _, _ -> 
+                        LogRepository.append(this@ImpactNormalNetworkActivity, "User confirmed delete, calling deleteSelectedRules")
+                        deleteSelectedRules(selected) 
+                    }
+                    .setNegativeButton("取消", null)
+            }.getOrNull()
+            
+            if (dialog != null) {
+                runCatching {
+                    dialog.show()
+                }.onFailure { e ->
+                    LogRepository.append(this@ImpactNormalNetworkActivity, "Dialog show failed: ${e.message ?: e.javaClass.simpleName}")
+                    Toast.makeText(this@ImpactNormalNetworkActivity, "对话框显示失败，请重试", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                LogRepository.append(this@ImpactNormalNetworkActivity, "Dialog builder failed")
+                Toast.makeText(this@ImpactNormalNetworkActivity, "无法显示确认对话框", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            LogRepository.append(this@ImpactNormalNetworkActivity, "Show delete confirmation dialog failed: ${e.message ?: e.javaClass.simpleName}")
+            Toast.makeText(this@ImpactNormalNetworkActivity, "对话框错误：${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun deleteSelectedRules(selected: List<RuleRepository.RemoteRuleRemovalCandidate>) {
-        val removedCount = RuleRepository.removeRulesByIds(this, selected.map { it.rule.id }.toSet())
-        LogRepository.append(this, "Requested remove impact-network candidates=${selected.size} actualRemoved=$removedCount")
+        val selectedIds = selected.asSequence()
+            .map { it.rule.id.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        LogRepository.append(this, "deleteSelectedRules: requested=${selected.size}, ids=${selectedIds.size}")
+        val removedCount = RuleRepository.removeRules(this, selectedIds, selected.map { it.rule })
+        LogRepository.append(this, "Delete impact-network candidates result: requested=${selected.size} actualRemoved=$removedCount")
         if (removedCount <= 0) {
             Toast.makeText(this, "未删除任何规则，请重试一次", Toast.LENGTH_SHORT).show()
             loadCandidates()
             return
         }
         hasChanges = true
-        if (AdBlockVpnService.isRunning) {
-            startService(Intent(this, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
-        }
+        NetworkKernel.reloadIfRunning(this)
         Toast.makeText(this, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
-        loadCandidates()
+        selectedRuleIds.clear()
+        loadCandidates()  // 重新加载列表
+        adapter.submitListWithForceUpdate(emptyList())  // 先清空
+        adapter.submitListWithForceUpdate(visibleCandidates)  // 再刷新
     }
 
     private fun updateDeleteButton() {
-        val visibleIds = visibleCandidates.map { it.rule.id }.toSet()
-        val count = selectedRuleIds.count { it in visibleIds }
+        val count = selectedRuleIds.size
         binding.btnDeleteSelected.isEnabled = count > 0
         binding.btnDeleteSelected.alpha = if (count > 0) 1f else 0.6f
         binding.btnDeleteSelected.text = if (count > 0) "删除当前所选规则（$count）" else "删除当前所选规则"
         binding.btnClearSelection.isEnabled = count > 0
         binding.btnClearSelection.alpha = if (count > 0) 1f else 0.6f
-        binding.btnSelectAll.isEnabled = visibleCandidates.isNotEmpty() && count < visibleCandidates.size
-        binding.btnSelectAll.alpha = if (binding.btnSelectAll.isEnabled) 1f else 0.6f
+        val visibleIds = visibleCandidates.map { it.rule.id }.toSet()
+        val hasUnselectedInVisible = visibleIds.any { it !in selectedRuleIds }
+        binding.btnSelectAll.isEnabled = hasUnselectedInVisible
+        binding.btnSelectAll.alpha = if (hasUnselectedInVisible) 1f else 0.6f
     }
 
     private fun buildSummaryText(count: Int): String {
@@ -273,6 +331,10 @@ class ImpactNormalNetworkActivity : BaseActivity() {
         private val onToggle: (RuleRepository.RemoteRuleRemovalCandidate, Boolean) -> Unit
     ) : ListAdapter<RuleRepository.RemoteRuleRemovalCandidate, CandidateAdapter.ViewHolder>(DIFF) {
 
+        fun submitListWithForceUpdate(newList: List<RuleRepository.RemoteRuleRemovalCandidate>) {
+            submitList(newList.map { it })
+        }
+
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
             return ViewHolder(ItemImpactNormalNetworkBinding.inflate(LayoutInflater.from(parent.context), parent, false))
         }
@@ -287,9 +349,17 @@ class ImpactNormalNetworkActivity : BaseActivity() {
                 binding.metaText.text = buildMetaText(item)
                 binding.reasonText.text = item.reasons.joinToString("；")
                 binding.selectBox.setOnCheckedChangeListener(null)
-                binding.selectBox.isChecked = isSelected(item)
-                binding.selectBox.setOnCheckedChangeListener { _, checked -> onToggle(item, checked) }
-                binding.root.setOnClickListener { binding.selectBox.toggle() }
+                val selected = isSelected(item)
+                binding.selectBox.isChecked = selected
+                LogRepository.append(binding.root.context, "CandidateAdapter bind: domain=${item.rule.domain}, selected=$selected")
+                binding.selectBox.setOnCheckedChangeListener { _, checked -> 
+                    LogRepository.append(binding.root.context, "Candidate checkbox changed: domain=${item.rule.domain}, checked=$checked")
+                    onToggle(item, checked) 
+                }
+                binding.root.setOnClickListener { 
+                    LogRepository.append(binding.root.context, "Candidate root clicked: domain=${item.rule.domain}, will toggle checkbox")
+                    binding.selectBox.toggle() 
+                }
                 binding.root.setOnLongClickListener {
                     showCandidateDetail(item)
                     true
@@ -327,11 +397,11 @@ class ImpactNormalNetworkActivity : BaseActivity() {
             append("\n\n判断原因：\n")
             append(item.reasons.joinToString("\n") { "- $it" })
         }
-        MaterialAlertDialogBuilder(this)
+        StableDialog.builder(this)
             .setTitle("规则详情")
             .setMessage(details)
             .setPositiveButton("我知道了", null)
-            .show()
+            .showSafely(this, "Show impact rule detail dialog failed")
     }
 
     private enum class CandidateFilter(val label: String) {

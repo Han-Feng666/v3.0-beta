@@ -18,18 +18,19 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.Fragment
 import com.HanFeng.BuildConfig
 import com.HanFeng.R
+import com.HanFeng.core.network.NetworkKernel
 import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.HttpsMitmRepository
 import com.HanFeng.data.ShizukuAdControlRepository
 import com.HanFeng.data.ShizukuRepository
-import com.HanFeng.service.AdBlockVpnService
 
 class HomeFragment : Fragment(R.layout.fragment_home) {
     private val uiHandler = Handler(Looper.getMainLooper())
     private val statusRefreshRunnable = Runnable { updateAllStatus() }
+    private var cachedShizukuUiState: CachedShizukuUiState? = null
     private val vpnStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == AdBlockVpnService.ACTION_STATUS_CHANGED) {
+            if (intent?.action == NetworkKernel.statusChangedAction) {
                 updateAllStatus()
             }
         }
@@ -37,7 +38,7 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
     private var vpnStatusReceiverRegistered = false
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        val activity = requireActivity() as MainActivity
+        val activity = activity as? MainActivity ?: return
         view.findViewById<ImageView>(R.id.homeBackground).applyCustomAssetBackground("custom/home_background")
         val homeContent = view.findViewById<View>(R.id.homeContent)
         val toggle = view.findViewById<Button>(R.id.btnToggle)
@@ -56,7 +57,7 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         toggle.setOnClickListener {
             activity.requestToggleVpn()
             uiHandler.removeCallbacks(statusRefreshRunnable)
-            uiHandler.postDelayed(statusRefreshRunnable, 450)
+            updateAllStatus()
         }
         view.findViewById<Button>(R.id.btnGuide).setOnClickListener { activity.showGuideDialog() }
         view.findViewById<Button>(R.id.btnWhitelist).setOnClickListener { activity.openWhitelist() }
@@ -65,7 +66,7 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         updateAllStatus()
         view.findViewById<View>(R.id.homeButtons).apply {
             post {
-                val params = layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
+                val params = layoutParams as? androidx.constraintlayout.widget.ConstraintLayout.LayoutParams ?: return@post
                 params.verticalBias = 0.53f
                 layoutParams = params
             }
@@ -89,13 +90,14 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         view?.findViewById<Switch>(R.id.switchHttpDecrypt)?.setOnCheckedChangeListener(null)
         unregisterVpnStatusReceiver()
         uiHandler.removeCallbacksAndMessages(null)
+        cachedShizukuUiState = null
         super.onDestroyView()
     }
 
     private fun registerVpnStatusReceiverIfNeeded() {
         val ctx = context ?: return
         if (vpnStatusReceiverRegistered) return
-        val filter = IntentFilter(AdBlockVpnService.ACTION_STATUS_CHANGED)
+        val filter = IntentFilter(NetworkKernel.statusChangedAction)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             ctx.registerReceiver(vpnStatusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
@@ -124,8 +126,9 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         val ctx = context ?: return
         val enabled = FeatureSettingsRepository.isAdBlockEnabled(ctx)
         val revokedByOtherVpn = FeatureSettingsRepository.isVpnRevokedByOtherVpn(ctx)
+        val runtime = NetworkKernel.snapshot(ctx)
         toggle.text = when {
-            AdBlockVpnService.isRunning -> "停止拦截"
+            runtime.isRunning -> "停止拦截"
             revokedByOtherVpn && enabled -> "VPN共存中"
             else -> "开启拦截"
         }
@@ -133,23 +136,16 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
 
     private fun updateStatusText(statusText: TextView) {
         val ctx = context ?: return
-        val vpnRunning = AdBlockVpnService.isRunning
-        val adBlockEnabled = FeatureSettingsRepository.isAdBlockEnabled(ctx)
-        val revokedByOtherVpn = FeatureSettingsRepository.isVpnRevokedByOtherVpn(ctx)
+        val runtime = NetworkKernel.snapshot(ctx)
+        val vpnRunning = runtime.isRunning
+        val adBlockEnabled = runtime.adBlockEnabled
+        val revokedByOtherVpn = runtime.revokedByOtherVpn
         val httpDecryptEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(ctx)
         val certificateInstalled = HttpsMitmRepository.isCertificateInstalled(ctx)
-        val shizukuStatus = ShizukuRepository.getStatus(ctx)
         val shizukuEnabled = com.HanFeng.data.AppSettingsRepository.isShizukuEnabled(ctx)
-        val shizukuServiceReady = if (shizukuEnabled && shizukuStatus.installed && shizukuStatus.binderAlive) {
-            ShizukuAdControlRepository.isServiceAlive()
-        } else {
-            false
-        }
-        val shizukuReady = shizukuEnabled && shizukuStatus.installed && shizukuStatus.binderAlive && (shizukuStatus.permissionGranted || shizukuServiceReady)
-        val shizukuMode = when {
-            shizukuServiceReady && !shizukuStatus.permissionGranted -> "UserService"
-            else -> shizukuStatus.runningMode
-        }
+        val shizukuUiState = resolveShizukuUiState(ctx, shizukuEnabled)
+        val shizukuReady = shizukuUiState.ready
+        val shizukuMode = shizukuUiState.mode
         val workStatus = when {
             vpnRunning -> "运行中"
             revokedByOtherVpn && adBlockEnabled -> "VPN共存中"
@@ -169,12 +165,12 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         }
         val shizukuText = when {
             !shizukuEnabled -> "未启用"
-            !shizukuStatus.installed -> "未安装"
-            !shizukuStatus.binderAlive -> "未启动"
-            shizukuServiceReady && !shizukuStatus.permissionGranted -> "已连接 (${shizukuMode} / 兼容模式)"
-            shizukuServiceReady -> "已连接 (${shizukuMode})"
-            !shizukuStatus.permissionStateKnown -> "权限状态异常"
-            shizukuStatus.permissionGranted -> "已授权 (${shizukuMode}，服务连接中)"
+            !shizukuUiState.installed -> "未安装"
+            !shizukuUiState.binderAlive -> "未启动"
+            shizukuUiState.serviceReady && !shizukuUiState.permissionGranted -> "已连接 (${shizukuMode} / 兼容模式)"
+            shizukuUiState.serviceReady -> "已连接 (${shizukuMode})"
+            !shizukuUiState.permissionStateKnown -> "权限状态异常"
+            shizukuUiState.permissionGranted -> "已授权 (${shizukuMode}，服务连接中)"
             else -> "服务连接中 (${shizukuMode})"
         }
         statusText.text = buildString {
@@ -221,5 +217,46 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
                 }
             }
         }
+    }
+
+    private fun resolveShizukuUiState(context: Context, shizukuEnabled: Boolean): CachedShizukuUiState {
+        val now = System.currentTimeMillis()
+        cachedShizukuUiState?.takeIf {
+            it.enabled == shizukuEnabled && now - it.cachedAt <= SHIZUKU_STATUS_CACHE_MILLIS
+        }?.let { return it }
+        val status = ShizukuRepository.getStatus(context)
+        val serviceReady = if (shizukuEnabled && status.installed && status.binderAlive) {
+            ShizukuAdControlRepository.isServiceAlive()
+        } else {
+            false
+        }
+        val mode = if (serviceReady && !status.permissionGranted) "UserService" else status.runningMode
+        return CachedShizukuUiState(
+            enabled = shizukuEnabled,
+            installed = status.installed,
+            binderAlive = status.binderAlive,
+            permissionGranted = status.permissionGranted,
+            permissionStateKnown = status.permissionStateKnown,
+            serviceReady = serviceReady,
+            ready = shizukuEnabled && status.installed && status.binderAlive && (status.permissionGranted || serviceReady),
+            mode = mode,
+            cachedAt = now
+        ).also { cachedShizukuUiState = it }
+    }
+
+    private data class CachedShizukuUiState(
+        val enabled: Boolean,
+        val installed: Boolean,
+        val binderAlive: Boolean,
+        val permissionGranted: Boolean,
+        val permissionStateKnown: Boolean,
+        val serviceReady: Boolean,
+        val ready: Boolean,
+        val mode: String,
+        val cachedAt: Long
+    )
+
+    companion object {
+        private const val SHIZUKU_STATUS_CACHE_MILLIS = 5_000L
     }
 }

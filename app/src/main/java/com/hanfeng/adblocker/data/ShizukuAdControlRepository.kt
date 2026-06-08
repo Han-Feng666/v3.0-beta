@@ -20,11 +20,13 @@ object ShizukuAdControlRepository {
     @Volatile private var lastBindAttemptAt = 0L
     @Volatile private var lastBindLogAt = 0L
     @Volatile private var lastContext: Context? = null
+    @Volatile private var serviceMarkedDead = false
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = IAdControlService.Stub.asInterface(binder)
             binding = false
+            serviceMarkedDead = false
             logBindEvent(name, binder, "connected")
         }
 
@@ -56,6 +58,8 @@ object ShizukuAdControlRepository {
     fun isReady(context: Context): Boolean {
         return AppSettingsRepository.isShizukuEnabled(context) && ShizukuRepository.canAttemptUserService(context)
     }
+
+    fun getServiceNoBind(): IAdControlService? = liveService()
 
     fun ensureBound(context: Context): Boolean {
         lastContext = context.applicationContext
@@ -105,7 +109,11 @@ object ShizukuAdControlRepository {
     fun blockPackageNotifications(context: Context, packageName: String): Boolean {
         val normalized = packageName.trim()
         if (normalized.isBlank()) return false
-        val result = getService(context)?.blockPackageNotifications(normalized) == true
+        val result = runCatching {
+            getService(context)?.blockPackageNotifications(normalized) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku block package notifications failed: ${e.message ?: e.javaClass.simpleName} package=$normalized")
+        }.getOrDefault(false)
         LogRepository.append(context, "Shizuku block package notifications package=$normalized success=$result")
         return result
     }
@@ -113,7 +121,11 @@ object ShizukuAdControlRepository {
     fun allowPackageNotifications(context: Context, packageName: String): Boolean {
         val normalized = packageName.trim()
         if (normalized.isBlank()) return false
-        val result = getService(context)?.allowPackageNotifications(normalized) == true
+        val result = runCatching {
+            getService(context)?.allowPackageNotifications(normalized) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku allow package notifications failed: ${e.message ?: e.javaClass.simpleName} package=$normalized")
+        }.getOrDefault(false)
         LogRepository.append(context, "Shizuku allow package notifications package=$normalized success=$result")
         return result
     }
@@ -121,23 +133,37 @@ object ShizukuAdControlRepository {
     fun disablePackage(context: Context, packageName: String): Boolean {
         val normalized = packageName.trim()
         if (normalized.isBlank()) return false
-        val result = getService(context)?.disablePackage(normalized) == true
-        LogRepository.append(context, "Shizuku disable package package=$normalized success=$result")
+        val beforeStatus = queryPackageStatus(context, normalized)
+        val result = runCatching {
+            getService(context)?.disablePackage(normalized) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku disable package failed: ${e.message ?: e.javaClass.simpleName} package=$normalized before=${beforeStatus.enabledLabel}")
+        }.getOrDefault(false)
+        LogRepository.append(context, "Shizuku disable package package=$normalized before=${beforeStatus.enabledLabel} success=$result")
         return result
     }
 
     fun enablePackage(context: Context, packageName: String): Boolean {
         val normalized = packageName.trim()
         if (normalized.isBlank()) return false
-        val result = getService(context)?.enablePackage(normalized) == true
-        LogRepository.append(context, "Shizuku enable package package=$normalized success=$result")
+        val beforeStatus = queryPackageStatus(context, normalized)
+        val result = runCatching {
+            getService(context)?.enablePackage(normalized) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku enable package failed: ${e.message ?: e.javaClass.simpleName} package=$normalized before=${beforeStatus.enabledLabel}")
+        }.getOrDefault(false)
+        LogRepository.append(context, "Shizuku enable package package=$normalized before=${beforeStatus.enabledLabel} success=$result")
         return result
     }
 
     fun disableComponent(context: Context, componentName: String): Boolean {
         val normalized = componentName.trim()
         if (normalized.isBlank()) return false
-        val result = getService(context)?.disableComponent(normalized) == true
+        val result = runCatching {
+            getService(context)?.disableComponent(normalized) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku disable component failed: ${e.message ?: e.javaClass.simpleName} component=$normalized")
+        }.getOrDefault(false)
         LogRepository.append(context, "Shizuku disable component component=$normalized success=$result")
         return result
     }
@@ -145,7 +171,11 @@ object ShizukuAdControlRepository {
     fun enableComponent(context: Context, componentName: String): Boolean {
         val normalized = componentName.trim()
         if (normalized.isBlank()) return false
-        val result = getService(context)?.enableComponent(normalized) == true
+        val result = runCatching {
+            getService(context)?.enableComponent(normalized) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku enable component failed: ${e.message ?: e.javaClass.simpleName} component=$normalized")
+        }.getOrDefault(false)
         LogRepository.append(context, "Shizuku enable component component=$normalized success=$result")
         return result
     }
@@ -153,16 +183,26 @@ object ShizukuAdControlRepository {
     fun suspendPackage(context: Context, packageName: String): Boolean {
         val normalized = packageName.trim()
         if (normalized.isBlank()) return false
-        val result = getService(context)?.suspendPackage(normalized) == true
-        LogRepository.append(context, "Shizuku suspend package package=$normalized success=$result")
+        val beforeStatus = queryPackageStatus(context, normalized)
+        val result = runCatching {
+            getService(context)?.suspendPackage(normalized) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku suspend package failed: ${e.message ?: e.javaClass.simpleName} package=$normalized before=${if (beforeStatus.suspended) "suspended" else "active"}")
+        }.getOrDefault(false)
+        LogRepository.append(context, "Shizuku suspend package package=$normalized before=${if (beforeStatus.suspended) "suspended" else "active"} success=$result")
         return result
     }
 
     fun unsuspendPackage(context: Context, packageName: String): Boolean {
         val normalized = packageName.trim()
         if (normalized.isBlank()) return false
-        val result = getService(context)?.unsuspendPackage(normalized) == true
-        LogRepository.append(context, "Shizuku unsuspend package package=$normalized success=$result")
+        val beforeStatus = queryPackageStatus(context, normalized)
+        val result = runCatching {
+            getService(context)?.unsuspendPackage(normalized) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku unsuspend package failed: ${e.message ?: e.javaClass.simpleName} package=$normalized before=${if (beforeStatus.suspended) "suspended" else "active"}")
+        }.getOrDefault(false)
+        LogRepository.append(context, "Shizuku unsuspend package package=$normalized before=${if (beforeStatus.suspended) "suspended" else "active"} success=$result")
         return result
     }
 
@@ -170,8 +210,13 @@ object ShizukuAdControlRepository {
         val normalized = packageName.trim()
         if (normalized.isBlank()) return false
         val safeUserId = if (userId >= 0) userId else 0
-        val result = getService(context)?.uninstallPackageForUser(normalized, safeUserId) == true
-        LogRepository.append(context, "Shizuku uninstall package package=$normalized user=$safeUserId success=$result")
+        val beforeStatus = queryPackageStatus(context, normalized)
+        val result = runCatching {
+            getService(context)?.uninstallPackageForUser(normalized, safeUserId) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku uninstall package failed: ${e.message ?: e.javaClass.simpleName} package=$normalized user=$safeUserId installed=${beforeStatus.installed}")
+        }.getOrDefault(false)
+        LogRepository.append(context, "Shizuku uninstall package package=$normalized user=$safeUserId installed=${beforeStatus.installed} success=$result")
         return result
     }
 
@@ -186,18 +231,38 @@ object ShizukuAdControlRepository {
                 alive = false
             )
         }
-        val remote = getService(context)
+        val remote = if (!serviceMarkedDead) getServiceNoBind() else null
         val alive = runCatching { remote?.ping() == true }.getOrDefault(false)
-        val installed = remote?.isPackageInstalled(normalized)
+        if (!alive && remote != null) {
+            invalidateService()
+            serviceMarkedDead = true
+        }
+        val installed = runCatching { remote?.isPackageInstalled(normalized) }
+            .onFailure {
+                invalidateService()
+                serviceMarkedDead = true
+                LogRepository.append(context, "[PromoGovern] service query failed for $normalized: ${it.message}")
+            }
+            .getOrNull()
             ?: runCatching {
                 context.packageManager.getPackageInfo(normalized, 0)
                 true
             }.getOrDefault(false)
-        val enabledState = remote?.getPackageEnabledState(normalized)
+        val enabledState = runCatching { remote?.getPackageEnabledState(normalized) }
+            .onFailure {
+                invalidateService()
+                serviceMarkedDead = true
+            }
+            .getOrNull()
             ?: runCatching {
                 context.packageManager.getApplicationEnabledSetting(normalized)
             }.getOrDefault(PackageManager.COMPONENT_ENABLED_STATE_DEFAULT)
-        val suspended = remote?.isPackageSuspended(normalized)
+        val suspended = runCatching { remote?.isPackageSuspended(normalized) }
+            .onFailure {
+                invalidateService()
+                serviceMarkedDead = true
+            }
+            .getOrNull()
             ?: runCatching {
                 val info = context.packageManager.getPackageInfo(normalized, 0)
                 (info.applicationInfo?.flags ?: 0 and android.content.pm.ApplicationInfo.FLAG_SUSPENDED) != 0

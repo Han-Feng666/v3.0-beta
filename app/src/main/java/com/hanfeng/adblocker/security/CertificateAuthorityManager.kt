@@ -223,7 +223,7 @@ object CertificateAuthorityManager {
         val certDir = File(context.filesDir, CERT_DIR)
         val caKeystoreName = HttpsMitmRepository.getCaKeystoreFileName(context) ?: CERT_FILE_NAME
         val caKeystoreFile = File(certDir, caKeystoreName)
-        require(caKeystoreFile.exists() && caKeystoreFile.length() > 0) {
+        check(caKeystoreFile.exists() && caKeystoreFile.length() > 0) {
             "CA keystore file missing or empty: ${caKeystoreFile.absolutePath}"
         }
         val keyStore = KeyStore.getInstance(KEYSTORE_TYPE)
@@ -231,9 +231,9 @@ object CertificateAuthorityManager {
             keyStore.load(input, CERT_PASSWORD.toCharArray())
         }
         val privateKey = keyStore.getKey(CERT_ALIAS, CERT_PASSWORD.toCharArray()) as? PrivateKey
-            ?: throw IllegalStateException("CA keystore missing entry '$CERT_ALIAS'")
+            ?: error("CA keystore missing entry '$CERT_ALIAS'")
         val certificate = keyStore.getCertificate(CERT_ALIAS) as? X509Certificate
-            ?: throw IllegalStateException("CA keystore certificate missing for entry '$CERT_ALIAS'")
+            ?: error("CA keystore certificate missing for entry '$CERT_ALIAS'")
         return CaBundle(privateKey, certificate)
     }
 

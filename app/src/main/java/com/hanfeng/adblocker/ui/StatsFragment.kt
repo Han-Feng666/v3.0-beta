@@ -87,7 +87,6 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
         addStatCard("今日拦截", dashboard.todayBlocked.toString())
         addStatCard("累计拦截", dashboard.totalBlocked.toString())
         addStatCard("DNS 总拦截", dashboard.dnsBlocked.toString())
-        addStatCard("MITM 总拦截", dashboard.mitmBlocked.toString())
         addStatCard("请求总数", dashboard.requestTotal.toString())
         addStatCard("响应总数", dashboard.responseTotal.toString())
         addStatCard("累计节省流量", formatBytes(dashboard.bytesSaved))
@@ -175,6 +174,10 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
         val host = activity as? MainActivity ?: return
         runCatching {
             startActivity(RankingDetailActivity.createIntent(host, title, type))
+        }.onFailure {
+            context?.let {
+                android.widget.Toast.makeText(it, "打开排行榜详情失败", android.widget.Toast.LENGTH_SHORT).show()
+            }
         }
     }
 

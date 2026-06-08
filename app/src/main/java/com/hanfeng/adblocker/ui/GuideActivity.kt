@@ -121,24 +121,27 @@ class GuideActivity : BaseActivity() {
         private val sectionTitleRegex = Regex("^[一二三四五六七八九十]+、.+")
         private val DEFAULT_GUIDE_CONTENT =
             "APP作者：寒枫，酷安ID：寒枫颜值担当\n" +
-            "本说明覆盖首页、规则页、统计页、MITM、Shizuku、可疑域名、加速器共存、规则导入与排障流程。\n" +
-            "建议先完整看一遍首次使用、MITM 教程、规则支持范围和常见问题，再按自己的机型和需求选择功能组合。\n\n" +
+            "本说明覆盖首页、规则页、拦截与放行、统计页、MITM、Shizuku、可疑域名、加速器共存、规则导入与排障流程。\n" +
+            "建议先完整看一遍首次使用、MITM 教程、Shizuku 教程、规则支持范围和常见问题，再按自己的机型和需求选择功能组合。\n\n" +
             "一、首次使用完整教程\n" +
             "1. 打开应用后先停留在首页，确认状态卡可正常显示。\n" +
-            "2. 点击 \"开启拦截\"，系统会弹出 VPN 授权，点击允许。\n" +
+            "2. 点击 \"开启拦截\"，系统会弹出 VPN 授权，点击允许。若已被其他 VPN 占用，首页会显示 VPN 共存中。\n" +
             "3. Android 13 及以上建议允许通知权限，方便前台服务稳定显示。\n" +
             "4. 若黑白名单、加速器共存或应用识别结果不完整，请到系统设置里手动允许应用列表相关权限。\n" +
             "5. 第一次建议先只用 DNS 拦截确认联网正常，再按需开启 MITM 模式。\n" +
-            "6. 如果你需要更强的系统推广治理和连接归属增强，再去设置里开启 Shizuku 增强。\n\n" +
+            "6. 如果你需要更强的系统推广治理和连接归属增强，再去设置里开启 Shizuku 增强。\n" +
+            "7. 需要 MITM 证书时，首页开启 MITM 开关后会自动导出证书文件。\n" +
+            "8. 追求更省电时，优先只开 DNS 拦截；MITM 和 Shizuku 按需开启。\n\n" +
             "二、首页所有功能说明\n" +
             "1. 开启拦截 / 停止拦截：启动或停止寒枫本地 VPN 拦截内核。点击后按钮文本会按当前运行状态实时刷新。\n" +
             "2. MITM 模式开关：开启后会导出证书文件，并对命中的 HTTP/HTTPS/HTTP2 流量进行增强过滤。\n" +
             "3. 使用说明：打开当前帮助文档。\n" +
             "4. 黑白名单：管理完全放行应用。加入白名单的应用会绕过寒枫拦截链。\n" +
-            "5. 加速器共存：管理 VPN、代理、加速器和需要跟随它们走同一链路的目标应用。\n" +
-            "6. 设置：进入 Shizuku、隐藏后台等设置项。\n" +
+            "5. 黑白名单页也提供加速器共存模式，可管理 VPN、代理、加速器和需要跟随它们走同一链路的目标应用。\n" +
+            "6. 设置：进入 Shizuku、隐藏后台、共存设置和加群入口等设置项。\n" +
             "7. 状态卡当前会显示：工作状态、拦截模式、证书状态、Shizuku 状态。\n" +
-            "8. Shizuku 状态会区分：未启用、未安装、未启动、未授权、已连接、服务连接中。\n\n" +
+            "8. Shizuku 状态会区分：未启用、未安装、未启动、已连接、服务连接中等状态。\n" +
+            "9. 首页状态会在短时间内缓存 Shizuku 检查结果，减少重复探测带来的耗电和卡顿。\n\n" +
             "三、MITM 模式详细教程\n" +
             "1. 开启方式：首页打开 MITM 模式开关。\n" +
             "2. 开启后应用会把证书导出到 Download/HanFeng/HanFeng.crt。\n" +
@@ -154,17 +157,20 @@ class GuideActivity : BaseActivity() {
             "4. Shizuku 目前用于两类增强：\n" +
             "   - 连接归属增强：辅助识别流量属于哪个 App，提高应用级拦截准确率。\n" +
             "   - 系统推广治理：对系统推广包执行停用、恢复、暂停、恢复暂停。\n" +
-            "5. 设置页的系统推广治理会优先展示已安装项，并区分系统推广、负一屏推荐、浏览器推荐、主题壁纸等分类。\n" +
-            "6. 单项治理当前支持：智能治理、停用、恢复、暂停、恢复暂停。智能治理会优先停用，失败后自动回退为暂停。\n" +
-            "7. 批量治理当前支持：智能治理已安装推广项、批量停用、批量恢复、批量暂停、批量恢复暂停。\n" +
-            "8. 对已纳入系统推广治理目录的系统推荐 App，寒枫会更积极地把它们识别为广告型上下文，并减少无意义的未知样本重复采集。\n\n" +
+            "5. 当前版本已经统一了首页、设置页、治理页的 Shizuku 预热和状态判断逻辑。\n" +
+            "6. 当首页显示兼容模式时，说明 Binder 已连通，UserService 可直接参与增强。\n" +
+            "7. 当首页显示服务连接中时，通常等待几秒会自动恢复；VPN 运行中也会按冷却周期自动重试连接归属服务。\n" +
+            "8. 设置页的系统推广治理会优先展示已安装项，并区分系统推广、负一屏推荐、浏览器推荐、主题壁纸等分类。\n" +
+            "9. 单项治理当前支持：智能治理、停用、恢复、暂停、恢复暂停。智能治理会优先停用，失败后自动回退为暂停。\n" +
+            "10. 批量治理当前支持：智能治理已安装推广项、批量停用、批量恢复、批量暂停、批量恢复暂停。\n" +
+            "11. 对已纳入系统推广治理目录的系统推荐 App，寒枫会更积极地把它们识别为广告型上下文，并减少无意义的未知样本重复采集。\n\n" +
             "五、加速器共存与本地代理共存教程\n" +
             "1. 如果你在用 VPN、代理、加速器，先到首页点击 \"加速器共存\"。\n" +
             "2. 把 VPN / 加速器本体勾选进去。\n" +
             "3. 如果目标 App 需要跟着该加速器走同一链路，也把目标 App 一起勾选。\n" +
             "4. 若你的代理软件提供本地端口，可在共存页开启本地代理共存，填写 127.0.0.1 和端口。\n" +
             "5. 当前本地代理共存优先处理 TCP，并支持优先 SOCKS5、失败回退 HTTP CONNECT。\n" +
-            "6. 对目标 App 的 QUIC/UDP 443，寒枫会尽量推动回退到 TCP，再进入本地代理链。\n" +
+            "6. 对部分目标 App 的 QUIC/UDP 443，寒枫会尽量推动回退到 TCP，再进入本地代理链。\n" +
             "7. 加入共存后的应用会脱离寒枫的 DNS / MITM 拦截链，所以广告拦截能力会下降，但 VPN/代理稳定性会更高。\n\n" +
             "六、规则页所有功能说明\n" +
             "1. 添加规则：把输入框中的文本解析后导入规则库。\n" +
@@ -172,16 +178,17 @@ class GuideActivity : BaseActivity() {
             "3. 清空：清空输入框。\n" +
             "4. 导入规则：通过文件选择器导入本地规则文件。\n" +
             "5. 疑似广告域名：查看运行中自动发现的可疑广告域名样本。\n" +
-            "6. 筛选非广告：辅助清理明显误加或低价值规则。\n" +
+            "6. 筛选非广告：执行规则去重与整理。\n" +
             "7. 搜索框：按域名、厂商、路径关键词、正则文本等过滤。\n" +
-            "8. 规则项支持单删、批量删除、重新分类。\n" +
-            "9. 删除后如果 VPN 正在运行，规则会即时 reload 生效。\n\n" +
+            "8. 规则项支持查看详情、手动分类、单删、批量删除。\n" +
+            "9. 删除后如果 VPN 正在运行，规则会即时 reload 生效。\n" +
+            "10. 拦截与放行：查看最近哪些域名被拦截、哪些域名被放行，并显示命中应用和时间。\n\n" +
             "七、可疑域名页面说明\n" +
             "1. 可疑域名页面用于展示运行时自动采集到的广告样本。\n" +
             "2. 当前样本评分会综合这些信号：DNS、别名链、TLS SNI、HTTP body、HTTP redirect、路径命中、应用上下文、厂商上下文、置信加权。\n" +
-            "3. 你可以按搜索、筛选、批量选择、推荐添加、一键加入规则库等方式处理它们。\n" +
+            "3. 你可以按搜索、仅看未添加、仅看已添加、小说专项筛选、批量选择、推荐添加、一键加入规则库等方式处理它们。\n" +
             "4. 添加后会即时触发规则重载。\n" +
-            "5. 日志导出里也会带出可疑域名多信号 CSV 报表，方便后续补规则。\n\n" +
+            "5. 列表里会展示最近应用、厂商、评分、小说专项次数和线索摘要，方便后续补规则。\n\n" +
             "八、当前支持拦截的广告样式\n" +
             "1. DNS 域名广告：已知广告域名、广告 SDK 域名、联盟广告域名、公共加密 DNS 反绕过目标。\n" +
             "2. Hosts 型广告：通过 hosts、dnsmasq、SmartDNS、OpenWrt 这类域名规则可直接落地的广告目标。\n" +
@@ -195,36 +202,78 @@ class GuideActivity : BaseActivity() {
             "10. 底部悬浮 Banner、暂停页 Banner、播放器广告、部分激励视频和广告 JSON。\n" +
             "11. 广告跳转与落地域名：现在会单独采集 HTTP redirect 目标并参与评分。\n" +
             "12. 系统推广和负一屏推荐：可结合 Shizuku 做包级治理。\n\n" +
-            "九、当前支持的规则样式\n" +
-            "1. 纯域名规则：一行一个域名、子域名、广告域名列表。\n" +
-            "2. Hosts 规则：如 0.0.0.0 domain.com、127.0.0.1 domain.com。\n" +
-            "3. dnsmasq / SmartDNS / OpenWrt 域名规则：如 address=/domain.com/0.0.0.0、server=/domain.com/、ipset=/domain.com/...、nftset=/domain.com/...。\n" +
-            "4. AdGuard / ABP 域名型规则：如 ||domain.com^、@@||domain.com^。\n" +
-            "5. 一部分 AdGuard 修饰符：如 dnstype=、important、match-case、badfilter、app=、domain=、denyallow=、path=、removeparam=、csp=、urlblock、first-party / 1p、third-party / 3p。\n" +
-            "6. 端口规则：dst-port=、src-port=。\n" +
-            "7. 应用规则：package-name、process-name，以及 app= 修饰符。\n" +
-            "8. 星号应用 / 端口规则：如 package-name,com.example.app、dst-port,443、* 配合端口或应用范围的规则。\n" +
-            "9. 星号端口规则：如 *:41826\$network。\n" +
-            "10. IP 网络段规则：IP-CIDR、IP-CIDR6。\n" +
-            "11. 域名加端口规则：如 ||domain.com^\$dst-port=443。\n" +
-            "12. Clash / Surge / Loon / Shadowrocket 常见规则：DOMAIN、DOMAIN-SUFFIX、DOMAIN-KEYWORD、DOMAIN-FULL、HOST、HOST-SUFFIX、HOSTNAME、HOSTNAME-KEYWORD、HOST-WILDCARD、DOMAIN-REGEX、PACKAGE-NAME、PROCESS-NAME、DEST-PORT、SRC-PORT。\n" +
-            "13. 一部分 URL / path / keyword / regex 规则：如 URL-KEYWORD、URL-REGEX、path=、部分请求路径匹配。\n" +
-            "14. 一部分 cosmetic 规则和 cosmetic exception 规则：如 ##、#@#。\n" +
-            "15. 一部分应用上下文和请求上下文规则。\n" +
-            "16. 注释、空行、行尾注释、混合规则文件、部分厂商标记注释。\n\n" +
-            "十、规则支持边界说明\n" +
-            "1. 生效最稳定的规则类型：纯域名、Hosts、dnsmasq 域名规则、AdGuard / ABP 域名型规则、IP-CIDR、带端口限制的 IP 规则、域名加端口规则、应用包名规则。\n" +
-            "2. 依赖增强过滤的规则类型：URL-KEYWORD、URL-REGEX、path=、first-party / third-party、部分 regex、部分请求上下文规则、部分应用上下文规则、部分 cosmetic 规则。\n" +
-            "3. 当前会跳过或部分跳过的类型：远程脚本、完整浏览器语义脚本、复杂逻辑组合、无法安全降级的高级代理规则、完整重定向脚本链。\n\n" +
-            "十一、统计页说明\n" +
-            "1. 统计页展示今日拦截、累计拦截、DNS 总拦截、MITM 总拦截、请求总数和节省流量。MITM 总拦截只统计证书解密后真实命中的 HTTP/HTTPS/HTTP2 深度拦截。\n" +
-            "2. 排行榜区域会展示主要命中来源，方便判断哪些厂商、规则或广告方向最活跃。\n\n" +
-            "十二、推荐使用方案\n" +
+            "九、当前支持的规则样式（24+ 种格式）\n" +
+            "1. 纯域名：一行一个域名，如 example.com / ads.domain.net\n" +
+            "2. Hosts: 0.0.0.0 domain.com / 127.0.0.1 domain.com\n" +
+            "3. dnsmasq: address=/domain.com/0.0.0.0 / address=/domain.com/127.0.0.1\n" +
+            "4. SmartDNS: address /domain.com/0.0.0.0 / ipset=/domain.com/adblock / nameserver=/domain.com/8.8.8.8\n" +
+            "5. OpenWrt: ipset=/domain.com/adblock / nftset=/domain.com/adblock\n" +
+            "6. AdGuard / ABP: ||domain.com^ / ||domain.com^\$modifier / @@||domain.com^\n" +
+            "7. ABP 修饰符（30+ 种）：third-party/3p, first-party/1p, domain=域名，path=/路径/, removeparam=参数，csp=策略，redirect=资源，denyallow=域名，cookie=Cookie, header=头名：值，removeheader=头名，replace=正则/替换，app=包名，dnstype=类型，urlblock, from, to, jsinject=脚本，network, blockipv6, blockipv4, dnsrewrite=IP, generichide, ctag=标签，client=客户端，mac=地址，asn=AS 号，important, match-case, badfilter, script, image, stylesheet, xmlhttprequest 等\n" +
+            "8. IP-CIDR: ip-cidr,192.168.1.0/24 / ip-cidr,10.0.0.0/8\n" +
+            "9. IP-CIDR6: ip6-cidr,::1/128 / ip6-cidr,fe80::/10\n" +
+            "10. Clash: DOMAIN-SUFFIX,com / DOMAIN-KEYWORD,ad / DOMAIN,xxx / IP-CIDR,xxx / PROCESS-NAME,xxx\n" +
+            "11. Surge: HOST-SUFFIX,com / HOST-KEYWORD,ad / HOST,xxx / IP-CIDR,xxx\n" +
+            "12. Loon: DOMAIN-SUFFIX,com / DOMAIN-KEYWORD,ad / ip-cidr,xxx / get keyword\n" +
+            "13. Quantumult X: host example.com / ip-cidr 192.168.1.0/24 / host-keyword ad / host-suffix com\n" +
+            "14. Shadowrocket: host-suffix,com / host-keyword,ad / url-regexp pattern / ip-cidr,xxx\n" +
+            "15. V2Ray/Xray: domain:xxx / domainSuffix:xxx / domainKeyword:xxx / ip:xxx / ipCIDR:xxx\n" +
+            "16. 域名 + 端口：example.com:8080 / tracker.com:443\n" +
+            "17. 端口通配符：*:443\$network / *:80\$network / *:8080\$network\n" +
+            "18. 路径规则：domain.com/ads/* / api.com/v1/ad/*\n" +
+            "19. 关键词规则：*ad* / *tracker* / *analytics*\n" +
+            "20. 正则规则：/^https?:.*ad.*\\.example\\.com/ / /.*\\.(ads?|banner)\\..*/\n" +
+            "21. CSP 规则：domain##^csp:script-src 'self' / domain##^csp:default-src 'none'\n" +
+            "22. CSS 规则：domain##.ad-banner / domain###sidebar-ads / domain##[class*=\"ad-\"]\n" +
+            "23. 复合规则：AND(domain.com, /ads/) / OR(ads1.com, ads2.com)\n" +
+            "24. 例外规则：@@||domain^ / @@0.0.0.0 whitelist.com\n" +
+            "25. 包名规则：package:com.example.app / ||ads.com^\$package=com.example.app\n" +
+            "26. 点前缀域名：.example.com（匹配所有子域名）\n" +
+            "27. IPv6 Hosts: 2001:db8::1 ads.example.com\n" +
+            "\n十、部分支持的规则（需 MITM 增强）\n" +
+            "1. redirect 类：redirect=resource / redirect=noop\n" +
+            "2. removeparam 类：removeparam=tracking_id / removeparam=utm_source\n" +
+            "3. header 修改：header=Set-Cookie:xxx / header_remove=User-Agent\n" +
+            "4. replace 类：replace=pattern/replacement/\n" +
+            "5. urlblock: urlblock=pattern\n" +
+            "\n十一、会跳过的规则类型\n" +
+            "1. 远程脚本依赖型：需要加载外部脚本的规则\n" +
+            "2. 完整浏览器语义：需要完整 JS 运行时的重写链\n" +
+            "3. 高级代理逻辑：SRC-IP-CIDR / GEOIP / GEOSITE / IP-ASN（已识别并安全跳过）\n" +
+            "4. 无法安全降级的复杂组合规则\n" +
+            "\n十二、规则导入说明\n" +
+            "1. 缩进型 `payload:` / `rules:` 多行块可自动展开导入\n" +
+            "2. 支持 `rule:` / `value:` 包裹的单行规则\n" +
+            "3. 支持 `- ` / `* ` 开头的 YAML 列表项\n" +
+            "4. 自动识别并跳过注释（# / ! 开头）\n" +
+            "5. 支持行内注释（#xxx / !xxx / ;xxx 后内容会被忽略）\n" +
+            "6. 大文件导入会自动去重和优化\n\n" +
+            "十三、推荐使用方案\n" +
             "1. 追求稳定省电：只开 DNS 拦截。\n" +
-            "2. 追求更强广告拦截：DNS + MITM。\n" +
-            "3. 有系统推广和负一屏问题：DNS + Shizuku。\n" +
+            "2. 追求更强广告拦截：DNS + MITM（HTTPS 解密）。\n" +
+            "3. 有系统推广和负一屏问题：DNS + Shizuku（包级治理）。\n" +
             "4. 想兼顾小说 App、开屏广告、广告 JSON、系统推广：DNS + MITM + Shizuku。\n\n" +
-            "十三、常见问题与排障教程\n" +
+            "十四、适配并支持更多类型的规则\n" +
+            "1. 已支持 24+ 种主流规则格式，可直接导入各类规则列表。\n" +
+            "2. 自动识别规则类型，无需手动选择格式。\n" +
+            "3. 混合规则文件可自动解析，支持注释和空行。\n" +
+            "4. 缩进型 YAML 块（payload:/rules:）可自动展开导入。\n" +
+            "5. 规则解析性能优化，正则表达式自动缓存减少重复编译。\n" +
+            "6. 大文件导入会自动去重和优化，避免冗余规则。\n" +
+            "7. 兼容 AdGuard、Clash、Surge、Loon、QX、Shadowrocket、V2Ray 等工具规则。\n" +
+            "8. 部分支持的规则（redirect/removeparam/header 修改）需 MITM 增强。\n" +
+            "9. 不支持的规则（远程脚本/完整浏览器语义/高级代理逻辑）会安全跳过。\n" +
+            "10. 详细规则语法说明请查看项目文档 README_USAGE.md。\n\n" +
+            "十五、拦截与放行说明\n" +
+            "1. 该页面用于回看最近的放行和拦截结果。\n" +
+            "2. 左侧会显示红色的拦截或绿色的放行。\n" +
+            "3. 右侧上方显示域名，下方显示应用名和时间。\n" +
+            "4. 长按域名可直接复制，方便加规则或排查误杀。\n" +
+            "5. 这个页面适合配合 MITM、Shizuku、可疑域名页一起定位漏拦和误拦。\n\n" +
+            "十六、统计页说明\n" +
+            "1. 统计页展示今日拦截、累计拦截、DNS 总拦截、请求总数、响应总数和累计节省流量。\n" +
+            "2. 排行榜区域会展示厂商拦截排行、厂商请求排行、厂商响应排行、应用拦截排行、应用请求排行、应用响应排行。点击查看完整榜单可进入详情页。\n\n" +
+            "十七、常见问题与排障教程\n" +
             "1. 某个 App 联网异常：先把它加入白名单测试。\n" +
             "2. 加速器或代理异常：先把本体和目标 App 一起加入加速器共存。\n" +
             "3. 登录、验证码、支付相关异常：先关闭 MITM 测试。\n" +
@@ -236,7 +285,7 @@ class GuideActivity : BaseActivity() {
             "9. 本地代理共存显示未连通：检查代理是否启动、本地端口是否正确、代理本体是否已加入共存。\n" +
             "10. 目标 App 能联网但链路不对：看日志里是否出现 Connected local proxy bridge、protocol=socks5、protocol=http_connect。\n" +
             "11. 若恢复后仍无网络，先停止拦截再重新开启。\n" +
-            "12. 如有 BUG 或建议，可通过页面中的反馈入口提交。"
+            "12. 如有 BUG 或建议，可通过设置页加群入口、日志导出或现有沟通渠道继续反馈。"
 
         fun createIntent(context: Context, title: String, content: String): Intent {
             return Intent(context, GuideActivity::class.java)

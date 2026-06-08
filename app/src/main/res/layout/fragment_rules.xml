@@ -212,13 +212,13 @@
             android:orientation="horizontal">
 
             <Button
-                android:id="@+id/btnTrafficCard"
+                android:id="@+id/btnDecisionDomains"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
                 android:background="@drawable/bg_panel"
                 android:backgroundTint="@null"
-                android:text="免费领流量卡"
+                android:text="拦截与放行"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="16sp" />

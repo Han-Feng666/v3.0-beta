@@ -14,17 +14,22 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
+import com.HanFeng.core.network.NetworkKernel
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.lifecycleScope
 import com.HanFeng.R
 import com.HanFeng.data.AppSettingsRepository
+import com.HanFeng.data.LogRepository
 import com.HanFeng.data.ShizukuAdControlCatalog
 import com.HanFeng.data.ShizukuAdControlRepository
 import com.HanFeng.data.ShizukuConnectionOwnerRepository
 import com.HanFeng.data.ShizukuRepository
-import com.HanFeng.service.AdBlockVpnService
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 
 class SettingsActivity : BaseActivity() {
@@ -33,18 +38,20 @@ class SettingsActivity : BaseActivity() {
     private lateinit var switchHideBackground: Switch
     private lateinit var textShizukuStatus: TextView
     private lateinit var btnShizukuAdControl: Button
-    private lateinit var btnShizukuAdControlBatch: Button
     private lateinit var btnCoexistSettings: Button
+    private lateinit var btnTrafficCardSettings: Button
     private lateinit var btnJoinGroupSettings: Button
+    private lateinit var btnResetHideBackground: Button
+    private lateinit var btnExportLogs: Button
     private lateinit var btnBack: Button
     private lateinit var settingsRoot: View
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode != ShizukuRepository.REQUEST_CODE) return@OnRequestPermissionResultListener
         val granted = grantResult == PackageManager.PERMISSION_GRANTED
         if (granted) {
-            warmShizukuServices()
+            prewarmShizukuIfPossible()
         }
-        Toast.makeText(this, if (granted) "Shizuku 授权成功" else "Shizuku 授权失败", Toast.LENGTH_SHORT).show()
+        showShortToast(if (granted) "Shizuku 授权成功" else "Shizuku 授权失败")
         updateShizukuActionState()
     }
 
@@ -59,9 +66,11 @@ class SettingsActivity : BaseActivity() {
         switchHideBackground = findViewById(R.id.switchHideBackground)
         textShizukuStatus = findViewById(R.id.textShizukuStatus)
         btnShizukuAdControl = findViewById(R.id.btnShizukuAdControl)
-        btnShizukuAdControlBatch = findViewById(R.id.btnShizukuAdControlBatch)
         btnCoexistSettings = findViewById(R.id.btnCoexistSettings)
+        btnTrafficCardSettings = findViewById(R.id.btnTrafficCardSettings)
         btnJoinGroupSettings = findViewById(R.id.btnJoinGroupSettings)
+        btnResetHideBackground = findViewById(R.id.btnResetHideBackground)
+        btnExportLogs = findViewById(R.id.btnExportLogs)
         btnBack = findViewById(R.id.btnBack)
 
         val initialTopPadding = settingsRoot.paddingTop
@@ -86,45 +95,50 @@ class SettingsActivity : BaseActivity() {
         switchHideBackground.setOnCheckedChangeListener { _, isChecked ->
             AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
             applyHideBackgroundPolicy(isChecked)
+            btnResetHideBackground.visibility = View.VISIBLE
+        }
+        btnResetHideBackground.setOnClickListener {
+            AppSettingsRepository.resetHideBackground(this)
+            switchHideBackground.setOnCheckedChangeListener(null)
+            switchHideBackground.isChecked = false
+            switchHideBackground.setOnCheckedChangeListener { _, isChecked ->
+                AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
+                applyHideBackgroundPolicy(isChecked)
+            }
+            btnResetHideBackground.visibility = View.GONE
+            applyHideBackgroundPolicy(false)
+            showShortToast("隐藏后台设置已重置")
         }
         btnShizukuAdControl.setOnClickListener {
             openShizukuAdControlCatalog()
         }
-        btnShizukuAdControlBatch.setOnClickListener {
-            openBatchShizukuAdControlDialog()
-        }
         btnCoexistSettings.setOnClickListener {
-            startActivity(
+            launchActivitySafely(
                 Intent(this, WhitelistActivity::class.java).putExtra(
                     WhitelistActivity.EXTRA_MODE,
                     WhitelistActivity.MODE_COEXIST
-                )
+                ),
+                failureMessage = "打开共存设置失败"
             )
         }
+        btnTrafficCardSettings.setOnClickListener {
+            openJoinGroupPage()
+        }
         btnJoinGroupSettings.setOnClickListener {
-            runCatching {
-                startActivity(
-                    Intent(
-                        Intent.ACTION_VIEW,
-                        Uri.parse("mqqapi://card/show_pslcard?src_type=internal&version=1&uin=573309536&card_type=group&source=qrcode")
-                    )
-                )
-            }.onFailure {
-                MaterialAlertDialogBuilder(this)
-                    .setMessage("未找到可用的 QQ 客户端")
-                    .setPositiveButton("确定", null)
-                    .show()
-            }
+            openJoinGroupPage()
+        }
+        btnExportLogs.setOnClickListener {
+            exportLogsToUser()
         }
         textShizukuStatus.setOnClickListener {
             if (AppSettingsRepository.isShizukuEnabled(this)) {
                 handleShizukuEnableRequested(fromUser = false)
             } else {
-                MaterialAlertDialogBuilder(this)
+                StableDialog.builder(this)
                     .setTitle("Shizuku 未启用")
                     .setMessage("先打开“使用 Shizuku 增强”，再继续安装、启动或授权。")
                     .setPositiveButton("我知道了", null)
-                    .show()
+                    .showSafely(this, "Show shizuku disabled dialog failed")
             }
         }
         btnBack.setOnClickListener { finish() }
@@ -134,6 +148,7 @@ class SettingsActivity : BaseActivity() {
         super.onResume()
         syncShizukuSwitch()
         syncHideBackgroundSwitch()
+        prewarmShizukuIfPossible()
         updateShizukuActionState()
     }
 
@@ -158,47 +173,43 @@ class SettingsActivity : BaseActivity() {
 
     private fun handleShizukuEnableRequested(fromUser: Boolean) {
         val status = ShizukuRepository.getStatus(this)
-        val serviceHealthy = if (status.installed && status.binderAlive) {
-            if (ShizukuAdControlRepository.isServiceAlive()) true else warmShizukuServices()
-        } else {
-            false
-        }
+        val serviceHealthy = status.installed && status.binderAlive && ShizukuAdControlRepository.isServiceAlive()
         when {
             !status.installed -> {
-                MaterialAlertDialogBuilder(this)
+                StableDialog.builder(this)
                     .setTitle("需要先安装 Shizuku")
                     .setMessage("系统推广治理和连接增强依赖 Shizuku。安装完成后回到这里即可继续。")
                     .setPositiveButton("前往下载") { _, _ -> ShizukuRepository.openDownloadPage(this) }
                     .setNegativeButton("取消", null)
-                    .show()
+                    .showSafely(this, "Show install shizuku dialog failed")
             }
             !status.binderAlive -> {
-                MaterialAlertDialogBuilder(this)
+                StableDialog.builder(this)
                     .setTitle("需要先启动 Shizuku")
                     .setMessage("请先在 Shizuku App 里启动服务。完成后回到设置页，状态会自动刷新。")
                     .setPositiveButton("我知道了", null)
-                    .show()
+                    .showSafely(this, "Show start shizuku dialog failed")
             }
             serviceHealthy && !status.permissionGranted -> {
                 if (fromUser) {
-                    Toast.makeText(this, "Shizuku 已通过兼容模式连接", Toast.LENGTH_SHORT).show()
+                    showShortToast("Shizuku 已通过兼容模式连接")
                 }
             }
             status.permissionGranted -> {
-                warmShizukuServices()
+                prewarmShizukuIfPossible()
                 if (fromUser) {
-                    Toast.makeText(this, "Shizuku 已连接", Toast.LENGTH_SHORT).show()
+                    showShortToast("Shizuku 已连接")
                 }
             }
             ShizukuRepository.requestPermission() -> {
-                Toast.makeText(this, "正在请求 Shizuku 授权", Toast.LENGTH_SHORT).show()
+                showShortToast("正在请求 Shizuku 授权")
             }
             else -> {
-                MaterialAlertDialogBuilder(this)
+                StableDialog.builder(this)
                     .setTitle("Shizuku 需要授权")
                     .setMessage("请确认 Shizuku 已运行，并在授权界面里允许寒枫访问。若之前拒绝过，请到 Shizuku 中清理授权状态后重试。")
                     .setPositiveButton("我知道了", null)
-                    .show()
+                    .showSafely(this, "Show shizuku permission dialog failed")
             }
         }
         updateShizukuActionState()
@@ -221,24 +232,64 @@ class SettingsActivity : BaseActivity() {
         val baseReady = status?.let { it.installed && it.binderAlive } == true
         val serviceHealthy = shizukuEnabled && baseReady && ShizukuAdControlRepository.isServiceAlive()
         val shizukuReady = status?.let { it.installed && it.binderAlive && (it.permissionGranted || serviceHealthy) } == true
-        btnShizukuAdControl.isEnabled = shizukuEnabled
-        btnShizukuAdControlBatch.isEnabled = shizukuEnabled
+        btnShizukuAdControl.isEnabled = true
         btnCoexistSettings.isEnabled = true
+        btnTrafficCardSettings.isEnabled = true
         btnJoinGroupSettings.isEnabled = true
-        btnShizukuAdControl.alpha = if (btnShizukuAdControl.isEnabled) 1f else 0.55f
-        btnShizukuAdControlBatch.alpha = if (btnShizukuAdControlBatch.isEnabled) 1f else 0.55f
+        btnShizukuAdControl.alpha = if (shizukuReady) 1f else 0.72f
         textShizukuStatus.text = buildShizukuStatusText(shizukuEnabled, shizukuReady, serviceHealthy, status)
     }
 
     private fun warmShizukuServices(): Boolean {
-        repeat(3) {
-            runCatching { ShizukuConnectionOwnerRepository.ensureBound(this) }
-            runCatching { ShizukuAdControlRepository.ensureBound(this) }
-            if (runCatching { ShizukuAdControlRepository.checkServiceHealth(this) }.getOrDefault(false)) {
-                return true
+        return warmShizukuServicesBlocking()
+    }
+
+    private fun openJoinGroupPage() {
+        runCatching {
+            startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("mqqapi://card/show_pslcard?src_type=internal&version=1&uin=573309536&card_type=group&source=qrcode")
+                )
+            )
+        }.onFailure {
+            LogRepository.append(this, "Show join group failed: ${it.message}")
+            showMessageDialog(
+                message = "未找到可用的 QQ 客户端，请先安装 QQ",
+                errorTag = "Show join group unavailable dialog failed"
+            )
+        }
+    }
+
+    private fun exportLogsToUser() {
+        val uri = LogRepository.exportZip(this)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/zip"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching {
+            startActivity(Intent.createChooser(intent, "导出日志"))
+        }.onFailure {
+            LogRepository.append(this, "Export logs chooser failed: ${it.message}")
+            showShortToast("打开日志导出失败")
+        }
+    }
+
+    private fun prewarmShizukuIfPossible() {
+        val shizukuEnabled = AppSettingsRepository.isShizukuEnabled(this)
+        if (!shizukuEnabled) return
+        val status = ShizukuRepository.getStatus(this)
+        if (!status.installed || !status.binderAlive) return
+        if (!status.permissionGranted && !ShizukuAdControlRepository.isServiceAlive()) return
+        lifecycleScope.launch {
+            val warmed = withContext(Dispatchers.IO) {
+                warmShizukuServices()
+            }
+            if (!isFinishing && !isDestroyed && warmed) {
+                updateShizukuActionState()
             }
         }
-        return false
     }
 
     private fun buildShizukuStatusText(
@@ -266,54 +317,7 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun openShizukuAdControlCatalog() {
-        Toast.makeText(this, "正在连接治理服务", Toast.LENGTH_SHORT).show()
-        if (!ensureShizukuReady()) return
-        val targets = discoverPromoGovernTargets(installedOnly = true, scope = PromoGovernScope.ALL)
-        if (targets.isEmpty()) {
-            val basePresets = ShizukuAdControlCatalog.allPresets()
-            val installedPackages = basePresets.asSequence()
-                .map { it.packageName }
-                .distinct()
-                .filter { packageName ->
-                    ShizukuAdControlRepository.queryPackageStatus(this, packageName).installed
-                }
-                .toSet()
-            MaterialAlertDialogBuilder(this)
-                .setTitle("暂无可治理项目")
-                .setMessage("当前没有识别到已安装治理项。你仍然可以打开预置目录查看支持的治理目标。")
-                .setPositiveButton("查看预置目录") { _, _ ->
-                    showPromoGovernTargetList(
-                        basePresets.map {
-                            PromoGovernTarget(
-                                packageName = it.packageName,
-                                title = it.title,
-                                category = it.category,
-                                description = it.description,
-                                sourceLabel = "预置目录",
-                                systemApp = true,
-                                relatedPresets = ShizukuAdControlCatalog.findPresetsByPackage(it.packageName)
-                            )
-                        },
-                        installedPackages
-                    )
-                }
-                .setNegativeButton("取消", null)
-                .show()
-            return
-        }
-        AlertDialog.Builder(this)
-            .setTitle("选择治理范围")
-            .setItems(arrayOf("全部已安装治理项", "仅系统推广项", "仅第三方推广 App")) { _, which ->
-                val scope = when (which) {
-                    1 -> PromoGovernScope.SYSTEM_ONLY
-                    2 -> PromoGovernScope.THIRD_PARTY_ONLY
-                    else -> PromoGovernScope.ALL
-                }
-                val scopedTargets = discoverPromoGovernTargets(installedOnly = true, scope = scope)
-                showPromoGovernTargetList(scopedTargets, scopedTargets.map { it.packageName }.toSet())
-            }
-            .setNegativeButton("取消", null)
-            .show()
+        startActivity(PromoGovernScopeActivity.createIntent(this))
     }
 
     private fun showPromoGovernTargetList(
@@ -328,49 +332,42 @@ class SettingsActivity : BaseActivity() {
                 .show()
             return
         }
+        val labels = buildList {
+            add("批量治理当前列表（${targets.size} 项）")
+            addAll(buildPromoTargetLabels(targets, installedPackages))
+        }.toTypedArray()
         AlertDialog.Builder(this)
-            .setTitle("选择治理项")
-            .setMessage("已识别到 ${targets.size} 个治理目标，已包含系统项和手机内已安装的第三方推广 App。")
-            .setItems(buildPromoTargetLabels(targets, installedPackages).toTypedArray()) { _, which ->
-                showPromoTargetActionDialog(targets[which])
+            .setTitle("推广治理")
+            .setMessage("已识别到 ${targets.size} 个治理目标。首项用于批量治理，其余项用于单独治理。")
+            .setItems(labels) { _, which ->
+                if (which == 0) {
+                    openBatchGovernActionsForTargets(targets)
+                } else {
+                    showPromoTargetActionDialog(targets[which - 1])
+                }
             }
             .setNegativeButton("取消", null)
             .show()
     }
 
-    private fun openBatchShizukuAdControlDialog() {
-        Toast.makeText(this, "正在连接治理服务", Toast.LENGTH_SHORT).show()
-        if (!ensureShizukuReady()) return
+    private fun openBatchGovernActionsForTargets(targets: List<PromoGovernTarget>) {
+        if (targets.isEmpty()) {
+            showOperationResult("当前列表下没有识别到可批量治理的已安装推广项")
+            return
+        }
         AlertDialog.Builder(this)
             .setTitle("批量治理")
-            .setMessage("批量治理已支持系统推广项和第三方推广 App。你可以先选择治理范围，再选择动作。")
-            .setItems(arrayOf("全部已安装治理项", "仅系统推广项", "仅第三方推广 App")) { _, scopeWhich ->
-                val scope = when (scopeWhich) {
-                    1 -> PromoGovernScope.SYSTEM_ONLY
-                    2 -> PromoGovernScope.THIRD_PARTY_ONLY
-                    else -> PromoGovernScope.ALL
+            .setMessage("当前列表内识别到 ${targets.size} 个可批量处理的治理目标。")
+            .setItems(arrayOf("智能治理当前列表", "关闭推送广告", "恢复推送广告", "整包停用", "恢复已停用项目", "整包暂停", "恢复暂停")) { _, which ->
+                when (which) {
+                    0 -> runBatchShizukuAdControl(targets, mode = BatchAdControlMode.SMART_GOVERN)
+                    1 -> runBatchShizukuAdControl(targets, mode = BatchAdControlMode.BLOCK_NOTIFICATIONS)
+                    2 -> runBatchShizukuAdControl(targets, mode = BatchAdControlMode.ALLOW_NOTIFICATIONS)
+                    3 -> runBatchShizukuAdControl(targets, mode = BatchAdControlMode.DISABLE)
+                    4 -> runBatchShizukuAdControl(targets, mode = BatchAdControlMode.ENABLE)
+                    5 -> runBatchShizukuAdControl(targets, mode = BatchAdControlMode.SUSPEND)
+                    6 -> runBatchShizukuAdControl(targets, mode = BatchAdControlMode.UNSUSPEND)
                 }
-                val installedTargets = discoverPromoGovernTargets(installedOnly = true, scope = scope)
-                if (installedTargets.isEmpty()) {
-                    showOperationResult("当前范围下没有识别到可批量治理的已安装推广项")
-                    return@setItems
-                }
-                AlertDialog.Builder(this)
-                    .setTitle("选择批量动作")
-                    .setMessage("当前范围内识别到 ${installedTargets.size} 个可批量处理的已安装推广项。轻治理会优先关闭推送广告能力，整包治理会停用或暂停整个应用。浏览器、主题壁纸、锁屏和部分系统应用推荐会默认跳过整包停用，避免影响正常功能。")
-                    .setItems(arrayOf("智能治理已安装推广项", "关闭已安装推广项推送广告", "恢复已安装推广项推送广告", "整包停用已安装推广项", "恢复已安装推广项", "整包暂停已安装推广项", "恢复暂停的推广项")) { _, which ->
-                        when (which) {
-                            0 -> runBatchShizukuAdControl(installedTargets, mode = BatchAdControlMode.SMART_GOVERN)
-                            1 -> runBatchShizukuAdControl(installedTargets, mode = BatchAdControlMode.BLOCK_NOTIFICATIONS)
-                            2 -> runBatchShizukuAdControl(installedTargets, mode = BatchAdControlMode.ALLOW_NOTIFICATIONS)
-                            3 -> runBatchShizukuAdControl(installedTargets, mode = BatchAdControlMode.DISABLE)
-                            4 -> runBatchShizukuAdControl(installedTargets, mode = BatchAdControlMode.ENABLE)
-                            5 -> runBatchShizukuAdControl(installedTargets, mode = BatchAdControlMode.SUSPEND)
-                            6 -> runBatchShizukuAdControl(installedTargets, mode = BatchAdControlMode.UNSUSPEND)
-                        }
-                    }
-                    .setNegativeButton("取消", null)
-                    .show()
             }
             .setNegativeButton("取消", null)
             .show()
@@ -395,9 +392,11 @@ class SettingsActivity : BaseActivity() {
         val degradedToSuspend = mutableListOf<String>()
         val skipped = mutableListOf<String>()
         val failed = mutableListOf<String>()
+        val hasHighRiskNotificationApps = targets.any { assessNotificationRisk(it.packageName, it.title) == NotificationRiskLevel.HIGH }
         installedPackageTargets.forEach { target ->
             val packageName = target.packageName
             val displayName = buildBatchTargetLabel(target)
+            val notificationRisk = assessNotificationRisk(packageName, target.target.title)
             val shouldSkipDisable = mode == BatchAdControlMode.DISABLE &&
                 ShizukuAdControlCatalog.shouldSkipBatchDisable(packageName)
             if (shouldSkipDisable) {
@@ -405,17 +404,24 @@ class SettingsActivity : BaseActivity() {
                 skipped += "$displayName（已跳过：$reason）"
                 return@forEach
             }
-            val requested = when (mode) {
-                BatchAdControlMode.SMART_GOVERN -> ShizukuAdControlRepository.blockPackageNotifications(this, packageName)
-                BatchAdControlMode.BLOCK_NOTIFICATIONS -> ShizukuAdControlRepository.blockPackageNotifications(this, packageName)
-                BatchAdControlMode.ALLOW_NOTIFICATIONS -> ShizukuAdControlRepository.allowPackageNotifications(this, packageName)
-                BatchAdControlMode.DISABLE -> ShizukuAdControlRepository.disablePackage(this, packageName)
-                BatchAdControlMode.ENABLE -> ShizukuAdControlRepository.enablePackage(this, packageName)
-                BatchAdControlMode.SUSPEND -> ShizukuAdControlRepository.suspendPackage(this, packageName)
-                BatchAdControlMode.UNSUSPEND -> ShizukuAdControlRepository.unsuspendPackage(this, packageName)
+            val forceBlockNotifications = mode == BatchAdControlMode.SMART_GOVERN && 
+                notificationRisk == NotificationRiskLevel.HIGH
+            val requested = when {
+                forceBlockNotifications -> {
+                    LogRepository.append(this, "Smart govern high-risk notification app: $packageName, forcing block notifications")
+                    ShizukuAdControlRepository.blockPackageNotifications(this, packageName)
+                }
+                mode == BatchAdControlMode.SMART_GOVERN -> ShizukuAdControlRepository.blockPackageNotifications(this, packageName)
+                mode == BatchAdControlMode.BLOCK_NOTIFICATIONS -> ShizukuAdControlRepository.blockPackageNotifications(this, packageName)
+                mode == BatchAdControlMode.ALLOW_NOTIFICATIONS -> ShizukuAdControlRepository.allowPackageNotifications(this, packageName)
+                mode == BatchAdControlMode.DISABLE -> ShizukuAdControlRepository.disablePackage(this, packageName)
+                mode == BatchAdControlMode.ENABLE -> ShizukuAdControlRepository.enablePackage(this, packageName)
+                mode == BatchAdControlMode.SUSPEND -> ShizukuAdControlRepository.suspendPackage(this, packageName)
+                mode == BatchAdControlMode.UNSUSPEND -> ShizukuAdControlRepository.unsuspendPackage(this, packageName)
+                else -> false
             }
             val status = ShizukuAdControlRepository.queryPackageStatus(this, packageName)
-            val blockDisableFallback = mode == BatchAdControlMode.SMART_GOVERN &&
+            val blockDisableFallback = (mode == BatchAdControlMode.SMART_GOVERN || forceBlockNotifications) &&
                 !requested &&
                 !ShizukuAdControlCatalog.shouldSkipBatchDisable(packageName) &&
                 !isDisabledState(status.enabledState) &&
@@ -425,7 +431,7 @@ class SettingsActivity : BaseActivity() {
             } else {
                 status
             }
-            val suspendFallbackSucceeded = mode == BatchAdControlMode.SMART_GOVERN &&
+            val suspendFallbackSucceeded = (mode == BatchAdControlMode.SMART_GOVERN || forceBlockNotifications) &&
                 !requested &&
                 !isDisabledState(disabledStatus.enabledState) &&
                 !disabledStatus.suspended &&
@@ -436,20 +442,20 @@ class SettingsActivity : BaseActivity() {
                 BatchAdControlMode.SMART_GOVERN,
                 BatchAdControlMode.BLOCK_NOTIFICATIONS,
                 BatchAdControlMode.ALLOW_NOTIFICATIONS -> requested
-                BatchAdControlMode.DISABLE -> {
-                    requested && isDisabledState(refreshedStatus.enabledState)
-                }
-                BatchAdControlMode.ENABLE -> {
-                    requested && (
-                        refreshedStatus.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
+                BatchAdControlMode.DISABLE -> requested && isDisabledState(refreshedStatus.enabledState)
+                BatchAdControlMode.ENABLE -> requested && (
+                    refreshedStatus.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
                         refreshedStatus.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
                     )
-                }
                 BatchAdControlMode.SUSPEND -> requested && refreshedStatus.suspended
                 BatchAdControlMode.UNSUSPEND -> requested && !refreshedStatus.suspended
             }
             if (succeeded) {
-                operated += displayName
+                if (forceBlockNotifications && notificationRisk == NotificationRiskLevel.HIGH) {
+                    operated += "$displayName（已强制关闭通知权限）"
+                } else {
+                    operated += displayName
+                }
             } else if (suspendFallbackSucceeded) {
                 degradedToSuspend += displayName
             } else {
@@ -465,7 +471,7 @@ class SettingsActivity : BaseActivity() {
             }
         }
         val actionLabel = when (mode) {
-            BatchAdControlMode.SMART_GOVERN -> "治理"
+            BatchAdControlMode.SMART_GOVERN -> if (hasHighRiskNotificationApps) "智能治理（高风险通知已强制关闭）" else "智能治理"
             BatchAdControlMode.BLOCK_NOTIFICATIONS -> "关闭推送广告"
             BatchAdControlMode.ALLOW_NOTIFICATIONS -> "恢复推送广告"
             BatchAdControlMode.DISABLE -> "整包停用"
@@ -521,6 +527,8 @@ class SettingsActivity : BaseActivity() {
         val target: PromoGovernTarget
     )
 
+    enum class NotificationRiskLevel { HIGH, MEDIUM, LOW }
+
     private data class PromoGovernTarget(
         val packageName: String,
         val title: String,
@@ -528,8 +536,44 @@ class SettingsActivity : BaseActivity() {
         val description: String,
         val sourceLabel: String,
         val systemApp: Boolean,
-        val relatedPresets: List<ShizukuAdControlCatalog.Preset>
+        val relatedPresets: List<ShizukuAdControlCatalog.Preset>,
+        val packageStatus: ShizukuAdControlRepository.PackageControlStatus
     )
+
+    private fun assessNotificationRisk(packageName: String, targetAppLabel: String): NotificationRiskLevel {
+        val lowerLabel = targetAppLabel.lowercase()
+        val lowerPackage = packageName.lowercase()
+        val highRiskKeywords = listOf(
+            "资讯", "新闻", "热点", "推荐", "精选", "发现", "看看", "头条",
+            "news", "hot", "feed", "recommend", "discover", "toutiao"
+        )
+        val activityWelfareKeywords = listOf(
+            "活动", "优惠", "折扣", "秒杀", "特卖", "团购", "签到", "任务", "领奖", "抽奖", "庆典",
+            "会员中心", "积分商城", "福利中心", "活动中心", "领券", "优惠券", "红包", "赚钱", "福利",
+            "activity", "sale", "discount", "coupon", "bonus", "welfare", "lottery", "task",
+            "member", "vip", "points", "center", "event", "campaign", "promotion"
+        )
+        val mediumRiskKeywords = listOf(
+            "应用商店", "软件商店", "浏览器", "视频", "短剧", "直播", "漫画", "动漫",
+            "游戏中心", "内容中心", "内容服务", "免费小说",
+            "market", "browser", "video", "live", "comic", "anime", "gamecenter", "reward"
+        )
+        val appStoreKeywords = listOf(
+            "应用商店", "软件商店", "应用市场", "游戏中心",
+            "appstore", "appmarket", "market", "gamecenter"
+        )
+        val hasHighRiskKeyword = highRiskKeywords.any { lowerLabel.contains(it) || lowerPackage.contains(it) }
+        val hasActivityWelfareKeyword = activityWelfareKeywords.any { lowerLabel.contains(it) || lowerPackage.contains(it) }
+        val hasMediumRiskKeyword = mediumRiskKeywords.any { lowerLabel.contains(it) || lowerPackage.contains(it) }
+        val isAppStore = appStoreKeywords.any { lowerLabel.contains(it) || lowerPackage.contains(it) }
+        return when {
+            hasHighRiskKeyword -> NotificationRiskLevel.HIGH
+            isAppStore -> NotificationRiskLevel.HIGH
+            hasActivityWelfareKeyword -> NotificationRiskLevel.HIGH  // 活动福利类强制关闭
+            hasMediumRiskKeyword -> NotificationRiskLevel.MEDIUM
+            else -> NotificationRiskLevel.LOW
+        }
+    }
 
     private data class PromoComponentCandidate(
         val componentName: String,
@@ -553,7 +597,12 @@ class SettingsActivity : BaseActivity() {
             val installed = target.packageName in installedPackages
             val badge = if (installed) "已安装" else "未安装"
             val systemBadge = if (target.systemApp) "系统" else "第三方"
-            "[$badge/$systemBadge] ${target.title} (${target.category} / ${target.sourceLabel})"
+            val stateBadge = when {
+                target.packageStatus.suspended -> "已暂停"
+                isDisabledState(target.packageStatus.enabledState) -> "已停用"
+                else -> "可治理"
+            }
+            "[$badge/$systemBadge/$stateBadge] ${target.title} (${target.category} / ${target.sourceLabel})"
         }
     }
 
@@ -568,45 +617,31 @@ class SettingsActivity : BaseActivity() {
         }
     }
 
-    private fun ensureShizukuReady(): Boolean {
+
+    private suspend fun ensureShizukuReady(): Boolean {
         if (!AppSettingsRepository.isShizukuEnabled(this)) {
-            MaterialAlertDialogBuilder(this)
+            StableDialog.builder(this)
                 .setTitle("Shizuku 未启用")
                 .setMessage("请先开启设置中的 Shizuku 增强。")
                 .setPositiveButton("我知道了", null)
-                .show()
+                .showSafely(this, "Show ensure shizuku enabled dialog failed")
             return false
         }
-        val status = ShizukuRepository.getStatus(this)
-        val serviceHealthy = if (status.installed && status.binderAlive) {
-            if (ShizukuAdControlRepository.isServiceAlive()) {
-                true
-            } else {
-                warmShizukuServices()
-            }
-        } else {
-            false
-        }
-        if (!status.installed || !status.binderAlive || (!status.permissionGranted && !serviceHealthy)) {
-            val message = when {
-                !status.installed -> "请先安装 Shizuku。"
-                !status.binderAlive -> "请先启动 Shizuku。"
-                !status.permissionStateKnown -> "当前 Shizuku 可以连通，但权限状态读取异常。请重新打开 Shizuku 后重试，必要时更换兼容性更好的版本。"
-                else -> "请先授权 Shizuku。"
-            }
-            MaterialAlertDialogBuilder(this)
+        val readyState = queryShizukuReadyState(warmIfNeeded = true)
+        if (!readyState.readyForEnhancedUse) {
+            StableDialog.builder(this)
                 .setTitle("Shizuku 暂不可用")
-                .setMessage(message)
+                .setMessage(buildShizukuUnavailableMessage(readyState))
                 .setPositiveButton("我知道了", null)
-                .show()
+                .showSafely(this, "Show shizuku unavailable dialog failed")
             return false
         }
-        if (!warmShizukuServices()) {
-            MaterialAlertDialogBuilder(this)
+        if (!readyState.adControlAlive) {
+            StableDialog.builder(this)
                 .setTitle("Shizuku 服务连接失败")
-                .setMessage("Shizuku 已授权，但增强服务还未成功绑定。请稍后重试，或重新进入 Shizuku 后再回来。若刚完成授权，重新进入一次设置页通常即可触发连接。")
+                .setMessage("Shizuku 已连接，但治理服务还未成功绑定。请稍后重试，或重新进入 Shizuku 后再回来。")
                 .setPositiveButton("我知道了", null)
-                .show()
+                .showSafely(this, "Show shizuku bind failed dialog failed")
             return false
         }
         return true
@@ -651,71 +686,82 @@ class SettingsActivity : BaseActivity() {
         val actions = mutableListOf<Pair<String, () -> Unit>>()
         if (status.installed && (canDisable || canSuspend)) {
             actions += "智能治理" to {
-                val lightGoverned = ShizukuAdControlRepository.blockPackageNotifications(this, target.packageName)
-                val disableRequested = if (!lightGoverned && canDisable) {
-                    ShizukuAdControlRepository.disablePackage(this, target.packageName)
-                } else {
-                    false
-                }
-                val disabledStatus = ShizukuAdControlRepository.queryPackageStatus(this, target.packageName)
-                val disableSuccess = isDisabledState(disabledStatus.enabledState)
-                val resultMessage = if (lightGoverned) {
-                    "治理成功，当前已关闭推送广告能力"
-                } else if (disableSuccess) {
-                    "治理成功，当前已停用"
-                } else {
-                    val suspendRequested = if (!disabledStatus.suspended && canSuspend) {
-                        ShizukuAdControlRepository.suspendPackage(this, target.packageName)
+                executeGovernAction {
+                    val lightGoverned = ShizukuAdControlRepository.blockPackageNotifications(this@SettingsActivity, target.packageName)
+                    val disableRequested = if (!lightGoverned && canDisable) {
+                        ShizukuAdControlRepository.disablePackage(this@SettingsActivity, target.packageName)
                     } else {
                         false
                     }
-                    val suspendStatus = ShizukuAdControlRepository.queryPackageStatus(this, target.packageName)
-                    val suspendSuccess = suspendRequested && suspendStatus.suspended
-                    if (suspendSuccess) "停用未生效，已自动回退为暂停" else "治理失败，请确认系统支持停用或暂停"
+                    val disabledStatus = ShizukuAdControlRepository.queryPackageStatus(this@SettingsActivity, target.packageName)
+                    val disableSuccess = isDisabledState(disabledStatus.enabledState)
+                    if (lightGoverned) {
+                        "治理成功，当前已关闭推送广告能力"
+                    } else if (disableSuccess) {
+                        "治理成功，当前已停用"
+                    } else {
+                        val suspendRequested = if (!disabledStatus.suspended && canSuspend) {
+                            ShizukuAdControlRepository.suspendPackage(this@SettingsActivity, target.packageName)
+                        } else {
+                            false
+                        }
+                        val suspendStatus = ShizukuAdControlRepository.queryPackageStatus(this@SettingsActivity, target.packageName)
+                        val suspendSuccess = suspendRequested && suspendStatus.suspended
+                        if (suspendSuccess) "停用未生效，已自动回退为暂停" else "治理失败，请确认系统支持停用或暂停"
+                    }
                 }
-                showOperationResult(resultMessage)
             }
         }
         if (status.installed) {
             actions += "关闭推送广告" to {
-                val success = ShizukuAdControlRepository.blockPackageNotifications(this, target.packageName)
-                showOperationResult(if (success) "关闭推送广告成功" else "关闭推送广告失败，请确认系统支持通知权限治理")
+                executeGovernAction {
+                    val success = ShizukuAdControlRepository.blockPackageNotifications(this@SettingsActivity, target.packageName)
+                    if (success) "关闭推送广告成功" else "关闭推送广告失败，请确认系统支持通知权限治理"
+                }
             }
             actions += "恢复推送广告" to {
-                val success = ShizukuAdControlRepository.allowPackageNotifications(this, target.packageName)
-                showOperationResult(if (success) "恢复推送广告成功" else "恢复推送广告失败，请确认系统支持通知权限治理")
+                executeGovernAction {
+                    val success = ShizukuAdControlRepository.allowPackageNotifications(this@SettingsActivity, target.packageName)
+                    if (success) "恢复推送广告成功" else "恢复推送广告失败，请确认系统支持通知权限治理"
+                }
             }
         }
         if (canDisable) {
             actions += "停用" to {
-                val requested = ShizukuAdControlRepository.disablePackage(this, target.packageName)
-                val refreshed = ShizukuAdControlRepository.queryPackageStatus(this, target.packageName)
-                val success = requested && isDisabledState(refreshed.enabledState)
-                showOperationResult(if (success) "停用成功" else "停用失败，请确认该项目支持停用")
+                executeGovernAction {
+                    val requested = ShizukuAdControlRepository.disablePackage(this@SettingsActivity, target.packageName)
+                    val refreshed = ShizukuAdControlRepository.queryPackageStatus(this@SettingsActivity, target.packageName)
+                    val success = requested && isDisabledState(refreshed.enabledState)
+                    if (success) "停用成功" else "停用失败，请确认该项目支持停用"
+                }
             }
         }
         if (canEnable) {
             actions += "恢复" to {
-                val requested = ShizukuAdControlRepository.enablePackage(this, target.packageName)
-                val refreshed = ShizukuAdControlRepository.queryPackageStatus(this, target.packageName)
-                val success = requested && (
-                    refreshed.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
-                        refreshed.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
-                    )
-                showOperationResult(if (success) "恢复成功" else "恢复失败，请确认该项目仍然存在")
+                executeGovernAction {
+                    val requested = ShizukuAdControlRepository.enablePackage(this@SettingsActivity, target.packageName)
+                    val refreshed = ShizukuAdControlRepository.queryPackageStatus(this@SettingsActivity, target.packageName)
+                    val success = requested && (
+                        refreshed.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
+                            refreshed.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                        )
+                    if (success) "恢复成功" else "恢复失败，请确认该项目仍然存在"
+                }
             }
         }
         if (canSuspend || canUnsuspend) {
             actions += (if (status.suspended) "恢复暂停" else "暂停") to {
-                val requested = if (status.suspended) {
-                    ShizukuAdControlRepository.unsuspendPackage(this, target.packageName)
-                } else {
-                    ShizukuAdControlRepository.suspendPackage(this, target.packageName)
+                executeGovernAction {
+                    val requested = if (status.suspended) {
+                        ShizukuAdControlRepository.unsuspendPackage(this@SettingsActivity, target.packageName)
+                    } else {
+                        ShizukuAdControlRepository.suspendPackage(this@SettingsActivity, target.packageName)
+                    }
+                    val refreshed = ShizukuAdControlRepository.queryPackageStatus(this@SettingsActivity, target.packageName)
+                    val success = requested && if (status.suspended) !refreshed.suspended else refreshed.suspended
+                    val actionText = if (status.suspended) "恢复暂停" else "暂停"
+                    if (success) "${actionText}成功" else "${actionText}失败，请确认系统支持该操作"
                 }
-                val refreshed = ShizukuAdControlRepository.queryPackageStatus(this, target.packageName)
-                val success = requested && if (status.suspended) !refreshed.suspended else refreshed.suspended
-                val actionText = if (status.suspended) "恢复暂停" else "暂停"
-                showOperationResult(if (success) "${actionText}成功" else "${actionText}失败，请确认系统支持该操作")
             }
         }
         if (status.installed) {
@@ -727,54 +773,63 @@ class SettingsActivity : BaseActivity() {
             showOperationResult("当前项目暂无可执行治理动作，请先确认目标应用已安装且 Shizuku 服务状态正常")
             return
         }
-        AlertDialog.Builder(this)
+        StableDialog.builder(this)
             .setTitle(target.title)
             .setMessage(message)
             .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
                 actions.getOrNull(which)?.second?.invoke()
             }
             .setNegativeButton("关闭", null)
-            .show()
+            .showSafely(this, "Show govern target actions dialog failed")
     }
 
     private fun showComponentGovernDialog(target: PromoGovernTarget) {
-        val candidates = discoverPromoComponentCandidates(target.packageName)
-        if (candidates.isNotEmpty()) {
-            AlertDialog.Builder(this)
-                .setTitle("组件治理")
-                .setMessage("已识别 ${candidates.size} 个高相关组件，可直接选择治理，也可以进入手动输入。")
-                .setItems(candidates.map { candidate ->
-                    val state = if (candidate.enabled) "启用中" else "已停用"
-                    "[${candidate.typeLabel}/$state] ${candidate.shortName}"
-                }.toTypedArray()) { _, which ->
-                    showComponentActionDialog(target, candidates[which].componentName)
-                }
-                .setNeutralButton("手动输入") { _, _ ->
-                    showManualComponentGovernDialog(target, candidates.firstOrNull()?.componentName.orEmpty())
-                }
-                .setNegativeButton("取消", null)
-                .show()
-            return
+        lifecycleScope.launch {
+            val candidates = withContext(Dispatchers.Default) {
+                discoverPromoComponentCandidates(target.packageName)
+            }
+            if (isFinishing || isDestroyed) return@launch
+            if (candidates.isNotEmpty()) {
+                StableDialog.builder(this@SettingsActivity)
+                    .setTitle("组件治理")
+                    .setMessage("已识别 ${candidates.size} 个高相关组件，可直接选择治理，也可以进入手动输入。")
+                    .setItems(candidates.map { candidate ->
+                        val state = if (candidate.enabled) "启用中" else "已停用"
+                        "[${candidate.typeLabel}/$state] ${candidate.shortName}"
+                    }.toTypedArray()) { _, which ->
+                        showComponentActionDialog(target, candidates[which].componentName)
+                    }
+                    .setNeutralButton("手动输入") { _, _ ->
+                        showManualComponentGovernDialog(target, candidates.firstOrNull()?.componentName.orEmpty())
+                    }
+                    .setNegativeButton("取消", null)
+                    .showSafely(this@SettingsActivity, "Show component candidates dialog failed")
+                return@launch
+            }
+            showManualComponentGovernDialog(target, "${target.packageName}/")
         }
-        showManualComponentGovernDialog(target, "${target.packageName}/")
     }
 
     private fun showComponentActionDialog(target: PromoGovernTarget, componentName: String) {
-        AlertDialog.Builder(this)
+        StableDialog.builder(this)
             .setTitle("组件治理")
             .setMessage(componentName)
             .setPositiveButton("停用组件") { _, _ ->
-                val success = ShizukuAdControlRepository.disableComponent(this, componentName)
-                showOperationResult(if (success) "组件停用成功" else "组件停用失败，请确认组件名完整且系统支持该操作")
+                executeGovernAction {
+                    val success = ShizukuAdControlRepository.disableComponent(this@SettingsActivity, componentName)
+                    if (success) "组件停用成功" else "组件停用失败，请确认组件名完整且系统支持该操作"
+                }
             }
             .setNeutralButton("恢复组件") { _, _ ->
-                val success = ShizukuAdControlRepository.enableComponent(this, componentName)
-                showOperationResult(if (success) "组件恢复成功" else "组件恢复失败，请确认组件名完整且系统支持该操作")
+                executeGovernAction {
+                    val success = ShizukuAdControlRepository.enableComponent(this@SettingsActivity, componentName)
+                    if (success) "组件恢复成功" else "组件恢复失败，请确认组件名完整且系统支持该操作"
+                }
             }
             .setNegativeButton("手动输入") { _, _ ->
                 showManualComponentGovernDialog(target, componentName)
             }
-            .show()
+            .showSafely(this, "Show component actions dialog failed")
     }
 
     private fun showManualComponentGovernDialog(target: PromoGovernTarget, initialValue: String) {
@@ -783,22 +838,59 @@ class SettingsActivity : BaseActivity() {
             setText(initialValue.ifBlank { "${target.packageName}/" })
             setSelection(text.length)
         }
-        AlertDialog.Builder(this)
+        val dialog = StableDialog.builder(this)
             .setTitle("组件治理")
             .setMessage("适合处理启动页 Activity、推荐页 Activity、广告 Service、推送 Receiver 等单个组件。请输入完整组件名后选择动作。")
             .setView(input)
-            .setPositiveButton("停用组件") { _, _ ->
-                val componentName = input.text?.toString().orEmpty().trim()
-                val success = ShizukuAdControlRepository.disableComponent(this, componentName)
-                showOperationResult(if (success) "组件停用成功" else "组件停用失败，请确认组件名完整且系统支持该操作")
-            }
-            .setNeutralButton("恢复组件") { _, _ ->
-                val componentName = input.text?.toString().orEmpty().trim()
-                val success = ShizukuAdControlRepository.enableComponent(this, componentName)
-                showOperationResult(if (success) "组件恢复成功" else "组件恢复失败，请确认组件名完整且系统支持该操作")
-            }
+            .setPositiveButton("停用组件", null)
+            .setNeutralButton("恢复组件", null)
             .setNegativeButton("取消", null)
-            .show()
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                if (runManualComponentAction(input, disable = true)) {
+                    dialog.dismiss()
+                }
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                if (runManualComponentAction(input, disable = false)) {
+                    dialog.dismiss()
+                }
+            }
+        }
+        dialog.showSafely(this, "Show manual component govern dialog failed") ?: return
+    }
+
+    private fun runManualComponentAction(input: EditText, disable: Boolean): Boolean {
+        val componentName = input.text?.toString().orEmpty().trim()
+        if (componentName.isBlank()) {
+            showShortToast("请先输入完整组件名")
+            return false
+        }
+        executeGovernAction {
+            val success = if (disable) {
+                ShizukuAdControlRepository.disableComponent(this@SettingsActivity, componentName)
+            } else {
+                ShizukuAdControlRepository.enableComponent(this@SettingsActivity, componentName)
+            }
+            if (success) {
+                if (disable) "组件停用成功" else "组件恢复成功"
+            } else {
+                if (disable) "组件停用失败，请确认组件名完整且系统支持该操作" else "组件恢复失败，请确认组件名完整且系统支持该操作"
+            }
+        }
+        return true
+    }
+
+    private fun executeGovernAction(action: () -> String) {
+        lifecycleScope.launch {
+            val message = withContext(Dispatchers.IO) {
+                action()
+            }
+            if (!isFinishing && !isDestroyed) {
+                showOperationResult(message)
+            }
+        }
     }
 
     private fun discoverPromoComponentCandidates(packageName: String): List<PromoComponentCandidate> {
@@ -879,40 +971,19 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun discoverPromoGovernTargets(installedOnly: Boolean, scope: PromoGovernScope): List<PromoGovernTarget> {
-        val packageStatusCache = linkedMapOf<String, ShizukuAdControlRepository.PackageControlStatus>()
-        fun packageStatus(packageName: String): ShizukuAdControlRepository.PackageControlStatus {
-            return packageStatusCache.getOrPut(packageName) {
-                ShizukuAdControlRepository.queryPackageStatus(this, packageName)
-            }
-        }
-        val presetTargets = ShizukuAdControlCatalog.allPresets()
-            .groupBy { it.packageName }
-            .mapNotNull { (packageName, relatedPresets) ->
-                val status = packageStatus(packageName)
-                if (installedOnly && !status.installed) return@mapNotNull null
-                val primary = relatedPresets.first()
-                PromoGovernTarget(
-                    packageName = packageName,
-                    title = primary.title,
-                    category = primary.category,
-                    description = primary.description,
-                    sourceLabel = "预置目录",
-                    systemApp = true,
-                    relatedPresets = relatedPresets
-                )
-            }
-        val presetPackages = presetTargets.mapTo(linkedSetOf()) { it.packageName }
         val autoTargets = packageManager.getInstalledApplications(0)
             .asSequence()
             .filter { it.packageName != packageName }
-            .filterNot { it.packageName in presetPackages }
+            .filter { appInfo ->
+                // 只治理第三方 App，不治理系统 App
+                val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                !isSystem
+            }
             .mapNotNull { appInfo ->
-                val target = buildThirdPartyPromoTarget(appInfo) ?: return@mapNotNull null
-                target
+                buildThirdPartyPromoTarget(appInfo)
             }
             .toList()
-        return (presetTargets + autoTargets)
-            .distinctBy { it.packageName }
+        return autoTargets
             .filter { target ->
                 when (scope) {
                     PromoGovernScope.ALL -> true
@@ -920,7 +991,7 @@ class SettingsActivity : BaseActivity() {
                     PromoGovernScope.THIRD_PARTY_ONLY -> !target.systemApp
                 }
             }
-            .sortedWith(compareBy<PromoGovernTarget> { !packageStatus(it.packageName).installed }.thenBy { it.category }.thenBy { it.title })
+            .sortedWith(compareBy<PromoGovernTarget> { it.category }.thenBy { it.title })
     }
 
     private fun buildThirdPartyPromoTarget(appInfo: ApplicationInfo): PromoGovernTarget? {
@@ -928,28 +999,81 @@ class SettingsActivity : BaseActivity() {
         val label = packageManager.getApplicationLabel(appInfo)?.toString().orEmpty().ifBlank { packageName }
         val lowerLabel = label.lowercase()
         val lowerPackage = packageName.lowercase()
-        if (!looksLikeThirdPartyPromoApp(lowerLabel, lowerPackage)) return null
+        val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+        
+        // 系统 App 直接过滤，不治理
+        if (isSystem) return null
+        
         return PromoGovernTarget(
             packageName = packageName,
             title = label,
             category = inferPromoCategory(lowerLabel, lowerPackage),
             description = "适合治理该已安装推广 App 的通知广告、推荐流、营销入口和关联推广行为。",
             sourceLabel = "已安装第三方 App",
-            systemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0,
-            relatedPresets = emptyList()
+            systemApp = false,
+            relatedPresets = emptyList(),
+            packageStatus = ShizukuAdControlRepository.queryPackageStatus(this, packageName)
         )
+    }
+
+    private fun isWellKnownThirdPartyPromoApp(packageName: String, label: String): Boolean {
+        val lowerPackage = packageName.lowercase()
+        val lowerLabel = label.lowercase()
+        val wellKnownPrefixes = listOf(
+            "com.taobao.", "com.tmall.", "com.alibaba.", "com.alipay.", "com.xiami.",
+            "com.meituan.", "com.sankuai.", "com.dianping.",
+            "com.jingdong.", "com.jd.",
+            "com.ss.android.ugc.aweme", "com.ss.android.article.news", "com.ss.android.article.lite",
+            "com.iesdouyin.", "com.zhiliaoapp.musically",
+            "com.tencent.mm", "com.tencent.mobileqq", "com.tencent.qqlive", "com.tencent.qqmusic",
+            "com.tencent.news", "com.tencent.reading", "com.tencent.map", "com.tencent.mmwork",
+            "com.qq.reader", "com.sina.weibo", "com.sina.news",
+            "com.smile.gifmaker", "com.kuaishou.",
+            "tv.danmaku.bili", "com.bilibili.",
+            "com.douyu.", "com.douyutv.", "com.douyin.",
+            "com.eleme.", "me.ele.", "com.rajax.me",
+            "com.didiglobal.", "com.didichuxing.",
+            "com.eg.android.", "com.mybank.", "com.chinamworld.",
+            "com.ctrip.", "com.Qunar", "com.tongcheng.",
+            "com.baidu.netdisk", "com.baidu.searchbox", "com.baidu.BaiduMap",
+            "com.wps.", "cn.wps.",
+            "com.netease.cloudmusic", "com.netease.mail", "com.netease.newsreader",
+            "com.163.mail", "com.netease.mobimail",
+            "com.dragon.read", "com.qidian.",
+            "com.UCMobile", "com.uc.", "com.quark.",
+            "com.autonavi.", "com.amap.",
+            "com.ximalaya.", "com.xunlei.", "com.xunlei.kankan"
+        )
+        val wellKnownLabelHints = listOf(
+            "淘宝", "天猫", "美团", "大众点评", "京东", "京东到家", "拼多多", "唯品会",
+            "今日头条", "头条", "抖音", "快手", "哔哩哔哩", "bilibili",
+            "微博", "微信", "qq", "qq音乐", "腾讯视频", "爱奇艺", "优酷",
+            "支付宝", "百度地图", "高德地图", "美团外卖", "饿了么",
+            "滴滴", "携程", "去哪儿",
+            "百度网盘", "wps", "网易云音乐", "qq邮箱", "网易邮箱",
+            "番茄小说", "起点", "uc浏览器", "夸克", "喜马拉雅", "迅雷"
+        )
+        if (wellKnownPrefixes.any { lowerPackage.startsWith(it) }) return true
+        if (wellKnownLabelHints.any { lowerLabel.contains(it) }) return true
+        return false
     }
 
     private fun looksLikeThirdPartyPromoApp(lowerLabel: String, lowerPackage: String): Boolean {
         val labelHints = listOf(
             "应用商店", "软件商店", "浏览器", "阅读", "小说", "免费小说", "短剧", "视频", "资讯", "新闻",
             "壁纸", "主题", "锁屏", "搜索", "内容中心", "内容服务", "游戏中心", "游戏盒子", "助手",
-            "推荐", "精选", "热点", "发现", "看看", "赚钱", "福利", "红包"
+            "推荐", "精选", "热点", "发现", "看看", "赚钱", "福利", "红包",
+            "淘宝", "天猫", "美团", "京东", "拼多多", "唯品会",
+            "今日头条", "头条", "抖音", "快手", "哔哩哔哩", "微博",
+            "支付宝", "饿了么", "携程", "去哪儿", "百度网盘", "网易云音乐", "喜马拉雅"
         )
         val packageHints = listOf(
             "appstore", "market", "browser", "reader", "novel", "book", "video", "news", "wallpaper",
             "theme", "lockscreen", "search", "assistant", "gamecenter", "gamebox", "content", "promo",
-            "recommend", "discover", "hot", "reward", "benefit", "ad", "union"
+            "recommend", "discover", "hot", "reward", "benefit", "ad", "union",
+            "jd.com", "jdmall", "jingdong", "sankuai", "meituan", "taobao", "tmall", "alibaba",
+            "toutiao", "jinritoutiao", "douyin", "bytedance", "iesdouyin", "kuaishou", "bilibili",
+            "weibo", "sina", "eleme", "ctrip", "qunar", "ximalaya"
         )
         val oemHints = listOf(
             "heytap", "coloros", "realme", "vivo", "iqoo", "oppo", "miui", "xiaomi", "redmi",
@@ -973,7 +1097,9 @@ class SettingsActivity : BaseActivity() {
             listOf("锁屏", "lockscreen").any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> "锁屏推荐"
             listOf("小说", "阅读", "novel", "reader", "book").any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> "阅读推广"
             listOf("短剧", "视频", "video").any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> "视频推广"
-            listOf("资讯", "新闻", "热点", "news", "hot").any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> "资讯推荐"
+            listOf("资讯", "新闻", "热点", "news", "hot", "头条").any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> "资讯推荐"
+            listOf("淘宝", "京东", "美团", "拼多多", "商城", "mall", "jd.com", "jingdong", "taobao", "meituan").any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> "电商推广"
+            listOf("饿了么", "外卖", "eleme").any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> "外卖推广"
             listOf("应用商店", "软件商店", "market", "appstore").any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> "系统推广"
             listOf("搜索", "助手", "search", "assistant").any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> "内容推荐"
             listOf("游戏中心", "gamecenter").any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> "系统推广"
@@ -982,12 +1108,10 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun showOperationResult(message: String) {
-        if (AdBlockVpnService.isRunning) {
-            startService(Intent(this, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
-        }
+        NetworkKernel.reloadIfRunning(this)
         val operationSummary = ShizukuAdControlRepository.getLastOperationSummary(this)
             .takeIf { it.isNotBlank() && it != "idle" }
-        MaterialAlertDialogBuilder(this)
+        StableDialog.builder(this)
             .setMessage(
                 buildString {
                     append(message)
@@ -998,6 +1122,6 @@ class SettingsActivity : BaseActivity() {
                 }
             )
             .setPositiveButton("确定", null)
-            .show()
+            .showSafely(this, "Show govern result dialog failed")
     }
 }

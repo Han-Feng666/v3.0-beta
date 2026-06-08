@@ -61,7 +61,9 @@ object DnsMessageParser {
     }
 
     fun buildCacheKey(question: DnsQuestion): String {
-        return "${question.domain.lowercase()}|${question.qType}"
+        val d = question.domain
+        val normalized = if (d == d.lowercase()) d else d.lowercase()
+        return "${normalized}|${question.qType}"
     }
 
     fun isCacheableResponse(response: ByteArray, question: DnsQuestion): Boolean {
@@ -133,55 +135,18 @@ object DnsMessageParser {
     }
 
     fun extractCnameTargets(response: ByteArray, question: DnsQuestion): List<String> {
-        if (response.size < 12) return emptyList()
-        val parsedQuestion = parseQuestion(response) ?: return emptyList()
-        if (!parsedQuestion.domain.equals(question.domain, ignoreCase = true)) return emptyList()
-        val questionCount = readShort(response, 4)
-        val totalRecordCount = totalRecordCount(response)
-        if (questionCount <= 0 || totalRecordCount <= 0) return emptyList()
-        var offset = 12
-        repeat(questionCount) {
-            offset = skipName(response, offset) ?: return emptyList()
-            if (offset + 4 > response.size) return emptyList()
-            offset += 4
-        }
         val targets = linkedSetOf<String>()
-        repeat(totalRecordCount) {
-            offset = skipName(response, offset) ?: return@repeat
-            if (offset + 10 > response.size) return@repeat
-            val type = readShort(response, offset)
-            val dataLength = readShort(response, offset + 8)
-            offset += 10
-            if (offset + dataLength > response.size) return@repeat
+        forEachAnswerRecord(response, question) { _, type, offset, _ ->
             if (type == TYPE_CNAME) {
                 decodeName(response, offset)?.let { targets += it.lowercase() }
             }
-            offset += dataLength
         }
         return targets.toList()
     }
 
     fun extractAliasTargets(response: ByteArray, question: DnsQuestion): List<String> {
-        if (response.size < 12) return emptyList()
-        val parsedQuestion = parseQuestion(response) ?: return emptyList()
-        if (!parsedQuestion.domain.equals(question.domain, ignoreCase = true)) return emptyList()
-        val questionCount = readShort(response, 4)
-        val totalRecordCount = totalRecordCount(response)
-        if (questionCount <= 0 || totalRecordCount <= 0) return emptyList()
-        var offset = 12
-        repeat(questionCount) {
-            offset = skipName(response, offset) ?: return emptyList()
-            if (offset + 4 > response.size) return emptyList()
-            offset += 4
-        }
         val targets = linkedSetOf<String>()
-        repeat(totalRecordCount) {
-            offset = skipName(response, offset) ?: return@repeat
-            if (offset + 10 > response.size) return@repeat
-            val type = readShort(response, offset)
-            val dataLength = readShort(response, offset + 8)
-            offset += 10
-            if (offset + dataLength > response.size) return@repeat
+        forEachAnswerRecord(response, question) { _, type, offset, dataLength ->
             when (type) {
                 TYPE_CNAME -> {
                     decodeName(response, offset)?.let { targets += it.lowercase() }
@@ -191,7 +156,6 @@ object DnsMessageParser {
                     extractSvcbTarget(response, offset, dataLength)?.let { targets += it.lowercase() }
                 }
             }
-            offset += dataLength
         }
         return targets.toList()
     }
@@ -201,33 +165,43 @@ object DnsMessageParser {
     }
 
     fun extractAnswerAddresses(response: ByteArray, question: DnsQuestion): List<ByteArray> {
-        if (response.size < 12) return emptyList()
-        val parsedQuestion = parseQuestion(response) ?: return emptyList()
-        if (!parsedQuestion.domain.equals(question.domain, ignoreCase = true)) return emptyList()
+        val results = mutableListOf<ByteArray>()
+        forEachAnswerRecord(response, question) { _, type, offset, dataLength ->
+            when {
+                type == TYPE_A && dataLength == 4 -> results += response.copyOfRange(offset, offset + 4)
+                type == TYPE_AAAA && dataLength == 16 -> results += response.copyOfRange(offset, offset + 16)
+            }
+        }
+        return results
+    }
+
+    private fun forEachAnswerRecord(
+        response: ByteArray,
+        question: DnsQuestion,
+        block: (index: Int, type: Int, dataOffset: Int, dataLength: Int) -> Unit
+    ) {
+        if (response.size < 12) return
+        val parsedQuestion = parseQuestion(response) ?: return
+        if (!parsedQuestion.domain.equals(question.domain, ignoreCase = true)) return
         val questionCount = readShort(response, 4)
         val totalRecordCount = totalRecordCount(response)
-        if (questionCount <= 0 || totalRecordCount <= 0) return emptyList()
+        if (questionCount <= 0 || totalRecordCount <= 0) return
         var offset = 12
         repeat(questionCount) {
-            offset = skipName(response, offset) ?: return emptyList()
-            if (offset + 4 > response.size) return emptyList()
+            offset = skipName(response, offset) ?: return
+            if (offset + 4 > response.size) return
             offset += 4
         }
-        val results = mutableListOf<ByteArray>()
-        repeat(totalRecordCount) {
+        repeat(totalRecordCount) { index ->
             offset = skipName(response, offset) ?: return@repeat
             if (offset + 10 > response.size) return@repeat
             val type = readShort(response, offset)
             val dataLength = readShort(response, offset + 8)
             offset += 10
             if (offset + dataLength > response.size) return@repeat
-            when {
-                type == TYPE_A && dataLength == 4 -> results += response.copyOfRange(offset, offset + 4)
-                type == TYPE_AAAA && dataLength == 16 -> results += response.copyOfRange(offset, offset + 16)
-            }
+            block(index, type, offset, dataLength)
             offset += dataLength
         }
-        return results
     }
 
     private fun extractSvcbTarget(buffer: ByteArray, offset: Int, dataLength: Int): String? {
