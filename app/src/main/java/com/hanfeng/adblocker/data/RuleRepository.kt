@@ -9,6 +9,8 @@ import com.HanFeng.model.RemoteRuleSourceConfig
 import com.HanFeng.model.RuleSource
 import java.io.InputStream
 import java.io.File
+import java.io.FileWriter
+import java.io.BufferedWriter
 import java.net.InetAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
