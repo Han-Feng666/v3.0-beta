@@ -16,9 +16,11 @@ object HttpMitmFilter {
     private const val MAX_HTTP2_DATA_SAMPLE_BYTES = 64 * 1024  // 增强：8KB→64KB（提高 JSON 广告识别率）
     
     // 正则表达式缓存（P1 优化）
-    private val compiledReplaceRules = ConcurrentHashMap<String, Regex>(256)
+    private val compiledReplaceRules = object : LinkedHashMap<String, Regex>(512, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Regex>?): Boolean = size > 512
+    }
     private val compiledReplaceRulesLock = Any()
-    private const val MAX_COMPILED_REGEX_CACHE = 512
+    private const val MAX_COMPILED_REGEX_CACHE = 1024
     private val http2ImmediateBlockReasons = setOf(
         "blocked-host", "blocked-url", "general-ad-traffic", "novel-app-aggressive", "novel-protected-path",
         "domestic-sdk-signal", "reward-unlock-path", "doh-request", "json-ad-field", "json-ad-array",
@@ -26,6 +28,8 @@ object HttpMitmFilter {
         "reader-ad-cluster", "comment-ad-path", "comment-ad-cluster", "comment-ad-extended", "comment-ad-float-extended",
         "comment-ad-flow-extended", "comment-ad-insert-extended", "coolapk-comment-ad-extended", "comment-ad-material-extended",
         "comment-ad-popup-extended", "comment-commerce-path", "comment-commerce-ad-extended", "comment-gdt-commerce-ad-extended",
+        "comment-sponsored-card-extended", "comment-native-ad-extended", "comment-track-ad-extended",
+        "feed-sponsored-card-extended", "timeline-native-ad-extended", "stream-commercial-card-extended",
         "push-recommend-material-extended", "message-center-card-ad-extended", "gdt-sdk-ad-extended",
         "ali-sdk-ad-extended", "shortvideo-sdk-ad-extended", "video-ad-cluster", "feed-ad-extended",
         "push-recommend-ad-extended", "message-center-ad-material-extended", "sign-task-benefit-ad-extended",
@@ -79,11 +83,13 @@ object HttpMitmFilter {
         "stream_card_ad", "timeline_insert_ad", "recommend_card_ad", "reward_popup", "chapter_unlock_ad", "free_read_card",
         "open_screen_cache", "splash_cache", "startup_cache", "launch_cache", "opening_ad", "open_screen_material", "splash_material",
         "comment_guide_ad", "comment_float_ad", "reply_promote_card", "floor_insert_ad", "comment_hot_ad", "comment_promote_card", "comment_stream_ad",
+        "comment_sponsor_card", "reply_sponsor_card", "floor_sponsor_card", "comment_native_ad", "reply_native_ad", "comment_commercial_card",
         "reader_bottom_ad", "page_turn_ad", "turn_page_ad", "flip_page_ad", "page_insert_ad", "chapter_next_ad", "reading_page_ad", "chapter_page_ad",
         // 社区 App 广告特征
         "feed_insert_ad", "timeline_ad", "stream_ad", "list_ad", "card_ads", "card_ad", "ad_banner", "ad_banners",
         "comment_ad", "comment_ads", "reply_ad", "reply_ads", "floor_ad", "post_ad", "post_ads",
         "subject_ad", "topic_ad", "hashtag_ad", "tag_ad", "explore_ad", "discovery_ad",
+        "sponsor_card", "sponsored_card", "native_card_ad", "commercial_card", "brand_card", "brand_feed_card",
         // 短视频/直播广告
         "live_ad", "live_ads", "streamer_ad", "anchor_ad", "video_card_ad", "short_video_ad",
         // 电商广告
@@ -92,7 +98,8 @@ object HttpMitmFilter {
         "task_ad", "task_ads", "sign_ad", "sign_ads", "checkin_ad", "daily_ad", "benefit_ad", "coin_ad",
         // 信息流广告变种
         "feed_detail_ad", "article_ad", "article_ads", "news_ad", "news_ads", "content_ad", "content_ads",
-        "media_ad", "media_ads", "image_ad", "image_ads", "pic_ad", "pic_ads", "gallery_ad"
+        "media_ad", "media_ads", "image_ad", "image_ads", "pic_ad", "pic_ads", "gallery_ad",
+        "timeline_sponsor", "timeline_commercial", "stream_sponsor", "stream_commercial", "feed_sponsor", "feed_commercial"
     )
     private val strongResponseAdKeywords = listOf(
         "advertisement",
@@ -196,6 +203,9 @@ object HttpMitmFilter {
         "ad_config", "adconfig", "ad_param", "adparam", "ad_params", "adparams",
         "ad_strategy", "adstrategy", "ad_plan", "adplan", "ad_schedule", "adschedule",
         "ad_statistics", "adstatistics", "ad_track", "adtrack", "ad_log", "adlog",
+        "ad_payload", "adpayload", "ad_meta", "admeta", "ad_trace", "adtrace", "ad_event", "adevent",
+        "sponsor_info", "sponsorinfo", "sponsored_info", "commercial_info", "native_ad", "nativead",
+        "impression_url", "impressionurl", "monitor_url", "monitorurl", "exposure_url", "exposureurl",
         "ad_report", "adreport", "ad_analytics", "adanalytics", "ad_monitor", "admonitor",
         "cache_buster", "cachebuster", "sdk_version", "sdkversion", "placement_type", "placementtype",
         "ad_html", "adhtml", "ad_template", "adtemplate", "ad_payload", "adpayload",
@@ -1779,10 +1789,13 @@ object HttpMitmFilter {
     private fun inspectCommentAdBodySignals(lowerBody: String): CommentAdBodySignals {
         return CommentAdBodySignals(
             commentAdMaterialHit = listOf(
-                "\"ad_material", "\"material_url", "\"landing_url", "\"click_url", "\"show_url", "\"deep_link"
+                "\"ad_material", "\"material_url", "\"landing_url", "\"click_url", "\"show_url", "\"deep_link",
+                "\"impression_url", "\"monitor_url", "\"track_url", "\"creative_id", "\"ad_payload",
+                "\"native_ad", "\"ad_data", "\"ad_info"
             ).any(lowerBody::contains),
             commentRecommendCardHit = listOf(
-                "\"recommend_card", "\"promotion_card", "\"discover_card", "\"ad_card", "\"promo_card"
+                "\"recommend_card", "\"promotion_card", "\"discover_card", "\"ad_card", "\"promo_card",
+                "\"sponsor_card", "\"sponsored_card", "\"commercial_card", "\"native_card_ad", "\"brand_card"
             ).any(lowerBody::contains),
             commentCommerceSignalHit = commentCommerceAdSignals.count(lowerBody::contains),
             commentCommerceCardHit = listOf(
@@ -1841,11 +1854,24 @@ object HttpMitmFilter {
     }
 
     private fun containsAnyContentType(contentType: String, vararg tokens: String): Boolean {
-        return tokens.any(contentType::contains)
+        for (token in tokens) {
+            if (contentType.contains(token, ignoreCase = false)) return true
+        }
+        return false
     }
 
     private fun containsAny(value: String, vararg tokens: String): Boolean {
-        return tokens.any(value::contains)
+        for (token in tokens) {
+            if (value.indexOf(token, 0, ignoreCase = false) >= 0) return true
+        }
+        return false
+    }
+
+    private fun containsAnyIgnoreCase(value: String, vararg tokens: String): Boolean {
+        for (token in tokens) {
+            if (value.indexOf(token, 0, ignoreCase = true) >= 0) return true
+        }
+        return false
     }
 
     private fun looksLikeCommentAdPath(path: String): Boolean {
@@ -1854,13 +1880,17 @@ object HttpMitmFilter {
         if (!commentScene) return false
         return path.contains("ad") ||
             path.contains("promo") ||
+            path.contains("sponsor") ||
+            path.contains("commercial") ||
+            path.contains("native") ||
             path.contains("banner") ||
             path.contains("insert") ||
             path.contains("material") ||
             path.contains("landing") ||
             path.contains("recommend") ||
             path.contains("flow") ||
-            path.contains("card")
+            path.contains("card") ||
+            path.contains("brand")
     }
 
     private fun looksLikeCommentCommerceAdPath(path: String): Boolean {
@@ -2360,21 +2390,14 @@ object HttpMitmFilter {
     private fun getCompiledRegex(pattern: String, flags: String): Regex? {
         val cacheKey = "$pattern|$flags"
         
-        // 先查缓存
+        // 先查缓存（LinkedHashMap 自动处理 LRU）
         compiledReplaceRules[cacheKey]?.let { return it }
         
         // 缓存未命中，编译新正则
         val regex = runCatching { Regex(pattern, buildReplaceRegexOptions(flags)) }.getOrNull() ?: return null
         
-        // 存入缓存（检查容量）
-        synchronized(compiledReplaceRulesLock) {
-            if (compiledReplaceRules.size >= MAX_COMPILED_REGEX_CACHE) {
-                // 简单清理：移除最早的 20% 条目
-                val toRemove = compiledReplaceRules.keys.take(MAX_COMPILED_REGEX_CACHE / 5).toList()
-                toRemove.forEach { key -> compiledReplaceRules.remove(key) }
-            }
-            compiledReplaceRules[cacheKey] = regex
-        }
+        // 存入缓存（LinkedHashMap 自动清理）
+        compiledReplaceRules[cacheKey] = regex
         
         return regex
     }
@@ -2701,17 +2724,31 @@ object HttpMitmFilter {
         val pushSceneHit = containsAny("\"push", "\"notification", "\"notify", "\"message", "\"inbox")
         val messageCenterSceneHit = containsAny("\"message_center", "\"inbox_list", "\"notify_list", "\"bulletin_list")
         val directMessageSceneHit = containsAny("\"push_message", "\"notification_message", "\"system_message", "\"operation_message")
-        val adMaterialHit = containsAny("\"ad_material", "\"material_url", "\"landing_url", "\"click_url", "\"show_url")
-        val deepLinkMaterialHit = containsAny("\"deep_link", "\"download_url", "\"landing_url", "\"ad_material")
-        val recommendCardHit = containsAny("\"recommend_card", "\"promotion_card", "\"discover_card", "\"ad_card")
-        val commentAdPlacementHit = containsAny("\"ad_card", "\"reply_ad", "\"floor_ad")
+        val adMaterialHit = containsAny(
+            "\"ad_material", "\"material_url", "\"landing_url", "\"click_url", "\"show_url",
+            "\"impression_url", "\"monitor_url", "\"track_url", "\"creative_id", "\"material_id",
+            "\"ad_info", "\"ad_data", "\"ad_payload", "\"native_ad"
+        )
+        val deepLinkMaterialHit = containsAny("\"deep_link", "\"download_url", "\"landing_url", "\"ad_material", "\"target_url")
+        val recommendCardHit = containsAny(
+            "\"recommend_card", "\"promotion_card", "\"discover_card", "\"ad_card",
+            "\"sponsor_card", "\"sponsored_card", "\"commercial_card", "\"brand_card", "\"native_card_ad"
+        )
+        val commentAdPlacementHit = containsAny(
+            "\"ad_card", "\"reply_ad", "\"floor_ad", "\"comment_ad", "\"comment_ads",
+            "\"sponsor_card", "\"comment_sponsor", "\"reply_sponsor", "\"commercial_card", "\"native_ad"
+        )
         val commentSceneExtendedHit = containsAny(
             "\"comment_banner", "\"comment_ad_card", "\"comment_insert_ad", "\"reply_banner",
-            "\"reply_ad_card", "\"floor_banner", "\"floor_promote", "\"comment_sponsor", "\"reply_sponsor"
+            "\"reply_ad_card", "\"floor_banner", "\"floor_promote", "\"comment_sponsor", "\"reply_sponsor",
+            "\"comment_sponsor_card", "\"reply_sponsor_card", "\"floor_sponsor_card", "\"comment_commercial_card",
+            "\"comment_native_ad", "\"reply_native_ad", "\"comment_brand_card"
         )
         val commentMaterialSceneHit = containsAny(
             "\"comment_material", "\"reply_material", "\"floor_material", "\"comment_landing_url",
-            "\"reply_landing_url", "\"comment_click_url", "\"reply_click_url", "\"comment_deep_link"
+            "\"reply_landing_url", "\"comment_click_url", "\"reply_click_url", "\"comment_deep_link",
+            "\"comment_track_url", "\"reply_track_url", "\"comment_impression_url", "\"reply_impression_url",
+            "\"comment_monitor_url", "\"reply_monitor_url"
         )
         val commentCommerceSceneHit = containsAny(
             "\"comment_goods", "\"reply_goods", "\"floor_goods", "\"comment_product", "\"reply_product",
@@ -2729,7 +2766,9 @@ object HttpMitmFilter {
         val commentFlowSceneHit = containsAny("\"comment_feed_ad", "\"comment_flow_ad", "\"reply_flow_ad", "\"floor_flow_ad")
         val feedExtendedSceneHit = containsAny(
             "\"stream_card_ad", "\"timeline_ad", "\"timeline_insert_ad", "\"recommend_ad", "\"recommend_card_ad",
-            "\"feed_banner", "\"feed_card", "\"feed_insert_ad", "\"information_flow_ad", "\"stream_insert_ad", "\"information_flow"
+            "\"feed_banner", "\"feed_card", "\"feed_insert_ad", "\"information_flow_ad", "\"stream_insert_ad", "\"information_flow",
+            "\"feed_sponsor", "\"feed_commercial", "\"stream_sponsor", "\"stream_commercial", "\"timeline_sponsor",
+            "\"timeline_commercial", "\"native_feed_ad", "\"brand_feed_card"
         )
         val pushRecommendSceneHit = containsAny("\"recommend_ad", "\"recommend_card_ad", "\"promotion", "\"promo")
         val pushMaterialSceneHit = containsAny(
@@ -2841,11 +2880,13 @@ object HttpMitmFilter {
         val mediationSceneHit = sdkMediationSceneHit || containsAny("\"bidding\"", "\"auction\"")
         val commentInsertPlacementHit = containsAny(
             "\"comment_guide_ad\"", "\"comment_hot_ad\"", "\"comment_float_ad\"", "\"comment_promote_card\"",
-            "\"comment_stream_ad\"", "\"reply_promote_card\"", "\"floor_insert_ad\"", "\"comment_promote\""
+            "\"comment_stream_ad\"", "\"reply_promote_card\"", "\"floor_insert_ad\"", "\"comment_promote\"",
+            "\"comment_sponsor_card\"", "\"reply_sponsor_card\"", "\"comment_native_ad\"", "\"comment_commercial_card\""
         )
         val commentMaterialPlacementHit = containsAny(
             "\"comment_promote\"", "\"reply_promote\"", "\"floor_promote\"", "\"comment_material\"",
-            "\"reply_material\"", "\"floor_material\"", "\"comment_landing_url\"", "\"reply_landing_url\"", "\"post_landing_url\""
+            "\"reply_material\"", "\"floor_material\"", "\"comment_landing_url\"", "\"reply_landing_url\"", "\"post_landing_url\"",
+            "\"comment_track_url\"", "\"comment_impression_url\"", "\"reply_track_url\"", "\"reply_impression_url\""
         )
         val commentPopupPlacementExtendedHit = containsAny(
             "\"comment_popup_ad\"", "\"comment_bottom_ad\"", "\"reply_bottom_ad\"", "\"floor_bottom_ad\""
@@ -3164,6 +3205,17 @@ object HttpMitmFilter {
             (adMaterialHit || deepLinkMaterialHit || recommendCardHit)) {
             addBodySignalReason(accumulator, 3, "comment-ad-material-extended")
         }
+        if (commentOrPostSceneHit && recommendCardHit && (adMaterialHit || deepLinkMaterialHit)) {
+            addBodySignalReason(accumulator, 4, "comment-sponsored-card-extended")
+        }
+        if (commentOrPostSceneHit && containsAny("\"native_ad", "\"native_card_ad", "\"commercial_card") &&
+            (adMaterialHit || clickOrMaterialSceneHit)) {
+            addBodySignalReason(accumulator, 4, "comment-native-ad-extended")
+        }
+        if (commentOrPostSceneHit && adMaterialHit &&
+            containsAny("\"track_url", "\"impression_url", "\"monitor_url", "\"exposure_url")) {
+            addBodySignalReason(accumulator, 4, "comment-track-ad-extended")
+        }
         if (commentOrPostSceneHit && commentCommerceSceneHit &&
             (recommendCardHit || adMaterialHit || deepLinkMaterialHit)) {
             addBodySignalReason(accumulator, 4, "comment-commerce-ad-extended")
@@ -3188,6 +3240,17 @@ object HttpMitmFilter {
         }
         if (recommendFeedSceneHit && feedExtendedSceneHit) {
             addBodySignalReason(accumulator, 2, "feed-ad-extended")
+        }
+        if (feedSceneHit && recommendCardHit && (adMaterialHit || deepLinkMaterialHit)) {
+            addBodySignalReason(accumulator, 4, "feed-sponsored-card-extended")
+        }
+        if (feedSceneHit && containsAny("\"native_feed_ad", "\"native_card_ad", "\"brand_feed_card") &&
+            (adMaterialHit || clickOrMaterialSceneHit)) {
+            addBodySignalReason(accumulator, 4, "timeline-native-ad-extended")
+        }
+        if (feedSceneHit && containsAny("\"stream_commercial", "\"timeline_commercial", "\"feed_commercial") &&
+            (recommendCardHit || adMaterialHit)) {
+            addBodySignalReason(accumulator, 4, "stream-commercial-card-extended")
         }
         if (pushSceneHit && (pushRecommendSceneHit || adMaterialHit)) {
             addBodySignalReason(accumulator, 3, "push-recommend-ad-extended")
@@ -4200,6 +4263,9 @@ object HttpMitmFilter {
             "/page_turn_ad", "/turn_page_ad", "/flip_page_ad", "/page_footer_ad", "/chapter_footer_ad",
             "/comment/popup/ad", "/comment_bottom_ad", "/reply_bottom_ad", "/launch_screen_ad", "/startup_page_ad",
             "/startup_preload_ad", "/open_screen_dispatch", "/page_tail_popup", "/chapter_tail_popup", "/comment_flow_ad",
+            "/comment/sponsor", "/comment/native", "/comment/commercial", "/reply/sponsor", "/floor/sponsor",
+            "/feed/sponsor", "/feed/native", "/feed/commercial", "/timeline/sponsor", "/timeline/native",
+            "/stream/sponsor", "/stream/native", "/stream/commercial", "/post/sponsor", "/post/native",
             "/message_center/ad", "/message/ad", "/notice/ad", "/notify/ad", "/inbox/ad", "/bulletin/ad",
             "/discover/card", "/discover/ad", "/recommend/card", "/promotion/card", "/promo/card",
             "/sign/popup", "/daily/popup", "/mission/popup", "/benefit/popup", "/welfare/popup"
@@ -4210,7 +4276,8 @@ object HttpMitmFilter {
         val strongQueryKeywords = listOf(
             "watch_ad_unlock", "unlock_by_ad", "reward_unlock", "reward_verify", "ad_dispatch", "ad_request",
             "ad_material", "ad_strategy", "ad_platform", "waterfall", "mediation", "biddingtoken", "auctionid",
-            "message_center_ad", "promotion_card", "discover_card", "sign_popup_ad", "benefit_popup_ad", "welfare_popup_ad"
+            "message_center_ad", "promotion_card", "discover_card", "sign_popup_ad", "benefit_popup_ad", "welfare_popup_ad",
+            "sponsor_card", "sponsored_card", "commercial_card", "native_ad", "native_card_ad", "brand_feed_card"
         )
         return strongQueryKeywords.any { keyword -> queryContainsKeywordAssignment(query, keyword) }
     }

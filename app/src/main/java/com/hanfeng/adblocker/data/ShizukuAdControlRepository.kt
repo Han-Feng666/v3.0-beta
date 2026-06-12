@@ -206,6 +206,51 @@ object ShizukuAdControlRepository {
         return result
     }
 
+    fun setNetworkBlocked(context: Context, packageName: String, blocked: Boolean): Boolean {
+        val normalized = packageName.trim()
+        if (normalized.isBlank()) return false
+        val result = runCatching {
+            getService(context)?.setNetworkBlocked(normalized, blocked) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku network control failed: ${e.message ?: e.javaClass.simpleName} package=$normalized blocked=$blocked")
+        }.getOrDefault(false)
+        LogRepository.append(context, "Shizuku network control package=$normalized blocked=$blocked success=$result")
+        return result
+    }
+
+    fun setBackgroundRestricted(context: Context, packageName: String, restricted: Boolean): Boolean {
+        val normalized = packageName.trim()
+        if (normalized.isBlank()) return false
+        val result = runCatching {
+            getService(context)?.setBackgroundRestricted(normalized, restricted) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku background control failed: ${e.message ?: e.javaClass.simpleName} package=$normalized restricted=$restricted")
+        }.getOrDefault(false)
+        LogRepository.append(context, "Shizuku background control package=$normalized restricted=$restricted success=$result")
+        return result
+    }
+
+    fun syncHostsBlocklist(context: Context, domains: List<String>): Boolean {
+        val normalized = domains.map { it.trim().lowercase() }.filter { it.isNotBlank() }.distinct()
+        val result = runCatching {
+            getService(context)?.syncHostsBlocklist(normalized.toTypedArray()) == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku hosts sync failed: ${e.message ?: e.javaClass.simpleName} count=${normalized.size}")
+        }.getOrDefault(false)
+        LogRepository.append(context, "Shizuku hosts sync count=${normalized.size} success=$result")
+        return result
+    }
+
+    fun clearHostsBlocklist(context: Context): Boolean {
+        val result = runCatching {
+            getService(context)?.clearHostsBlocklist() == true
+        }.onFailure { e ->
+            LogRepository.append(context, "Shizuku hosts clear failed: ${e.message ?: e.javaClass.simpleName}")
+        }.getOrDefault(false)
+        LogRepository.append(context, "Shizuku hosts clear success=$result")
+        return result
+    }
+
     fun uninstallPackageForUser(context: Context, packageName: String, userId: Int = 0): Boolean {
         val normalized = packageName.trim()
         if (normalized.isBlank()) return false

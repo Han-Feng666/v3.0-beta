@@ -96,6 +96,50 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
         )
     }
 
+    override fun setNetworkBlocked(packageName: String, blocked: Boolean): Boolean {
+        val mode = if (blocked) "ignore" else "allow"
+        return runAppOpsBatch(packageName, listOf("INTERNET" to mode))
+    }
+
+    override fun setBackgroundRestricted(packageName: String, restricted: Boolean): Boolean {
+        val mode = if (restricted) "ignore" else "allow"
+        val standbyBucket = if (restricted) "restricted" else "active"
+        val appOpsOk = runAppOpsBatch(
+            packageName,
+            listOf(
+                "RUN_IN_BACKGROUND" to mode,
+                "RUN_ANY_IN_BACKGROUND" to mode,
+                "WAKE_LOCK" to mode
+            )
+        )
+        val standbyOk = runShellCommandWithFallback(
+            listOf(
+                listOf("am", "set-standby-bucket", packageName, standbyBucket),
+                listOf("cmd", "usage", "set-standby-bucket", packageName, standbyBucket)
+            )
+        )
+        return appOpsOk || standbyOk
+    }
+
+    override fun syncHostsBlocklist(domains: Array<String>): Boolean {
+        val sanitized = domains.map { it.trim().lowercase() }
+            .filter { it.isNotBlank() && it.all { ch -> ch.isLetterOrDigit() || ch == '.' || ch == '-' } }
+            .distinct()
+        if (sanitized.isEmpty()) return clearHostsBlocklist()
+        val block = buildString {
+            appendLine("# === HanFeng AdBlock Start ===")
+            sanitized.forEach { domain -> appendLine("0.0.0.0 $domain") }
+            appendLine("# === HanFeng AdBlock End ===")
+        }
+        val script = "tmp=\$(mktemp); sed '/# === HanFeng AdBlock Start ===/,/# === HanFeng AdBlock End ===/d' /system/etc/hosts > \$tmp; printf '%s\\n' '${escapeShellSingleQuoted(block)}' >> \$tmp; cp \$tmp /system/etc/hosts; chmod 644 /system/etc/hosts"
+        return runShellCommandWithFallback(listOf(listOf("sh", "-c", script)))
+    }
+
+    override fun clearHostsBlocklist(): Boolean {
+        val script = "tmp=\$(mktemp); sed '/# === HanFeng AdBlock Start ===/,/# === HanFeng AdBlock End ===/d' /system/etc/hosts > \$tmp; cp \$tmp /system/etc/hosts; chmod 644 /system/etc/hosts"
+        return runShellCommandWithFallback(listOf(listOf("sh", "-c", script)))
+    }
+
     override fun uninstallPackageForUser(packageName: String, userId: Int): Boolean {
         val safeUserId = if (userId >= 0) userId else 0
         return runShellCommandWithFallback(
@@ -203,6 +247,10 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
         }.getOrElse {
             CommandResult(false, true, "exception command=${command.joinToString(" ")} error=${it.message ?: it.javaClass.simpleName}")
         }
+    }
+
+    private fun escapeShellSingleQuoted(value: String): String {
+        return value.replace("'", "'\\''")
     }
 
     private fun buildSummary(command: String, exitCode: Int, output: String): String {

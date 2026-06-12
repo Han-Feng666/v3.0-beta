@@ -122,6 +122,7 @@ class RemoteRuleSourcesActivity : BaseActivity() {
         whitelistImportMode: RemoteRuleSourceRepository.WhitelistImportMode
     ) {
         binding.loadingOverlay.isVisible = true
+        binding.loadingText.text = if (sourceId == null) "正在同步全部规则源..." else "正在同步规则源..."
         val syncTarget = if (sourceId == null) "all sources" else "source=$sourceId"
         LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] started: $syncTarget, manual=$manual, whitelistMode=$whitelistImportMode")
         LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] userAction=$manual, timeout=60s/120s")
@@ -133,10 +134,17 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             runCatching {
                 withContext(Dispatchers.IO) {
                     if (sourceId == null) {
-                        RemoteRuleSourceRepository.syncEnabledSources(this@RemoteRuleSourcesActivity, whitelistImportMode)
+                        RemoteRuleSourceRepository.syncEnabledSources(this@RemoteRuleSourcesActivity, whitelistImportMode) { current, total, source ->
+                            lifecycleScope.launch {
+                                binding.loadingText.text = "正在同步规则源 $current / $total\n${source.name}\n下载并导入中..."
+                            }
+                        }
                     } else {
                         val source = RuleRepository.getRemoteRuleSources(this@RemoteRuleSourcesActivity).firstOrNull { it.id == sourceId }
                             ?: throw IllegalStateException("规则源不存在")
+                        lifecycleScope.launch {
+                            binding.loadingText.text = "正在同步规则源\n${source.name}\n下载并导入中..."
+                        }
                         listOf(RemoteRuleSourceRepository.syncSource(this@RemoteRuleSourcesActivity, source, whitelistImportMode))
                     }
                 }
@@ -157,9 +165,11 @@ class RemoteRuleSourcesActivity : BaseActivity() {
                 val whitelistConflicts = results.filter { it.whitelistConflictRules > 0 }
                 if (whitelistConflicts.isNotEmpty() && whitelistImportMode == RemoteRuleSourceRepository.WhitelistImportMode.BLOCK) {
                     LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] whitelist conflicts detected=${whitelistConflicts.size}")
+                    binding.loadingOverlay.isVisible = false
                     showWhitelistConflictDialog(sourceId, manual, whitelistConflicts)
                     return@onSuccess
                 }
+                binding.loadingText.text = "正在刷新规则源列表..."
                 loadSources()
                 reloadVpnIfRunning(results.any { it.success })
                 if (manual) {

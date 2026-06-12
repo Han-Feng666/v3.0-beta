@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ImageView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="背景图"
+        android:scaleType="centerCrop"
+        android:src="@drawable/app_background_image" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/bg_main" />
+
+    <LinearLayout
+        android:id="@+id/hostsRoot"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Hosts 编辑"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="每行一个域名。同步会尝试写入系统 hosts；不同系统权限策略不同，失败时可从日志查看服务反馈。"
+            android:textColor="@color/hf_text_secondary"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/hostsInput"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="12dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_panel"
+            android:gravity="top|start"
+            android:hint="ads.example.com&#10;tracker.example.com"
+            android:inputType="textMultiLine|textNoSuggestions"
+            android:padding="12dp"
+            android:textColor="@color/hf_text_primary"
+            android:textColorHint="@color/hf_text_secondary"
+            android:textSize="14sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnSyncHosts"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:text="保存并同步"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+
+            <Space
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/btnClearHosts"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:text="清除同步"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

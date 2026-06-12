@@ -45,6 +45,11 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnExportLogs: Button
     private lateinit var btnBack: Button
     private lateinit var settingsRoot: View
+    
+    private lateinit var btnHostsEditor: Button
+    private lateinit var btnNetworkPermission: Button
+    private lateinit var btnBackgroundRestrict: Button
+    
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode != ShizukuRepository.REQUEST_CODE) return@OnRequestPermissionResultListener
         val granted = grantResult == PackageManager.PERMISSION_GRANTED
@@ -72,6 +77,11 @@ class SettingsActivity : BaseActivity() {
         btnResetHideBackground = findViewById(R.id.btnResetHideBackground)
         btnExportLogs = findViewById(R.id.btnExportLogs)
         btnBack = findViewById(R.id.btnBack)
+        
+        // Shizuku 增强
+        btnHostsEditor = findViewById(R.id.btnHostsEditor)
+        btnNetworkPermission = findViewById(R.id.btnNetworkPermission)
+        btnBackgroundRestrict = findViewById(R.id.btnBackgroundRestrict)
 
         val initialTopPadding = settingsRoot.paddingTop
         val initialBottomPadding = settingsRoot.paddingBottom
@@ -92,6 +102,7 @@ class SettingsActivity : BaseActivity() {
             }
             updateShizukuActionState()
         }
+
         switchHideBackground.setOnCheckedChangeListener { _, isChecked ->
             AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
             applyHideBackgroundPolicy(isChecked)
@@ -130,6 +141,40 @@ class SettingsActivity : BaseActivity() {
         btnExportLogs.setOnClickListener {
             exportLogsToUser()
         }
+        
+        // Shizuku 增强功能按钮
+        btnHostsEditor.setOnClickListener {
+            if (!Shizuku.pingBinder()) {
+                showShortToast("请先授权 Shizuku")
+                return@setOnClickListener
+            }
+            launchActivitySafely(Intent(this, HostsEditorActivity::class.java), failureMessage = "打开 Hosts 编辑失败")
+        }
+        
+        btnNetworkPermission.setOnClickListener {
+            if (!Shizuku.pingBinder()) {
+                showShortToast("请先授权 Shizuku")
+                return@setOnClickListener
+            }
+            launchActivitySafely(
+                Intent(this, ShizukuEnhanceAppsActivity::class.java)
+                    .putExtra(ShizukuEnhanceAppsActivity.EXTRA_MODE, ShizukuEnhanceAppsActivity.MODE_NETWORK),
+                failureMessage = "打开网络权限管理失败"
+            )
+        }
+        
+        btnBackgroundRestrict.setOnClickListener {
+            if (!Shizuku.pingBinder()) {
+                showShortToast("请先授权 Shizuku")
+                return@setOnClickListener
+            }
+            launchActivitySafely(
+                Intent(this, ShizukuEnhanceAppsActivity::class.java)
+                    .putExtra(ShizukuEnhanceAppsActivity.EXTRA_MODE, ShizukuEnhanceAppsActivity.MODE_BACKGROUND),
+                failureMessage = "打开后台限制管理失败"
+            )
+        }
+        
         textShizukuStatus.setOnClickListener {
             if (AppSettingsRepository.isShizukuEnabled(this)) {
                 handleShizukuEnableRequested(fromUser = false)
@@ -1124,4 +1169,5 @@ class SettingsActivity : BaseActivity() {
             .setPositiveButton("确定", null)
             .showSafely(this, "Show govern result dialog failed")
     }
+    
 }

@@ -37,6 +37,14 @@
             android:exported="false" />
 
         <activity
+            android:name="com.HanFeng.ui.HostsEditorActivity"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.ShizukuEnhanceAppsActivity"
+            android:exported="false" />
+
+        <activity
             android:name="com.HanFeng.ui.RemoteRuleSourcesActivity"
             android:exported="false" />
 

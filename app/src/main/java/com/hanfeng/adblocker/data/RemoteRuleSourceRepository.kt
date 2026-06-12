@@ -11,8 +11,8 @@ import java.net.URL
 object RemoteRuleSourceRepository {
     private const val PREFS = "remote_rule_source_repo"
     private const val KEY_LAST_SYNC_AT = "last_sync_at"
-    private const val CONNECT_TIMEOUT_MILLIS = 120_000  // 120 秒（大规则文件需要更长时间建立连接）
-    private const val READ_TIMEOUT_MILLIS = 600_000  // 10 分钟（大规则文件下载可能需要更长时间）
+    private const val CONNECT_TIMEOUT_MILLIS = 180_000  // 180 秒（3 分钟，大规则文件需要更长时间建立连接）
+    private const val READ_TIMEOUT_MILLIS = 1_800_000  // 30 分钟（超大规则文件下载可能需要更长时间）
     private const val SYNC_INTERVAL_MILLIS = 24 * 60 * 60 * 1000L
 
     enum class WhitelistImportMode {
@@ -21,8 +21,14 @@ object RemoteRuleSourceRepository {
         REMOVE_CONFLICTS
     }
 
-    suspend fun syncEnabledSources(context: Context, allowWhitelistDomains: Boolean = false): List<RemoteRuleSyncResult> = withContext(Dispatchers.IO) {
-        val results = RuleRepository.getRemoteRuleSources(context).filter { it.enabled }.map { source ->
+    suspend fun syncEnabledSources(
+        context: Context,
+        allowWhitelistDomains: Boolean = false,
+        onProgress: ((current: Int, total: Int, source: RemoteRuleSourceConfig) -> Unit)? = null
+    ): List<RemoteRuleSyncResult> = withContext(Dispatchers.IO) {
+        val enabledSources = RuleRepository.getRemoteRuleSources(context).filter { it.enabled }
+        val results = enabledSources.mapIndexed { index, source ->
+            onProgress?.invoke(index + 1, enabledSources.size, source)
             syncSource(context, source, allowWhitelistDomains)
         }
         updateLastSyncAtIfSuccessful(context, results)
@@ -48,8 +54,14 @@ object RemoteRuleSourceRepository {
         )
     }
 
-    suspend fun syncEnabledSources(context: Context, whitelistImportMode: WhitelistImportMode): List<RemoteRuleSyncResult> = withContext(Dispatchers.IO) {
-        val results = RuleRepository.getRemoteRuleSources(context).filter { it.enabled }.map { source ->
+    suspend fun syncEnabledSources(
+        context: Context,
+        whitelistImportMode: WhitelistImportMode,
+        onProgress: ((current: Int, total: Int, source: RemoteRuleSourceConfig) -> Unit)? = null
+    ): List<RemoteRuleSyncResult> = withContext(Dispatchers.IO) {
+        val enabledSources = RuleRepository.getRemoteRuleSources(context).filter { it.enabled }
+        val results = enabledSources.mapIndexed { index, source ->
+            onProgress?.invoke(index + 1, enabledSources.size, source)
             syncSource(context, source, whitelistImportMode)
         }
         updateLastSyncAtIfSuccessful(context, results)
@@ -63,62 +75,81 @@ object RemoteRuleSourceRepository {
     ): RemoteRuleSyncResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         runCatching {
-            val content = downloadText(context, source.url)
+            // P0.4 增强：使用临时文件流式下载，避免大文件 OOM
+            val tempFile = downloadToFile(context, source.url)
             val downloadTime = System.currentTimeMillis() - startTime
             
-            // 优化：移除 analyze 步骤，直接导入
-            // analyze 只用于用户手动导入时的预览，规则源同步不需要
-            val importContent = when (whitelistImportMode) {
-                WhitelistImportMode.REMOVE_CONFLICTS -> RuleRepository.removeWhitelistConflictLines(content)
-                else -> content
+            try {
+                // 智能检测：hosts 格式文件
+                val isHostsFormat = detectHostsFormat(tempFile)
+                
+                // 优化：直接使用文件流式导入
+                val importStart = System.currentTimeMillis()
+                val addedCount = RuleRepository.replaceRulesForRemoteSourceStreaming(
+                    context,
+                    source.id,
+                    tempFile.inputStream(),
+                    allowWhitelistDomains = whitelistImportMode != WhitelistImportMode.BLOCK
+                )
+                val importTime = System.currentTimeMillis() - importStart
+                val totalTime = System.currentTimeMillis() - startTime
+                
+                val updatedSource = source.copy(
+                    lastUpdatedAt = System.currentTimeMillis(),
+                    lastRuleCount = addedCount,
+                    lastError = if (addedCount <= 0) "未导入任何规则，可能规则格式不正确" else null
+                )
+                RuleRepository.updateRemoteRuleSource(context, updatedSource)
+                
+                // P0.4 增强：详细日志记录
+                if (addedCount <= 0) {
+                    LogRepository.append(context, "规则源同步完成：${source.name}，未导入规则（格式问题）")
+                } else {
+                    LogRepository.append(context, "规则源同步完成：${source.name}，导入${addedCount}条规则，耗时${totalTime / 1000}秒")
+                }
+                RemoteRuleSyncResult(
+                    source = updatedSource,
+                    success = addedCount > 0,
+                    addedCount = addedCount,
+                    errorMessage = if (addedCount <= 0) "未导入任何规则 (格式问题)" else null
+                )
+            } finally {
+                // 清理临时文件
+                runCatching { tempFile.delete() }
             }
-            
-            val importStart = System.currentTimeMillis()
-            val addedCount = RuleRepository.replaceRulesForRemoteSource(
-                context,
-                source.id,
-                importContent,
-                allowWhitelistDomains = true
-            )
-            val importTime = System.currentTimeMillis() - importStart
-            val totalTime = System.currentTimeMillis() - startTime
-            
-            val nonAdCandidates = RuleRepository.getRemoteSourceNonAdCandidates(context, source.id)
-            val updatedSource = source.copy(
-                lastUpdatedAt = System.currentTimeMillis(),
-                lastRuleCount = addedCount,
-                lastError = if (addedCount <= 0) "未导入任何规则，可能规则格式不正确" else null
-            )
-            RuleRepository.updateRemoteRuleSource(context, updatedSource)
-            
-            if (addedCount <= 0) {
-                LogRepository.append(context, "Remote rule source synced but no rules added: ${source.name}, whitelistMode=$whitelistImportMode, contentLength=${importContent.length}")
-            } else if (nonAdCandidates.isNotEmpty()) {
-                LogRepository.append(context, "Remote rule source synced: ${source.name} count=$addedCount candidateNonAds=${nonAdCandidates.size} downloadTime=${downloadTime}ms importTime=${importTime}ms totalTime=${totalTime}ms")
-            } else {
-                LogRepository.append(context, "Remote rule source synced: ${source.name} count=$addedCount downloadTime=${downloadTime}ms importTime=${importTime}ms totalTime=${totalTime}ms")
-            }
-            RemoteRuleSyncResult(
-                source = updatedSource,
-                success = addedCount > 0,
-                addedCount = addedCount,
-                filteredCount = 0,
-                nonAdCandidates = nonAdCandidates,
-                errorMessage = if (addedCount <= 0) "未导入任何规则 (格式问题)" else null
-            )
         }.getOrElse { error ->
             val message = when (error) {
-                is java.net.SocketTimeoutException -> "连接超时 (超过 5 分钟)，大规则文件可能需要更长时间，请检查网络或规则源大小"
-                is java.net.ConnectException -> "无法连接到规则源服务器"
-                is java.net.UnknownHostException -> "无法解析域名，请检查网络"
-                is java.io.IOException -> error.message ?: "网络错误"
-                else -> error.message ?: error.javaClass.simpleName
+                is java.net.SocketTimeoutException -> "连接超时（超过 30 分钟），规则文件过大或网络过慢"
+                is java.net.ConnectException -> "无法连接到规则源服务器，请检查网络连接"
+                is java.net.UnknownHostException -> "无法解析域名，请检查网络或 DNS 设置"
+                is java.io.IOException -> {
+                    if (source.url.contains("githubusercontent.com", ignoreCase = true)) {
+                        "无法连接 GitHub 服务器\n建议：\n1. 切换网络（WiFi↔移动数据）\n2. 修改 DNS: 8.8.8.8\n3. 稍后重试"
+                    } else {
+                        error.message ?: "网络错误，请检查 VPN 状态"
+                    }
+                }
+                is IllegalStateException -> "VPN 服务未运行，规则源同步失败"
+                is OutOfMemoryError -> "内存不足，规则文件过大"
+                else -> error.message ?: "未知错误"
             }
             val updatedSource = source.copy(lastError = message)
             RuleRepository.updateRemoteRuleSource(context, updatedSource)
             val totalTime = System.currentTimeMillis() - startTime
-            LogRepository.append(context, "Remote rule source sync failed: ${source.name} error=$message totalTime=${totalTime}ms")
+            LogRepository.append(context, "规则源同步失败：${source.name}，错误：$message，耗时${totalTime / 1000}秒")
             RemoteRuleSyncResult(source = updatedSource, success = false, addedCount = 0, errorMessage = message)
+        }
+    }
+
+    // P0.4 新增：检测 hosts 格式文件
+    private fun detectHostsFormat(file: java.io.File): Boolean {
+        return file.inputStream().use { inputStream ->
+            inputStream.bufferedReader().useLines { lines ->
+                lines.take(100).any { line ->
+                    val trimmed = line.trim()
+                    trimmed.startsWith("0.0.0.0") || trimmed.startsWith("127.0.0.1")
+                }
+            }
         }
     }
 
@@ -138,31 +169,22 @@ object RemoteRuleSourceRepository {
         }
         
         try {
-            LogRepository.append(context, "downloadText: connecting to $url")
-            
             val connectStart = System.currentTimeMillis()
             val responseCode = connection.responseCode
             val connectTime = System.currentTimeMillis() - connectStart
-            LogRepository.append(context, "downloadText: responseCode=$responseCode, connectTime=${connectTime}ms")
             
             if (responseCode !in 200..299) {
                 val errorText = runCatching {
                     connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText().take(200) }
                 }.getOrNull().orEmpty().ifBlank { "HTTP $responseCode" }
-                LogRepository.append(context, "downloadText: error response, code=$responseCode, body=$errorText")
                 throw IOException("规则源下载失败：HTTP $responseCode ${errorText.trim()}")
             }
             
             val readStart = System.currentTimeMillis()
-            val expectedLength = connection.contentLength
-            LogRepository.append(context, "downloadText: expectedLength=$expectedLength bytes")
-            
             val inputStream = connection.inputStream
-            val bufferedReader = inputStream.bufferedReader(Charsets.UTF_8)
-            val content = bufferedReader.use { it.readText() }
+            val content = inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
             val readTime = System.currentTimeMillis() - readStart
             val totalTime = System.currentTimeMillis() - startTime
-            LogRepository.append(context, "downloadText: contentLength=${content.length}B, readTime=${readTime}ms, totalTime=${totalTime}ms")
             
             if (content.isBlank()) {
                 throw IOException("规则源内容为空")
@@ -170,7 +192,65 @@ object RemoteRuleSourceRepository {
             return content
         } catch (e: Exception) {
             val totalTime = System.currentTimeMillis() - startTime
-            LogRepository.append(context, "downloadText: failed after ${totalTime}ms, error=${e.message ?: e.javaClass.simpleName}")
+            throw e
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    // P0.4 新增：流式下载到临时文件（支持超大文件）
+    private fun downloadToFile(context: Context, url: String): java.io.File {
+        val startTime = System.currentTimeMillis()
+        val tempFile = java.io.File.createTempFile("rulesync_", ".txt", context.cacheDir)
+        
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = CONNECT_TIMEOUT_MILLIS
+            readTimeout = READ_TIMEOUT_MILLIS
+            requestMethod = "GET"
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            setRequestProperty("Accept", "text/plain,*/*;q=0.1")
+            setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            setRequestProperty("Connection", "close")
+            setRequestProperty("Accept-Encoding", "identity")
+        }
+        
+        try {
+            val responseCode = connection.responseCode
+            
+            if (responseCode !in 200..299) {
+                val errorText = runCatching {
+                    connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText().take(200) }
+                }.getOrNull().orEmpty().ifBlank { "HTTP $responseCode" }
+                throw IOException("规则源下载失败：HTTP $responseCode ${errorText.trim()}")
+            }
+            
+            val inputStream = connection.inputStream
+            val outputStream = tempFile.outputStream()
+            
+            // P0.5 优化：使用更大的缓冲区，减少 IO 操作
+            val buffer = ByteArray(256 * 1024) // 256KB 缓冲区
+            var bytesRead: Int
+            var totalBytes = 0L
+            
+            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                outputStream.write(buffer, 0, bytesRead)
+                totalBytes += bytesRead
+            }
+            
+            outputStream.flush()
+            outputStream.close()
+            inputStream.close()
+            
+            if (totalBytes == 0L) {
+                tempFile.delete()
+                throw IOException("规则源内容为空")
+            }
+            
+            return tempFile
+        } catch (e: Exception) {
+            val totalTime = System.currentTimeMillis() - startTime
+            tempFile.delete()
             throw e
         } finally {
             connection.disconnect()

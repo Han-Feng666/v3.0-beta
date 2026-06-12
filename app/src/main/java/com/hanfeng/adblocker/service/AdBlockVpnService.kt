@@ -65,6 +65,7 @@ import com.HanFeng.security.CertificateAuthorityManager
 import com.HanFeng.security.TlsClientHelloParser
 import com.HanFeng.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
+import com.hanfeng.adblocker.service.SslPinningBypasser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -113,6 +114,9 @@ class AdBlockVpnService : VpnService() {
     private val localProxyTcpFlowCache = LinkedHashMap<String, LocalProxyTcpFlow>(256, 0.75f, true)
     private val localProxyBridgeSocketCache = LinkedHashMap<String, LocalProxyBridgeSocketSession>(128, 0.75f, true)
     private val localProxyTargetAppCache = ConcurrentHashMap<String, Boolean>(512)
+    
+    // HTTPS 增强：SSL Pinning 绕过
+    private lateinit var sslPinningBypasser: SslPinningBypasser
     private val upstreamServerStates = linkedMapOf<String, DnsRuntimeSupport.UpstreamServerState>()
     private val dnsServerCacheLock = Any()
     private val tunPacketWriter = TunPacketWriter()
@@ -1278,6 +1282,9 @@ class AdBlockVpnService : VpnService() {
     private fun shouldBlockQuicFlow(info: com.HanFeng.model.PacketInfo): Boolean {
         val payload = info.payload
         val payloadLooksLikeQuic = looksLikeQuicPacket(payload)
+
+        // MITM 模式启用时才拦截 QUIC
+        if (!httpDecryptEnabled) return false
 
         val cacheKeys = buildCacheKeys(info)
         val localProxyTarget = belongsToLocalProxyTargetUid(cacheKeys)
@@ -6853,6 +6860,9 @@ class AdBlockVpnService : VpnService() {
         localProxyCoexistConfig = flags.localProxyConfig
         localProxyTargetPackages = flags.localProxyTargetPackages
         lightweightPassThroughMode = flags.lightweightPassThroughMode
+        
+        // SSL Pinning 绕过
+        sslPinningBypasser = SslPinningBypasser(this)
     }
 
     private fun refreshShizukuConnectionOwnerReadyIfNeeded() {

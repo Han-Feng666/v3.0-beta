@@ -14,6 +14,7 @@ import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
 import android.widget.EditText
 import android.widget.ImageView
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import android.app.Activity
@@ -69,8 +70,49 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private val selectedRulesById = linkedMapOf<String, BlockRule>()
     private val remoteTimeFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
+    private data class ProgressDialogHandle(
+        val dialog: AlertDialog,
+        val textView: TextView
+    )
+
     private fun showShortToast(message: String) {
         context?.let { Toast.makeText(it, message, Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun showProgressDialog(title: String, initialMessage: String): ProgressDialogHandle? {
+        val dialogContext = safeDialogActivity() ?: return null
+        val container = LinearLayout(dialogContext).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 32, 48, 16)
+        }
+        val progressBar = ProgressBar(dialogContext).apply {
+            isIndeterminate = true
+        }
+        val textView = TextView(dialogContext).apply {
+            text = initialMessage
+            setPadding(0, 24, 0, 0)
+            setTextColor(ContextCompat.getColor(dialogContext, R.color.hf_text_primary))
+        }
+        container.addView(progressBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+        })
+        container.addView(textView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val dialog = createDialogBuilder(dialogContext)
+            .setTitle(title)
+            .setView(container)
+            .create()
+        dialog.setCancelable(false)
+        dialog.showSafely(dialogContext, "Show progress dialog failed") ?: return null
+        return ProgressDialogHandle(dialog, textView)
+    }
+
+    private fun updateProgressDialog(handle: ProgressDialogHandle?, message: String) {
+        if (!isAdded || handle == null) return
+        handle.textView.text = message
+    }
+
+    private fun dismissProgressDialog(handle: ProgressDialogHandle?) {
+        runCatching { handle?.dialog?.dismiss() }
     }
 
     private fun String.lineCount(): Int = this.lineSequence().count()
@@ -650,14 +692,18 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         whitelistImportMode: RemoteRuleSourceRepository.WhitelistImportMode
     ) {
         val ctx = safeContext() ?: return
-        if (manual && isAdded) {
-            Toast.makeText(ctx, if (justAdded) "正在添加并同步规则源" else "正在同步规则源", Toast.LENGTH_SHORT).show()
-        }
+        val progress = if (manual && isAdded) {
+            showProgressDialog("同步规则源", if (justAdded) "正在添加并同步规则源..." else "正在同步规则源...")
+        } else null
         viewLifecycleOwner.lifecycleScope.launch {
             val appContext = ctx.applicationContext
             runCatching {
                 val results = if (sourceId == null) {
-                    RemoteRuleSourceRepository.syncEnabledSources(appContext, whitelistImportMode)
+                    RemoteRuleSourceRepository.syncEnabledSources(appContext, whitelistImportMode) { current, total, source ->
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            updateProgressDialog(progress, "正在同步规则源 $current / $total\n${formatRemoteSourceTitle(source)}\n下载并导入中...")
+                        }
+                    }
                 } else {
                     val source = RuleRepository.getRemoteRuleSources(appContext).firstOrNull { it.id == sourceId }
                     if (source == null) {
@@ -675,6 +721,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                             )
                         )
                     } else {
+                        updateProgressDialog(progress, "正在同步规则源\n${formatRemoteSourceTitle(source)}\n下载并导入中...")
                         listOf(RemoteRuleSourceRepository.syncSource(appContext, source, whitelistImportMode))
                     }
                 }
@@ -682,15 +729,19 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             }.onSuccess { results ->
                 val whitelistConflicts = results.filter { it.whitelistConflictRules > 0 }
                 if (whitelistConflicts.isNotEmpty() && whitelistImportMode == RemoteRuleSourceRepository.WhitelistImportMode.BLOCK) {
+                    dismissProgressDialog(progress)
                     showRemoteSourceWhitelistConflictDialog(sourceId, manual, justAdded, whitelistConflicts)
                     return@onSuccess
                 }
+                updateProgressDialog(progress, "正在刷新规则列表...")
                 reloadVpnIfRunning(results.any { it.success })
                 invalidateRuleListCache()
                 refreshList()
+                dismissProgressDialog(progress)
                 if (manual && isAdded) {
                     val successCount = results.count { result -> result.success }
                     val conflictCount = results.sumOf { result -> result.whitelistConflictRules }
+                    val importedCount = results.sumOf { result -> result.addedCount }
                     if (successCount == 0) {
                         val firstError = results.firstOrNull()?.errorMessage ?: "规则源更新失败"
                         Toast.makeText(ctx, firstError, Toast.LENGTH_LONG).show()
@@ -705,10 +756,11 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                             }
                             else -> ""
                         }
-                        Toast.makeText(ctx, "规则源更新完成，成功 $successCount / ${results.size}$suffix", Toast.LENGTH_LONG).show()
+                        Toast.makeText(ctx, "规则源更新完成，成功 $successCount / ${results.size}，导入 $importedCount 条规则$suffix", Toast.LENGTH_LONG).show()
                     }
                 }
             }.onFailure {
+                dismissProgressDialog(progress)
                 LogRepository.append(appContext, "Remote rule source sync failed from rules page: ${it.message ?: it.javaClass.simpleName}")
                 if (manual) {
                     Toast.makeText(ctx, it.message ?: "规则源更新失败", Toast.LENGTH_LONG).show()
@@ -1303,19 +1355,23 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val ctx = safeContext() ?: return
         val appContext = ctx.applicationContext
         LogRepository.append(appContext, "Import rule file requested: uri=$uri")
+        val progress = showProgressDialog("导入规则", "正在读取规则文件...")
         viewLifecycleOwner.lifecycleScope.launch {
             runCatching {
+                updateProgressDialog(progress, "正在读取规则文件...")
                 val content = readRuleContent(appContext, uri)
                 if (content == null) {
                     LogRepository.append(appContext, "Import rule file failed: unable to read content from URI")
+                    dismissProgressDialog(progress)
                     safeContext()?.let {
                         Toast.makeText(it, "读取规则文件失败：无法从选择的文件读取内容", Toast.LENGTH_LONG).show()
                     }
                     return@launch
                 }
                 LogRepository.append(appContext, "Import rule file succeeded: content length=${content.length}")
-                importAndAnalyzeRuleContent(uri, content)
+                importAndAnalyzeRuleContent(sourceLabel = uri.toString(), sourceUri = uri, content = content, progress = progress)
             }.onFailure { e ->
+                dismissProgressDialog(progress)
                 LogRepository.append(appContext, "Import rule file failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
                 if (isAdded) {
                     safeContext()?.let { ctx ->
@@ -1385,15 +1441,20 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     }
 
     private suspend fun importAndAnalyzeRuleContent(uri: Uri, content: String) {
-        importAndAnalyzeRuleContent(sourceLabel = uri.toString(), sourceUri = uri, content = content)
+        importAndAnalyzeRuleContent(sourceLabel = uri.toString(), sourceUri = uri, content = content, progress = null)
     }
 
-    private suspend fun importAndAnalyzeRuleContent(sourceLabel: String, sourceUri: Uri, content: String) {
+    private suspend fun importAndAnalyzeRuleContent(
+        sourceLabel: String,
+        sourceUri: Uri,
+        content: String,
+        progress: ProgressDialogHandle? = null
+    ) {
         val appContext = context?.applicationContext ?: return
         LogRepository.append(appContext, "Starting import analysis: content length=${content.length}, lines=${content.lineCount()}")
         
         if (!isAdded || _binding == null) return
-        Toast.makeText(context, "正在分析规则文件 (${content.length / 1024}KB)...", Toast.LENGTH_SHORT).show()
+        updateProgressDialog(progress, "正在分析规则文件...\n大小：${content.length / 1024}KB\n行数：${content.lineCount()}")
         
         val report = withContext(Dispatchers.Default) {
             RuleRepository.analyzeImportContent(appContext, content)
@@ -1403,6 +1464,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         
         if (report.safeRuleCount <= 0) {
             if (!isAdded || _binding == null) return
+            dismissProgressDialog(progress)
             context?.let {
                 Toast.makeText(it, "文件里没有识别到可导入规则", Toast.LENGTH_SHORT).show()
             }
@@ -1412,14 +1474,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         if (report.whitelistConflictRules > 0) {
             if (!isAdded || _binding == null) return
             val host = safeDialogActivity() ?: return
+            dismissProgressDialog(progress)
             showWhitelistConflictDialog(
                 title = "发现疑似白名单规则",
                 domains = report.sampleWhitelistConflictLines,
                 onContinue = {
                     viewLifecycleOwner.lifecycleScope.launch {
+                        val importProgress = showProgressDialog("导入规则", "正在导入规则...\n识别到 ${report.safeRuleCount} 条可处理规则")
                         withContext(Dispatchers.Default) {
                             RuleRepository.importRules(appContext, content, allowWhitelistDomains = true)
                         }
+                        updateProgressDialog(importProgress, "正在刷新规则列表...")
                         val inventory = withContext(Dispatchers.Default) {
                             RuleRepository.getRuleInventory(appContext)
                         }
@@ -1428,20 +1493,24 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         invalidateRuleListCache()
                         refreshListSoon()
                         reloadVpnIfRunning(true)
+                        dismissProgressDialog(importProgress)
                         context?.let {
-                            Toast.makeText(it, "规则已导入 (${report.safeRuleCount}条)，正在展示分析结果", Toast.LENGTH_LONG).show()
+                            Toast.makeText(it, "规则已导入 ${report.safeRuleCount} 条，当前可拦截 ${inventory.totalSupportedCount} 条", Toast.LENGTH_LONG).show()
                         }
                         openImportAnalysisPage(inventory, report, sourceLabel, sourceUri)
                     }
                 },
                 onDeleteWhitelistAndContinue = {
                     viewLifecycleOwner.lifecycleScope.launch {
+                        val importProgress = showProgressDialog("导入规则", "正在删除疑似白名单规则...")
                         val sanitizedContent = withContext(Dispatchers.Default) {
                             RuleRepository.removeWhitelistConflictLines(content)
                         }
+                        updateProgressDialog(importProgress, "正在导入剩余规则...")
                         withContext(Dispatchers.Default) {
                             RuleRepository.importRules(appContext, sanitizedContent)
                         }
+                        updateProgressDialog(importProgress, "正在刷新规则列表...")
                         val inventory = withContext(Dispatchers.Default) {
                             RuleRepository.getRuleInventory(appContext)
                         }
@@ -1453,8 +1522,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         invalidateRuleListCache()
                         refreshListSoon()
                         reloadVpnIfRunning(true)
+                        dismissProgressDialog(importProgress)
                         context?.let {
-                            Toast.makeText(it, "已删除白名单候选，其余规则已导入", Toast.LENGTH_LONG).show()
+                            Toast.makeText(it, "已删除白名单候选，已导入 ${sanitizedReport.safeRuleCount} 条，当前可拦截 ${inventory.totalSupportedCount} 条", Toast.LENGTH_LONG).show()
                         }
                         openImportAnalysisPage(inventory, sanitizedReport, sourceLabel, sourceUri)
                     }
@@ -1465,11 +1535,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         }
         
         LogRepository.append(appContext, "Starting rule import: safeRules=${report.safeRuleCount}")
+        updateProgressDialog(progress, "正在导入规则...\n识别到 ${report.safeRuleCount} 条可处理规则")
         withContext(Dispatchers.Default) {
             RuleRepository.importRules(appContext, content)
         }
         LogRepository.append(appContext, "Rule import complete")
         
+        updateProgressDialog(progress, "正在刷新规则列表...")
         val inventory = withContext(Dispatchers.Default) {
             RuleRepository.getRuleInventory(appContext)
         }
@@ -1478,8 +1550,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         invalidateRuleListCache()
         refreshListSoon()
         reloadVpnIfRunning(true)
+        dismissProgressDialog(progress)
         context?.let {
-            Toast.makeText(it, "规则已导入 (${report.safeRuleCount}条)，正在展示分析结果", Toast.LENGTH_LONG).show()
+            Toast.makeText(it, "规则已导入 ${report.safeRuleCount} 条，当前可拦截 ${inventory.totalSupportedCount} 条", Toast.LENGTH_LONG).show()
         }
         openImportAnalysisPage(inventory, report, sourceLabel, sourceUri)
     }
@@ -1564,8 +1637,8 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             append("5. AdGuard/ABP: ||domain^ / ||domain^\$modifier / @@||whitelist^\n")
             append("6. ABP 修饰符 (30+ 种): third-party/3p, first-party/1p, domain=, path=, removeparam=, csp=, redirect=, denyallow=, cookie=, header=, removeheader=, replace=, app=, dnstype=, urlblock, from, to, jsinject, network, blockipv6, blockipv4, dnsrewrite, generichide, ctag, client, mac, asn, important, match-case, badfilter, script, image 等\n")
             append("7. IP-CIDR/IP-CIDR6: ip-cidr,192.168.1.0/24 / ip6-cidr,::1/128\n")
-            append("8. Clash: DOMAIN-SUFFIX,com / DOMAIN-KEYWORD,ad / IP-CIDR,...\n")
-            append("9. Surge: HOST-SUFFIX,com / HOST-KEYWORD,ad / IP-CIDR,...\n")
+            append("8. Clash: DOMAIN-SUFFIX,com / DOMAIN-KEYWORD,ad / IP-CIDR,... / GEOSITE,category-ads-all\n")
+            append("9. Surge: HOST-SUFFIX,com / HOST-KEYWORD,ad / IP-CIDR,... / GEOSITE:category-ads-all\n")
             append("10. Loon: DOMAIN-SUFFIX,com / DOMAIN-KEYWORD,ad / ip-cidr,...\n")
             append("11. Quantumult X: host example.com / ip-cidr 192.168.1.0/24 / host-keyword ad\n")
             append("12. Shadowrocket: host-suffix,com / host-keyword,ad / url-regexp pattern\n")
@@ -1582,8 +1655,8 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             append("23. 包名规则：package:com.example.app / ||ads.com^\$package=...\n")
             append("24. 点前缀域名：.example.com（匹配所有子域名）\n")
             append("25. IPv6 Hosts: 2001:db8::1 ads.example.com\n")
-            append("\n部分支持：redirect 类、removeparam 类、header 修改、replace 类、cookie 类规则（需 MITM 增强）\n")
-            append("会跳过：复杂脚本、远程脚本、://schema 规则、高级代理逻辑规则\n")
+            append("\n部分支持：redirect 类、removeparam 类、header 修改、replace 类、cookie 类、CSS 隐藏规则（需 MITM 增强）\n")
+            append("会跳过：复杂脚本、远程脚本、://schema 规则、GEOIP/IP-ASN 等需要本地数据库的高级代理规则\n")
             if (report.vendorSummary.isNotEmpty()) {
                 append("\n\n可导入规则厂商分布：\n")
                 append(report.vendorSummary.joinToString("\n") { "- ${it.vendor}: ${it.count}" })
