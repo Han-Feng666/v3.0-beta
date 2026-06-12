@@ -1149,6 +1149,32 @@ class AdBlockVpnService : VpnService() {
         )
         val appName = domainContext.appName
         val vendor = domainContext.vendor
+        
+        // 无论是否拦截，都先查询上游 DNS 获取真实 IP 并写入缓存
+        // 这是为了确保即使 DNS 层拦截了，HTTP/HTTPS 连接层仍能基于 IP 缓存进行拦截
+        val upstreamResult = queryUpstreamDns(info.payload)
+        val upstreamResponse = upstreamResult?.response
+            ?: readStaleCachedDnsResponse(question, info.payload)
+            ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
+        
+        val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
+        val addresses = DnsMessageParser.extractAnswerAddresses(upstreamResponse, question)
+        
+        // 先缓存 IP 和目标信息（无论是否拦截）
+        if (addresses.isNotEmpty()) {
+            rememberQuicTargets(question, upstreamResponse, appName, vendor)
+            rememberHttpDecryptTargets(question, upstreamResponse, appName, vendor)
+            rememberHttpsDecryptTargets(question, upstreamResponse, appName, vendor)
+            rememberAdIpTargets(question, upstreamResponse, appName, vendor)
+        }
+        if (aliasTargets.isNotEmpty()) {
+            rememberHttpDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
+            rememberHttpsDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
+            rememberQuicAliasTargets(question, aliasTargets, upstreamResponse, appName)
+            rememberAdIpTargetsForAliases(question, aliasTargets, upstreamResponse, appName)
+        }
+        
+        // 规则匹配检查：命中规则则拦截
         if (domainContext.matchedRule != null) {
             output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
             StatsRepository.recordBlockedDns(this, vendor, appName, 512)
@@ -1159,6 +1185,8 @@ class AdBlockVpnService : VpnService() {
             )
             return
         }
+        
+        // 放行：记录统计和日志
         StatsRepository.recordRequest(this, vendor, appName)
         logDecisionOnce(
             key = "dns-pass:${question.domain}:${question.qType}:${appName}",
@@ -1172,26 +1200,11 @@ class AdBlockVpnService : VpnService() {
             appName = appName,
             signal = RuleRepository.SuspiciousSignal.DNS_QUERY
         )
-        readCachedDnsResponse(question, info.payload)?.let { cachedResponse ->
-            output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
-            return
-        }
-        val upstreamResult = queryUpstreamDns(info.payload)
-        val upstreamResponse = upstreamResult?.response
-            ?: readStaleCachedDnsResponse(question, info.payload)
-            ?: DnsMessageParser.buildServerFailureResponse(info.payload, question)
-        val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
+        
+        // 检查别名目标是否需要拦截
         if (handleBlockedDnsAliasTargets(info, question, appName, vendor, aliasTargets, output)) return
-        if (aliasTargets.isNotEmpty()) {
-            rememberHttpDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
-            rememberHttpsDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
-            rememberQuicAliasTargets(question, aliasTargets, upstreamResponse, appName)
-            rememberAdIpTargetsForAliases(question, aliasTargets, upstreamResponse, appName)
-        }
-        rememberQuicTargets(question, upstreamResponse, appName, vendor)
-        rememberHttpDecryptTargets(question, upstreamResponse, appName, vendor)
-        rememberHttpsDecryptTargets(question, upstreamResponse, appName, vendor)
-        rememberAdIpTargets(question, upstreamResponse, appName, vendor)
+        
+        // 写入 DNS 缓存并放行
         cacheDnsResponse(question, upstreamResponse)
         output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
     }
