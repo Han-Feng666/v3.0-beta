@@ -5,14 +5,14 @@ plugins {
 
 android {
     namespace = "com.HanFeng"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.HanFeng"
         minSdk = 24
-        targetSdk = 34
-        versionCode = 160
-        versionName = "1.6.0"
+        targetSdk = 36
+        versionCode = 161
+        versionName = "1.6.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

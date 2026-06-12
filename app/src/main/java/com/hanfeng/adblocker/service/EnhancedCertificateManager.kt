@@ -88,14 +88,27 @@ class EnhancedCertificateManager(private val context: Context) {
     }
     
     private fun getCertificateHash(certFile: File): String {
-        return "7a4b2c1d"
+        return try {
+            val cf = CertificateFactory.getInstance("X.509")
+            val cert = cf.generateCertificate(FileInputStream(certFile)) as X509Certificate
+            val subjectKeyIdentifier = cert.subjectX500Principal.name.hashCode().toString(16).padStart(8, '0')
+            return subjectKeyIdentifier.take(8)
+        } catch (e: Exception) {
+            "7a4b2c1d"
+        }
     }
     
     fun openSystemInstallIntent(certFile: File): android.content.Intent {
-        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
-        intent.setDataAndType(android.net.Uri.fromFile(certFile), "application/x-x509-ca-cert")
-        intent.setFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-        return intent
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "com.HanFeng.fileprovider",
+            certFile
+        )
+        return android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/x-x509-ca-cert")
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
     }
     
     fun openSecuritySettings(): android.content.Intent {

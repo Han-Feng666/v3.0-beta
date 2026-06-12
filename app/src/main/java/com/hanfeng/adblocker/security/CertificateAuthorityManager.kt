@@ -311,11 +311,17 @@ object CertificateAuthorityManager {
                         put(MediaStore.Downloads.DISPLAY_NAME, fileName)
                         put(MediaStore.Downloads.MIME_TYPE, mimeType)
                         put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
+                        put(MediaStore.Downloads.IS_PENDING, 1)
                     }
                 )
                 ?: return "下载/$DOWNLOAD_SUBDIR/$fileName"
             resolver.openOutputStream(targetUri, "wt")?.use { output ->
                 output.write(bytes)
+            }
+            runCatching {
+                resolver.update(targetUri, android.content.ContentValues().apply {
+                    put(MediaStore.Downloads.IS_PENDING, 0)
+                }, null, null)
             }
             existingUris.drop(1).forEach { duplicateUri ->
                 runCatching { resolver.delete(duplicateUri, null, null) }
