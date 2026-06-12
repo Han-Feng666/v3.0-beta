@@ -5401,7 +5401,6 @@ class AdBlockVpnService : VpnService() {
         vendor: String
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
-        if (isProtectedTrafficDomain(question.domain)) return
         if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isProtectedNovelAppDomain(question.domain)) return
         if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isNovelContentDomain(question.domain)) return
         val domainContext = resolveDomainDecisionContextForApp(question.domain, appName, question.qType)
@@ -5409,7 +5408,10 @@ class AdBlockVpnService : VpnService() {
         val matchedRule = domainContext.matchedRule
         val aggressiveNovelBlock = RuleRepository.shouldAggressivelyBlockForNovelApp(this, question.domain, appName, effectiveVendor)
         val generalAdTraffic = RuleRepository.shouldTreatAsGeneralAdTraffic(question.domain, effectiveVendor, appName)
-        if (matchedRule == null && !aggressiveNovelBlock && !generalAdTraffic) return
+        if (matchedRule == null && !aggressiveNovelBlock && !generalAdTraffic) {
+            if (isProtectedTrafficDomain(question.domain)) return
+            return
+        }
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
         val now = System.currentTimeMillis()
@@ -5573,12 +5575,14 @@ class AdBlockVpnService : VpnService() {
         vendor: String
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
-        if (isProtectedTrafficDomain(question.domain)) return
         if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isProtectedNovelAppDomain(question.domain)) return
         if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isNovelContentDomain(question.domain)) return
         val domainContext = resolveDomainDecisionContextForApp(question.domain, appName, question.qType)
         val effectiveVendor = domainContext.vendor.takeIf { it.isNotBlank() } ?: vendor
-        if (!shouldTrackHttpsMitmTarget(question.domain, question.qType, appName, effectiveVendor, domainContext.matchedRule)) return
+        if (!shouldTrackHttpsMitmTarget(question.domain, question.qType, appName, effectiveVendor, domainContext.matchedRule)) {
+            if (isProtectedTrafficDomain(question.domain)) return
+            return
+        }
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
         if (addresses.isEmpty()) return
         val now = System.currentTimeMillis()
