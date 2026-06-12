@@ -1,6 +1,8 @@
 package com.HanFeng.data
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import com.HanFeng.model.RemoteRuleSourceConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -21,15 +23,30 @@ object RemoteRuleSourceRepository {
         REMOVE_CONFLICTS
     }
 
+    data class RemoteRuleSyncProgress(
+        val current: Int,
+        val total: Int,
+        val source: RemoteRuleSourceConfig,
+        val stage: Stage,
+        val bytesRead: Long = 0L,
+        val totalBytes: Long? = null,
+        val addedCount: Int? = null
+    ) {
+        enum class Stage { CONNECTING, DOWNLOADING, IMPORTING, COMPLETED }
+    }
+
     suspend fun syncEnabledSources(
         context: Context,
         allowWhitelistDomains: Boolean = false,
-        onProgress: ((current: Int, total: Int, source: RemoteRuleSourceConfig) -> Unit)? = null
+        onProgress: ((current: Int, total: Int, source: RemoteRuleSourceConfig) -> Unit)? = null,
+        onDetailedProgress: ((RemoteRuleSyncProgress) -> Unit)? = null
     ): List<RemoteRuleSyncResult> = withContext(Dispatchers.IO) {
         val enabledSources = RuleRepository.getRemoteRuleSources(context).filter { it.enabled }
         val results = enabledSources.mapIndexed { index, source ->
             onProgress?.invoke(index + 1, enabledSources.size, source)
-            syncSource(context, source, allowWhitelistDomains)
+            syncSource(context, source, allowWhitelistDomains) { progress ->
+                onDetailedProgress?.invoke(progress.copy(current = index + 1, total = enabledSources.size))
+            }
         }
         updateLastSyncAtIfSuccessful(context, results)
         results
@@ -46,23 +63,32 @@ object RemoteRuleSourceRepository {
             .getLong(KEY_LAST_SYNC_AT, 0L)
     }
 
-    suspend fun syncSource(context: Context, source: RemoteRuleSourceConfig, allowWhitelistDomains: Boolean = false): RemoteRuleSyncResult = withContext(Dispatchers.IO) {
+    suspend fun syncSource(
+        context: Context,
+        source: RemoteRuleSourceConfig,
+        allowWhitelistDomains: Boolean = false,
+        onDetailedProgress: ((RemoteRuleSyncProgress) -> Unit)? = null
+    ): RemoteRuleSyncResult = withContext(Dispatchers.IO) {
         syncSource(
             context = context,
             source = source,
-            whitelistImportMode = if (allowWhitelistDomains) WhitelistImportMode.ALLOW else WhitelistImportMode.BLOCK
+            whitelistImportMode = if (allowWhitelistDomains) WhitelistImportMode.ALLOW else WhitelistImportMode.BLOCK,
+            onDetailedProgress = onDetailedProgress
         )
     }
 
     suspend fun syncEnabledSources(
         context: Context,
         whitelistImportMode: WhitelistImportMode,
-        onProgress: ((current: Int, total: Int, source: RemoteRuleSourceConfig) -> Unit)? = null
+        onProgress: ((current: Int, total: Int, source: RemoteRuleSourceConfig) -> Unit)? = null,
+        onDetailedProgress: ((RemoteRuleSyncProgress) -> Unit)? = null
     ): List<RemoteRuleSyncResult> = withContext(Dispatchers.IO) {
         val enabledSources = RuleRepository.getRemoteRuleSources(context).filter { it.enabled }
         val results = enabledSources.mapIndexed { index, source ->
             onProgress?.invoke(index + 1, enabledSources.size, source)
-            syncSource(context, source, whitelistImportMode)
+            syncSource(context, source, whitelistImportMode) { progress ->
+                onDetailedProgress?.invoke(progress.copy(current = index + 1, total = enabledSources.size))
+            }
         }
         updateLastSyncAtIfSuccessful(context, results)
         results
@@ -71,27 +97,34 @@ object RemoteRuleSourceRepository {
     suspend fun syncSource(
         context: Context,
         source: RemoteRuleSourceConfig,
-        whitelistImportMode: WhitelistImportMode
+        whitelistImportMode: WhitelistImportMode,
+        onDetailedProgress: ((RemoteRuleSyncProgress) -> Unit)? = null
     ): RemoteRuleSyncResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         runCatching {
+            onDetailedProgress?.invoke(RemoteRuleSyncProgress(1, 1, source, RemoteRuleSyncProgress.Stage.CONNECTING))
             // P0.4 增强：使用临时文件流式下载，避免大文件 OOM
-            val tempFile = downloadToFile(context, source.url)
-            val downloadTime = System.currentTimeMillis() - startTime
-            
+            val tempFile = downloadToFile(context, source.url) { bytesRead, totalBytes ->
+                onDetailedProgress?.invoke(
+                    RemoteRuleSyncProgress(
+                        current = 1,
+                        total = 1,
+                        source = source,
+                        stage = RemoteRuleSyncProgress.Stage.DOWNLOADING,
+                        bytesRead = bytesRead,
+                        totalBytes = totalBytes
+                    )
+                )
+            }
             try {
-                // 智能检测：hosts 格式文件
-                val isHostsFormat = detectHostsFormat(tempFile)
-                
                 // 优化：直接使用文件流式导入
-                val importStart = System.currentTimeMillis()
+                onDetailedProgress?.invoke(RemoteRuleSyncProgress(1, 1, source, RemoteRuleSyncProgress.Stage.IMPORTING, bytesRead = tempFile.length()))
                 val addedCount = RuleRepository.replaceRulesForRemoteSourceStreaming(
                     context,
                     source.id,
                     tempFile.inputStream(),
                     allowWhitelistDomains = whitelistImportMode != WhitelistImportMode.BLOCK
                 )
-                val importTime = System.currentTimeMillis() - importStart
                 val totalTime = System.currentTimeMillis() - startTime
                 
                 val updatedSource = source.copy(
@@ -107,6 +140,7 @@ object RemoteRuleSourceRepository {
                 } else {
                     LogRepository.append(context, "规则源同步完成：${source.name}，导入${addedCount}条规则，耗时${totalTime / 1000}秒")
                 }
+                onDetailedProgress?.invoke(RemoteRuleSyncProgress(1, 1, updatedSource, RemoteRuleSyncProgress.Stage.COMPLETED, bytesRead = tempFile.length(), addedCount = addedCount))
                 RemoteRuleSyncResult(
                     source = updatedSource,
                     success = addedCount > 0,
@@ -120,11 +154,11 @@ object RemoteRuleSourceRepository {
         }.getOrElse { error ->
             val message = when (error) {
                 is java.net.SocketTimeoutException -> "连接超时（超过 30 分钟），规则文件过大或网络过慢"
-                is java.net.ConnectException -> "无法连接到规则源服务器，请检查网络连接"
-                is java.net.UnknownHostException -> "无法解析域名，请检查网络或 DNS 设置"
+                is java.net.ConnectException -> "无法连接到规则源服务器：${error.message ?: "连接被拒绝或路由不可达"}"
+                is java.net.UnknownHostException -> "无法解析规则源域名：${error.message ?: "DNS 查询失败"}"
                 is java.io.IOException -> {
                     if (source.url.contains("githubusercontent.com", ignoreCase = true)) {
-                        "无法连接 GitHub 服务器\n建议：\n1. 切换网络（WiFi↔移动数据）\n2. 修改 DNS: 8.8.8.8\n3. 稍后重试"
+                        "无法连接 GitHub 规则源：${error.message ?: "网络错误"}\n建议：\n1. 切换网络（WiFi↔移动数据）\n2. 修改 DNS: 8.8.8.8\n3. 稍后重试"
                     } else {
                         error.message ?: "网络错误，请检查 VPN 状态"
                     }
@@ -136,7 +170,7 @@ object RemoteRuleSourceRepository {
             val updatedSource = source.copy(lastError = message)
             RuleRepository.updateRemoteRuleSource(context, updatedSource)
             val totalTime = System.currentTimeMillis() - startTime
-            LogRepository.append(context, "规则源同步失败：${source.name}，错误：$message，耗时${totalTime / 1000}秒")
+            LogRepository.append(context, "规则源同步失败：${source.name}，url=${source.url}，errorClass=${error.javaClass.name}，raw=${error.message ?: ""}，mapped=$message，耗时${totalTime / 1000}秒")
             RemoteRuleSyncResult(source = updatedSource, success = false, addedCount = 0, errorMessage = message)
         }
     }
@@ -154,9 +188,7 @@ object RemoteRuleSourceRepository {
     }
 
     private fun downloadText(context: Context, url: String): String {
-        val startTime = System.currentTimeMillis()
-        
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+        val connection = openRuleSourceConnection(context, url).apply {
             connectTimeout = CONNECT_TIMEOUT_MILLIS
             readTimeout = READ_TIMEOUT_MILLIS
             requestMethod = "GET"
@@ -169,9 +201,7 @@ object RemoteRuleSourceRepository {
         }
         
         try {
-            val connectStart = System.currentTimeMillis()
             val responseCode = connection.responseCode
-            val connectTime = System.currentTimeMillis() - connectStart
             
             if (responseCode !in 200..299) {
                 val errorText = runCatching {
@@ -180,18 +210,14 @@ object RemoteRuleSourceRepository {
                 throw IOException("规则源下载失败：HTTP $responseCode ${errorText.trim()}")
             }
             
-            val readStart = System.currentTimeMillis()
             val inputStream = connection.inputStream
             val content = inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val readTime = System.currentTimeMillis() - readStart
-            val totalTime = System.currentTimeMillis() - startTime
             
             if (content.isBlank()) {
                 throw IOException("规则源内容为空")
             }
             return content
         } catch (e: Exception) {
-            val totalTime = System.currentTimeMillis() - startTime
             throw e
         } finally {
             connection.disconnect()
@@ -199,11 +225,10 @@ object RemoteRuleSourceRepository {
     }
 
     // P0.4 新增：流式下载到临时文件（支持超大文件）
-    private fun downloadToFile(context: Context, url: String): java.io.File {
-        val startTime = System.currentTimeMillis()
+    private fun downloadToFile(context: Context, url: String, onProgress: ((bytesRead: Long, totalBytes: Long?) -> Unit)? = null): java.io.File {
         val tempFile = java.io.File.createTempFile("rulesync_", ".txt", context.cacheDir)
         
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+        val connection = openRuleSourceConnection(context, url).apply {
             connectTimeout = CONNECT_TIMEOUT_MILLIS
             readTimeout = READ_TIMEOUT_MILLIS
             requestMethod = "GET"
@@ -227,16 +252,25 @@ object RemoteRuleSourceRepository {
             
             val inputStream = connection.inputStream
             val outputStream = tempFile.outputStream()
+            val contentLength = connection.contentLengthLong.takeIf { it > 0L }
             
             // P0.5 优化：使用更大的缓冲区，减少 IO 操作
             val buffer = ByteArray(256 * 1024) // 256KB 缓冲区
             var bytesRead: Int
             var totalBytes = 0L
+            var lastProgressAt = 0L
+            onProgress?.invoke(0L, contentLength)
             
             while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                 outputStream.write(buffer, 0, bytesRead)
                 totalBytes += bytesRead
+                val now = System.currentTimeMillis()
+                if (now - lastProgressAt >= 500L || contentLength != null && totalBytes >= contentLength) {
+                    lastProgressAt = now
+                    onProgress?.invoke(totalBytes, contentLength)
+                }
             }
+            onProgress?.invoke(totalBytes, contentLength)
             
             outputStream.flush()
             outputStream.close()
@@ -249,11 +283,28 @@ object RemoteRuleSourceRepository {
             
             return tempFile
         } catch (e: Exception) {
-            val totalTime = System.currentTimeMillis() - startTime
             tempFile.delete()
             throw e
         } finally {
             connection.disconnect()
+        }
+    }
+
+    private fun openRuleSourceConnection(context: Context, url: String): HttpURLConnection {
+        val parsedUrl = URL(url)
+        val connection = runCatching {
+            selectNonVpnNetwork(context)?.openConnection(parsedUrl) as? HttpURLConnection
+        }.getOrNull() ?: parsedUrl.openConnection() as HttpURLConnection
+        return connection
+    }
+
+    @Suppress("DEPRECATION")
+    private fun selectNonVpnNetwork(context: Context): android.net.Network? {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return null
+        return connectivityManager.allNetworks.firstOrNull { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@firstOrNull false
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
         }
     }
 

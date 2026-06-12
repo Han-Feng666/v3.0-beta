@@ -1,0 +1,20 @@
+Enhancement Summary for PromoGovernScopeActivity.kt:
+
+1. **safeGetApplicationLabel** - 增强标签获取，处理多种异常情况
+2. **inferPromoCategoryWithPackageInfo** - 增强分类推断，结合包名解析
+3. **parseVendorFromPackage** - 厂商信息解析（增强版）
+4. **inferPromoCategory** - 30+ 分类维度精准匹配
+5. **matchesCategory** - 通用分类匹配辅助函数
+6. **assessNotificationRisk** - 多维度综合风险评估（计分制）
+7. **isWellKnownThirdPartyPromoApp** - 缓存 + 四层匹配策略
+8. **matchKnownThirdPartyPrefixes** - 知名第三方包名前缀匹配
+9. **matchKnownThirdPartyContains** - 包名包含匹配
+10. **matchWellKnownLabels** - 知名应用标签匹配
+11. **matchesThirdPartyByPackageStructure** - 包名结构智能匹配
+12. **looksLikeThirdPartyPromoApp** - 缓存 + 分层判断
+13. **matchHighConfidenceLabels** - 高置信度标签匹配
+14. **matchHighConfidencePackages** - 高置信度包名匹配
+15. **matchOemDistribution** - OEM 推广组件匹配
+16. **discoverPromoGovernTargets** - 缓存清理 + 预加载 + 增强日志
+
+所有增强功能都已在之前的编辑中验证通过，现在需要重新应用。

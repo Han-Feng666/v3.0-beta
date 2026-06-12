@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import java.util.UUID
 
 class RemoteRuleSourcesActivity : BaseActivity() {
@@ -134,18 +135,31 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             runCatching {
                 withContext(Dispatchers.IO) {
                     if (sourceId == null) {
-                        RemoteRuleSourceRepository.syncEnabledSources(this@RemoteRuleSourcesActivity, whitelistImportMode) { current, total, source ->
-                            lifecycleScope.launch {
-                                binding.loadingText.text = "正在同步规则源 $current / $total\n${source.name}\n下载并导入中..."
+                        RemoteRuleSourceRepository.syncEnabledSources(
+                            context = this@RemoteRuleSourcesActivity,
+                            whitelistImportMode = whitelistImportMode,
+                            onProgress = { current, total, source ->
+                                lifecycleScope.launch {
+                                    binding.loadingText.text = "正在同步规则源 $current / $total\n${source.name}\n准备下载..."
+                                }
+                            },
+                            onDetailedProgress = { progress ->
+                                lifecycleScope.launch {
+                                    binding.loadingText.text = formatRemoteSyncProgress(progress)
+                                }
                             }
-                        }
+                        )
                     } else {
                         val source = RuleRepository.getRemoteRuleSources(this@RemoteRuleSourcesActivity).firstOrNull { it.id == sourceId }
                             ?: throw IllegalStateException("规则源不存在")
                         lifecycleScope.launch {
-                            binding.loadingText.text = "正在同步规则源\n${source.name}\n下载并导入中..."
+                            binding.loadingText.text = "正在同步规则源\n${source.name}\n准备下载..."
                         }
-                        listOf(RemoteRuleSourceRepository.syncSource(this@RemoteRuleSourcesActivity, source, whitelistImportMode))
+                        listOf(RemoteRuleSourceRepository.syncSource(this@RemoteRuleSourcesActivity, source, whitelistImportMode) { progress ->
+                            lifecycleScope.launch {
+                                binding.loadingText.text = formatRemoteSyncProgress(progress)
+                            }
+                        })
                     }
                 }
             }.onSuccess { results ->
@@ -192,6 +206,27 @@ class RemoteRuleSourcesActivity : BaseActivity() {
                 LogRepository.append(this@RemoteRuleSourcesActivity, "[Sync] troubleshooting: 请检查网络连接、规则源 URL 是否正确")
                 showShortToast(it.message ?: "规则源更新失败")
             }
+        }
+    }
+
+    private fun formatRemoteSyncProgress(progress: RemoteRuleSourceRepository.RemoteRuleSyncProgress): String {
+        val prefix = "正在同步规则源 ${progress.current} / ${progress.total}\n${progress.source.name}"
+        return when (progress.stage) {
+            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.CONNECTING -> "$prefix\n正在连接规则源..."
+            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.DOWNLOADING -> {
+                val total = progress.totalBytes?.let { " / ${formatBytes(it)}" }.orEmpty()
+                "$prefix\n正在下载：${formatBytes(progress.bytesRead)}$total"
+            }
+            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.IMPORTING -> "$prefix\n下载完成，正在导入规则..."
+            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.COMPLETED -> "$prefix\n导入完成：${progress.addedCount ?: 0} 条规则"
+        }
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        return when {
+            bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1fMB", bytes / 1024.0 / 1024.0)
+            bytes >= 1024L -> String.format(Locale.US, "%.1fKB", bytes / 1024.0)
+            else -> "${bytes}B"
         }
     }
 

@@ -115,6 +115,27 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         runCatching { handle?.dialog?.dismiss() }
     }
 
+    private fun formatRemoteSyncProgress(progress: RemoteRuleSourceRepository.RemoteRuleSyncProgress): String {
+        val prefix = "正在同步规则源 ${progress.current} / ${progress.total}\n${formatRemoteSourceTitle(progress.source)}"
+        return when (progress.stage) {
+            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.CONNECTING -> "$prefix\n正在连接规则源..."
+            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.DOWNLOADING -> {
+                val total = progress.totalBytes?.let { " / ${formatBytes(it)}" }.orEmpty()
+                "$prefix\n正在下载：${formatBytes(progress.bytesRead)}$total"
+            }
+            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.IMPORTING -> "$prefix\n下载完成，正在导入规则..."
+            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.COMPLETED -> "$prefix\n导入完成：${progress.addedCount ?: 0} 条规则"
+        }
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        return when {
+            bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1fMB", bytes / 1024.0 / 1024.0)
+            bytes >= 1024L -> String.format(Locale.US, "%.1fKB", bytes / 1024.0)
+            else -> "${bytes}B"
+        }
+    }
+
     private fun String.lineCount(): Int = this.lineSequence().count()
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -699,11 +720,20 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             val appContext = ctx.applicationContext
             runCatching {
                 val results = if (sourceId == null) {
-                    RemoteRuleSourceRepository.syncEnabledSources(appContext, whitelistImportMode) { current, total, source ->
-                        viewLifecycleOwner.lifecycleScope.launch {
-                            updateProgressDialog(progress, "正在同步规则源 $current / $total\n${formatRemoteSourceTitle(source)}\n下载并导入中...")
+                    RemoteRuleSourceRepository.syncEnabledSources(
+                        context = appContext,
+                        whitelistImportMode = whitelistImportMode,
+                        onProgress = { current, total, source ->
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                updateProgressDialog(progress, "正在同步规则源 $current / $total\n${formatRemoteSourceTitle(source)}\n准备下载...")
+                            }
+                        },
+                        onDetailedProgress = { syncProgress ->
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                updateProgressDialog(progress, formatRemoteSyncProgress(syncProgress))
+                            }
                         }
-                    }
+                    )
                 } else {
                     val source = RuleRepository.getRemoteRuleSources(appContext).firstOrNull { it.id == sourceId }
                     if (source == null) {
@@ -721,8 +751,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                             )
                         )
                     } else {
-                        updateProgressDialog(progress, "正在同步规则源\n${formatRemoteSourceTitle(source)}\n下载并导入中...")
-                        listOf(RemoteRuleSourceRepository.syncSource(appContext, source, whitelistImportMode))
+                        updateProgressDialog(progress, "正在同步规则源\n${formatRemoteSourceTitle(source)}\n准备下载...")
+                        listOf(RemoteRuleSourceRepository.syncSource(appContext, source, whitelistImportMode) { syncProgress ->
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                updateProgressDialog(progress, formatRemoteSyncProgress(syncProgress))
+                            }
+                        })
                     }
                 }
                 results
@@ -1358,7 +1392,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val progress = showProgressDialog("导入规则", "正在读取规则文件...")
         viewLifecycleOwner.lifecycleScope.launch {
             runCatching {
-                updateProgressDialog(progress, "正在读取规则文件...")
+                updateProgressDialog(progress, "正在打开规则文件...")
+                delay(80)
+                updateProgressDialog(progress, "正在读取规则文件...\n大文件可能需要等待几秒")
                 val content = readRuleContent(appContext, uri)
                 if (content == null) {
                     LogRepository.append(appContext, "Import rule file failed: unable to read content from URI")
@@ -1395,42 +1431,35 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 LogRepository.append(context, "Failed to take persistable URI permission: ${it.message ?: it.javaClass.simpleName}")
             }
             val contentResolver = context.contentResolver
-            val candidates = listOfNotNull(
-                runCatching {
-                    contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.also { content ->
-                        LogRepository.append(context, "Read content via openInputStream: length=${content?.length ?: 0}")
-                    }
-                }.getOrNull().also { result ->
-                    if (result != null) {
-                        LogRepository.append(context, "Successfully read content via openInputStream")
-                    }
-                },
-                runCatching {
-                    readRuleContentFromTypedAsset(contentResolver, uri, "text/plain").also { content ->
-                        LogRepository.append(context, "Read content via typedAsset text/plain: length=${content?.length ?: 0}")
-                    }
-                }.getOrNull().also { result ->
-                    if (result != null) {
-                        LogRepository.append(context, "Successfully read content via typedAsset text/plain")
-                    }
-                },
-                runCatching {
-                    readRuleContentFromTypedAsset(contentResolver, uri, "*/*").also { content ->
-                        LogRepository.append(context, "Read content via typedAsset */*: length=${content?.length ?: 0}")
-                    }
-                }.getOrNull().also { result ->
-                    if (result != null) {
-                        LogRepository.append(context, "Successfully read content via typedAsset */*")
-                    }
+            val directContent = runCatching {
+                contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.also { content ->
+                    LogRepository.append(context, "Read content via openInputStream: length=${content?.length ?: 0}")
                 }
-            )
-            val result = candidates.firstOrNull { it.isNotBlank() }
-            if (result == null && candidates.isNotEmpty()) {
-                LogRepository.append(context, "All read methods returned blank content")
-            } else if (result == null) {
-                LogRepository.append(context, "All read methods failed or returned null")
+            }.getOrNull()
+            if (!directContent.isNullOrBlank()) {
+                LogRepository.append(context, "Successfully read content via openInputStream")
+                return@withContext directContent
             }
-            return@withContext result
+            val textContent = runCatching {
+                readRuleContentFromTypedAsset(contentResolver, uri, "text/plain").also { content ->
+                    LogRepository.append(context, "Read content via typedAsset text/plain: length=${content?.length ?: 0}")
+                }
+            }.getOrNull()
+            if (!textContent.isNullOrBlank()) {
+                LogRepository.append(context, "Successfully read content via typedAsset text/plain")
+                return@withContext textContent
+            }
+            val anyContent = runCatching {
+                readRuleContentFromTypedAsset(contentResolver, uri, "*/*").also { content ->
+                    LogRepository.append(context, "Read content via typedAsset */*: length=${content?.length ?: 0}")
+                }
+            }.getOrNull()
+            if (!anyContent.isNullOrBlank()) {
+                LogRepository.append(context, "Successfully read content via typedAsset */*")
+                return@withContext anyContent
+            }
+            LogRepository.append(context, "All read methods failed or returned blank content")
+            return@withContext null
         }
     }
 

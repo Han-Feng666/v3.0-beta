@@ -38,6 +38,10 @@ object PromoGovernTargetRepository {
                 includedByWellKnown++
                 return@filter true
             }
+            if (isLikelyOemPromoPackage(appInfo.packageName, label)) {
+                includedByWellKnown++
+                return@filter true
+            }
             excludedPureSystem++
             false
         }
@@ -70,28 +74,33 @@ object PromoGovernTargetRepository {
         val label = pm.getApplicationLabel(appInfo)?.toString().orEmpty().ifBlank { packageName }
         val lowerLabel = label.lowercase()
         val lowerPackage = packageName.lowercase()
-        if (!looksLikeThirdPartyPromoApp(lowerLabel, lowerPackage)) return null
+        val matchedPresets = ShizukuAdControlCatalog.allPresets().filter { it.packageName == packageName }
+        val notificationRisk = assessNotificationRisk(lowerLabel, lowerPackage)
+        val componentCandidates = PromoGovernComponentRepository.discoverCandidates(context, packageName)
+        val matchedWellKnownApp = isWellKnownThirdPartyPromoApp(packageName, label)
+        val looksLikePromo = looksLikeThirdPartyPromoApp(lowerLabel, lowerPackage)
+        val hasPromoEvidence = matchedPresets.isNotEmpty() || matchedWellKnownApp || looksLikePromo || componentCandidates.isNotEmpty() || notificationRisk != NotificationRiskLevel.LOW
+        if (!hasPromoEvidence) return null
         val status = ShizukuAdControlRepository.queryPackageStatus(context, packageName)
         if (!status.installed) return null
         val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-        val notificationRisk = assessNotificationRisk(lowerLabel, lowerPackage)
-        val componentCandidates = PromoGovernComponentRepository.discoverCandidates(context, packageName)
         val tags = buildDetectionTags(
             appInfo = appInfo,
             hasLauncher = pm.getLaunchIntentForPackage(packageName) != null,
             componentCandidates = componentCandidates,
             notificationRisk = notificationRisk,
-            matchedWellKnownApp = isWellKnownThirdPartyPromoApp(packageName, label)
+            matchedWellKnownApp = matchedWellKnownApp,
+            matchedPreset = matchedPresets.isNotEmpty()
         )
         return PromoGovernTarget(
             packageName = packageName,
-            title = label,
-            category = inferPromoCategory(lowerLabel, lowerPackage),
-            description = buildDescription(notificationRisk, componentCandidates),
+            title = matchedPresets.firstOrNull()?.title ?: label,
+            category = matchedPresets.firstOrNull()?.category ?: inferPromoCategory(lowerLabel, lowerPackage),
+            description = matchedPresets.firstOrNull()?.description ?: buildDescription(notificationRisk, componentCandidates),
             sourceLabel = if (isSystem) "系统预装第三方 App" else "已安装第三方 App",
             systemApp = isSystem,
             detectionTags = tags,
-            relatedPresets = emptyList(),
+            relatedPresets = matchedPresets,
             packageStatus = status
         )
     }
@@ -116,6 +125,19 @@ object PromoGovernTargetRepository {
             "wps", "网易云音乐", "番茄小说", "起点", "uc浏览器", "夸克", "喜马拉雅"
         )
         return wellKnownPrefixes.any { lowerPackage.startsWith(it) } || labelHints.any { lowerLabel.contains(it) }
+    }
+
+    private fun isLikelyOemPromoPackage(packageName: String, label: String): Boolean {
+        val lowerPackage = packageName.lowercase()
+        val lowerLabel = label.lowercase()
+        val vendorHints = listOf("miui", "xiaomi", "mipicks", "heytap", "oppo", "vivo", "bbk", "huawei", "honor", "samsung")
+        val promoPackageHints = listOf(
+            "appstore", "market", "browser", "theme", "wallpaper", "pictorial", "content", "reader",
+            "gamecenter", "quicksearch", "search", "assistant", "feed", "recommend", "ad", "ads", "systemad"
+        )
+        val promoLabelHints = listOf("应用商店", "软件商店", "浏览器", "主题", "壁纸", "画报", "内容", "阅读", "游戏中心", "搜索", "助手", "推荐", "广告")
+        return (vendorHints.any(lowerPackage::contains) && promoPackageHints.any(lowerPackage::contains)) ||
+            promoLabelHints.any(lowerLabel::contains)
     }
 
     private fun looksLikeThirdPartyPromoApp(lowerLabel: String, lowerPackage: String): Boolean {
@@ -181,11 +203,13 @@ object PromoGovernTargetRepository {
         hasLauncher: Boolean,
         componentCandidates: List<PromoComponentCandidate>,
         notificationRisk: NotificationRiskLevel,
-        matchedWellKnownApp: Boolean
+        matchedWellKnownApp: Boolean,
+        matchedPreset: Boolean
     ): List<String> {
         val tags = mutableListOf<String>()
         if ((appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0) tags += "系统预装"
         if (hasLauncher) tags += "有启动入口"
+        if (matchedPreset) tags += "预设目录命中"
         if (matchedWellKnownApp) tags += "知名第三方"
         when (notificationRisk) {
             NotificationRiskLevel.HIGH -> tags += "高通知风险"

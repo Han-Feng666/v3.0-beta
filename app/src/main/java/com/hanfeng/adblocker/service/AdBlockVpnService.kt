@@ -775,6 +775,10 @@ class AdBlockVpnService : VpnService() {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            runCatching { builder.addDisallowedApplication(packageName) }
+                .onFailure {
+                    LogRepository.append(this, "Skip self disallowed app $packageName: ${it.message ?: it.javaClass.simpleName}")
+                }
             val disallowedPackages = WhitelistRepository.getDisallowedPackages(this)
             disallowedPackages.forEach { packageName ->
                 runCatching { builder.addDisallowedApplication(packageName) }
