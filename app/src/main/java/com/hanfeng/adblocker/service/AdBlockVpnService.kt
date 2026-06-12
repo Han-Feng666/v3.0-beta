@@ -59,6 +59,7 @@ import com.HanFeng.data.StatsRepository
 import com.HanFeng.data.WhitelistRepository
 import com.HanFeng.dns.DnsMessageParser
 import com.HanFeng.model.BlockRule
+import com.HanFeng.model.RuleSource
 import com.HanFeng.model.DnsQuestion
 import com.HanFeng.model.LocalProxyCoexistConfig
 import com.HanFeng.security.CertificateAuthorityManager
@@ -5934,12 +5935,116 @@ class AdBlockVpnService : VpnService() {
             appName = appName
         )
         val vendor = matchedRule?.vendor ?: classifyVendorCached(domain, appName)
+        
+        // 即使没有规则匹配，也执行智能域名评分（兜底识别）
+        val smartRule = matchedRule ?: smartDomainScoreAndCreateRule(domain, appName, vendor)
+        
         return DomainDecisionContext(
             appName = appName,
-            matchedRule = matchedRule,
+            matchedRule = smartRule,
             vendor = vendor,
-            reason = if (matchedRule != null) "matched-rule:${matchedRule.id.take(8)}" else explainDomainDecisionReason(domain, appName, vendor)
+            reason = if (matchedRule != null) "matched-rule:${matchedRule.id.take(8)}" 
+                     else if (smartRule != null) "smart-score-suspicious"
+                     else explainDomainDecisionReason(domain, appName, vendor)
         )
+    }
+    
+    /**
+     * 智能域名评分：即使规则库没有，也能识别可疑广告域名
+     * @return 如果评分达到阈值，返回一个虚拟的规则；否则返回 null
+     */
+    private fun smartDomainScoreAndCreateRule(domain: String, appName: String, vendor: String): BlockRule? {
+        val normalizedDomain = domain.trim().lowercase()
+        if (normalizedDomain.isBlank()) return null
+        
+        // 白名单保护：这些域名不参与智能评分
+        if (RuleRepository.isWhitelistedDomain(normalizedDomain)) return null
+        if (RuleRepository.isSensitiveAuthDomain(normalizedDomain)) return null
+        if (RuleRepository.shouldProtectMediaTraffic(normalizedDomain)) return null
+        if (RuleRepository.shouldProtectBusinessTraffic(normalizedDomain)) return null
+        if (RuleRepository.isGameCoreDomain(normalizedDomain)) return null
+        if (RuleRepository.isSocialCoreDomain(normalizedDomain)) return null
+        
+        var score = 0
+        val reasons = mutableListOf<String>()
+        
+        // 1. 子域名特征（权重：3 分）
+        val adSubdomainPatterns = listOf(
+            "ad", "ads", "adserver", "adx", "adv", "adnet",
+            "banner", "splash", "promo", "promotion",
+            "track", "tracking", "analytics", "beacon",
+            "log", "logger", "stat", "stats", "metric",
+            "sdk", "material", "creative"
+        )
+        val domainPrefix = normalizedDomain.substringBefore('.')
+        val matchedSubdomain = adSubdomainPatterns.find { 
+            domainPrefix.startsWith(it) || domainPrefix == it || domainPrefix.startsWith("$it-") 
+        }
+        if (matchedSubdomain != null) {
+            score += 3
+            reasons += "subdomain:$matchedSubdomain"
+        }
+        
+        // 2. 域名关键词（权重：2 分）
+        val adKeywords = listOf("ad", "ads", "banner", "promo", "track", "sdk", "material", "creative")
+        val matchedKeyword = adKeywords.find { normalizedDomain.contains(it) }
+        if (matchedKeyword != null) {
+            score += 2
+            reasons += "keyword:$matchedKeyword"
+        }
+        
+        // 3. 已知广告 SDK 域名模式（权重：4 分）
+        val sdkPatterns = listOf(
+            "pangolin", "pangle", "gromore", "csj", "cjs", "oceanengine",
+            "gdt", "sigmob", "mobvista", "mintegral", "topon", "tradplus",
+            "adscope", "kswad", "tanx", "alimama", "umeng", "mobads",
+            "baidumobads", "huaweiads", "oppoads", "vivo_ad", "xiaomi_ad"
+        )
+        val matchedSdk = sdkPatterns.find { normalizedDomain.contains(it) }
+        if (matchedSdk != null) {
+            score += 4
+            reasons += "sdk:$matchedSdk"
+        }
+        
+        // 4. 路径式域名特征（权重：2 分）
+        val pathLikePatterns = listOf("/ad/", "/ads/", "/banner/", "/promo/", "/tracking/")
+        val matchedPath = pathLikePatterns.find { normalizedDomain.contains(it) }
+        if (matchedPath != null) {
+            score += 2
+            reasons += "path:$matchedPath"
+        }
+        
+        // 5. App 类型加成（小说/视频/社区 App 的可疑域名更可信）
+        if (RuleRepository.isNovelAppHint(appName) && score >= 2) {
+            score += 2
+            reasons += "novel-app-boost"
+        }
+        if (RuleRepository.isAggressiveAdAppHint(appName) && score >= 2) {
+            score += 1
+            reasons += "aggressive-app-boost"
+        }
+        
+        // 6. 供应商信号加成（未知供应商 + 可疑域名 = 更可疑）
+        if (vendor == "其它 (Other)" && score >= 3) {
+            score += 1
+            reasons += "unknown-vendor-boost"
+        }
+        
+        // 评分达到阈值才拦截
+        val threshold = if (RuleRepository.isNovelAppHint(appName)) 3 else 5
+        
+        return if (score >= threshold) {
+            // 创建一个虚拟规则用于标记（使用 RuleSource.REFERENCE 标记为智能识别）
+            BlockRule(
+                id = "smart-score-$domain",
+                domain = domain,
+                vendor = vendor,
+                source = RuleSource.REFERENCE,
+                keywordPattern = reasons.joinToString(", ")
+            )
+        } else {
+            null
+        }
     }
 
     private fun resolveAliasDecisionContext(
