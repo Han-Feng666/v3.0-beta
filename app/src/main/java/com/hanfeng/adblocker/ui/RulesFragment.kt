@@ -462,17 +462,18 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         runCatching {
             createDialogBuilder(dialogContext)
                 .setTitle("规则工具")
-                .setItems(arrayOf("导入本地规则", "规则源管理", "影响正常网络", "删除所有规则")) { _, which ->
+                .setItems(arrayOf("导入本地规则", "导出规则到文件", "规则源管理", "影响正常网络", "删除所有规则")) { _, which ->
                     when (which) {
                         0 -> launchImportRulePicker()
-                        1 -> openRemoteRuleSourcesPage()
-                        2 -> openImpactNormalNetworkPage()
-                        3 -> confirmDeleteAllRules()
+                        1 -> exportRulesToDownloads()
+                        2 -> openRemoteRuleSourcesPage()
+                        3 -> openImpactNormalNetworkPage()
+                        4 -> confirmDeleteAllRules()
                     }
                 }
                 .showSafely(dialogContext, "Show rule tools dialog failed")
         }.onFailure {
-            val ctx = safeContext() ?: return@onFailure
+            val ctx = safeDialogActivity() ?: return@onFailure
             LogRepository.append(ctx, "Open rule tool panel failed: ${it.message ?: it.javaClass.simpleName}")
             launchImportRulePicker()
         }
@@ -1190,8 +1191,62 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 .setNegativeButton("取消", null)
                 .showSafely(dialogContext, "Show delete all rules confirmation dialog failed")
         } catch (e: Exception) {
-            LogRepository.append(dialogContext, "Delete all dialog failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
-            Toast.makeText(dialogContext, "打开删除确认失败：${e.message}", Toast.LENGTH_LONG).show()
+            LogRepository.append(ctx, "Confirm delete all rules failed: ${e.message ?: e.javaClass.simpleName}")
+            showShortToast("操作失败：${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    private fun exportRulesToDownloads() {
+        val ctx = context ?: return
+        val allRules = RuleRepository.getRules(ctx)
+        if (allRules.isEmpty()) {
+            Toast.makeText(ctx, "当前没有规则可导出", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val exportDir = android.os.Environment.getExternalStoragePublicDirectory(
+            android.os.Environment.DIRECTORY_DOWNLOADS
+        )
+        val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.CHINA)
+            .format(java.util.Date())
+        val outputFile = java.io.File(exportDir, "hanfeng_rules_$timestamp.txt")
+
+        lifecycleScope.launch {
+            val progressDialog = android.app.ProgressDialog(ctx).apply {
+                setTitle("导出规则")
+                setMessage("正在导出 ${allRules.size} 条规则...")
+                isIndeterminate = true
+                setCancelable(false)
+                show()
+            }
+            try {
+                val exportedCount = withContext(Dispatchers.IO) {
+                    com.HanFeng.data.RuleRepositoryExport.exportRulesToTxt(
+                        context = ctx,
+                        outputFile = outputFile,
+                        includeWhitelist = true,
+                        includeSmartScored = true
+                    )
+                }
+                progressDialog.dismiss()
+                if (exportedCount > 0) {
+                    Toast.makeText(
+                        ctx,
+                        "导出成功：$exportedCount 条规则\n文件位置：${outputFile.absolutePath}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    LogRepository.append(
+                        ctx,
+                        "规则导出成功：文件=$outputFile, 规则数=$exportedCount"
+                    )
+                } else {
+                    Toast.makeText(ctx, "导出失败：未写入任何规则", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                progressDialog.dismiss()
+                LogRepository.append(ctx, "导出规则失败：${e.message ?: e.javaClass.simpleName}")
+                Toast.makeText(ctx, "导出失败：${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
