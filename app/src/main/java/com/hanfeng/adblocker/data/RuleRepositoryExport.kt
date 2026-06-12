@@ -43,8 +43,6 @@ object RuleRepositoryExport {
         BufferedWriter(FileWriter(outputFile)).use { writer ->
             writer.writeLine("! Title: 寒枫广告 blocking 规则导出")
             writer.writeLine("! Description: 从寒枫 App 导出的自定义广告拦截规则")
-            writer.writeLine("! Homepage: https://github.com/Han-Feng666/v3.0-beta")
-            writer.writeLine("! License: MIT")
             writer.writeLine("! Version: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}")
             writer.writeLine("!")
             writer.writeLine("! 导出时间：${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())}")
