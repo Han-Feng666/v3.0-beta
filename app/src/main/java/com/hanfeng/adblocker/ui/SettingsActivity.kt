@@ -26,6 +26,7 @@ import com.HanFeng.data.ShizukuAdControlCatalog
 import com.HanFeng.data.ShizukuAdControlRepository
 import com.HanFeng.data.ShizukuConnectionOwnerRepository
 import com.HanFeng.data.ShizukuRepository
+import com.HanFeng.security.CertificateAuthorityManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -43,6 +44,7 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnJoinGroupSettings: Button
     private lateinit var btnResetHideBackground: Button
     private lateinit var btnExportLogs: Button
+    private lateinit var btnExportCertificate: Button
     private lateinit var btnBack: Button
     private lateinit var settingsRoot: View
     
@@ -76,6 +78,7 @@ class SettingsActivity : BaseActivity() {
         btnJoinGroupSettings = findViewById(R.id.btnJoinGroupSettings)
         btnResetHideBackground = findViewById(R.id.btnResetHideBackground)
         btnExportLogs = findViewById(R.id.btnExportLogs)
+        btnExportCertificate = findViewById(R.id.btnExportCertificate)
         btnBack = findViewById(R.id.btnBack)
         
         // Shizuku 增强
@@ -140,6 +143,9 @@ class SettingsActivity : BaseActivity() {
         }
         btnExportLogs.setOnClickListener {
             exportLogsToUser()
+        }
+        btnExportCertificate.setOnClickListener {
+            exportCertificateToUser()
         }
         
         // Shizuku 增强功能按钮
@@ -318,6 +324,43 @@ class SettingsActivity : BaseActivity() {
         }.onFailure {
             LogRepository.append(this, "Export logs chooser failed: ${it.message}")
             showShortToast("打开日志导出失败")
+        }
+    }
+
+    private fun exportCertificateToUser() {
+        lifecycleScope.launch {
+            try {
+                val result = withContext(Dispatchers.Default) {
+                    CertificateAuthorityManager.ensureCaInstalledFiles(applicationContext)
+                }
+                result.onSuccess { cert ->
+                    val publicCertFile = java.io.File(cert.filePath)
+                    if (!publicCertFile.exists()) {
+                        showShortToast("证书文件不存在")
+                        return@onSuccess
+                    }
+                    val exportPath = CertificateAuthorityManager.exportCertificateToDownloads(
+                        this@SettingsActivity,
+                        publicCertFile
+                    )
+                    if (exportPath != null) {
+                        showShortToast("证书已导出到：$exportPath")
+                        LogRepository.append(
+                            this@SettingsActivity,
+                            "Certificate exported to: $exportPath"
+                        )
+                    } else {
+                        showShortToast("导出证书失败")
+                        LogRepository.append(this@SettingsActivity, "Export certificate failed: path is null")
+                    }
+                }.onFailure {
+                    LogRepository.append(this@SettingsActivity, "Prepare certificate export failed: ${it.message ?: it.javaClass.simpleName}")
+                    showShortToast("准备证书导出失败")
+                }
+            } catch (e: Exception) {
+                LogRepository.append(this@SettingsActivity, "Export certificate failed: ${e.message ?: e.javaClass.simpleName}")
+                showShortToast("导出证书失败：${e.message}")
+            }
         }
     }
 

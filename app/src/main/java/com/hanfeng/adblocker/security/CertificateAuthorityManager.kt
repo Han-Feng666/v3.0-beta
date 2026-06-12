@@ -264,7 +264,7 @@ object CertificateAuthorityManager {
         }
     }
 
-    private fun exportCertificateToDownloads(context: Context, sourceFile: File): String? {
+    fun exportCertificateToDownloads(context: Context, sourceFile: File): String? {
         return runCatching {
             writeToDownloadSubdir(
                 context = context,
