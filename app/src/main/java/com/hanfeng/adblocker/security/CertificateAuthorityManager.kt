@@ -61,9 +61,12 @@ object CertificateAuthorityManager {
                 val generated = generateCaCertificate()
                 storePkcs12(certFile, generated.keyPair, generated.certificate)
                 storePublicCertificate(publicCertFile, generated.certificate)
+                // 新证书生成后，标记需要重新导出
+                HttpsMitmRepository.clearCertificateExportPath(context)
             }
             HttpsMitmRepository.saveCertificateMeta(context, CERT_ALIAS, CERT_PASSWORD, CERT_PUBLIC_FILE_NAME, CERT_FILE_NAME)
-            val downloadDisplayPath = if (newlyGenerated || HttpsMitmRepository.getCertificateExportPath(context).isNullOrBlank()) {
+            // 只有在导出路径为空时才重新导出（避免反复覆盖下载目录）
+            val downloadDisplayPath = if (HttpsMitmRepository.getCertificateExportPath(context).isNullOrBlank()) {
                 exportCertificateToDownloads(context, publicCertFile)
             } else {
                 HttpsMitmRepository.getCertificateExportPath(context)

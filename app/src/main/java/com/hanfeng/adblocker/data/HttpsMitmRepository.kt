@@ -158,6 +158,10 @@ object HttpsMitmRepository {
         prefs(context).edit().putString(KEY_CERT_EXPORT_PATH, exportPath).apply()
     }
 
+    fun clearCertificateExportPath(context: Context) {
+        prefs(context).edit().remove(KEY_CERT_EXPORT_PATH).apply()
+    }
+
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private fun clearExpiredBypass(context: Context, host: String) {
