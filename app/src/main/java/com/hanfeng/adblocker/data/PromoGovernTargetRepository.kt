@@ -111,18 +111,25 @@ object PromoGovernTargetRepository {
         val wellKnownPrefixes = listOf(
             "com.taobao.", "com.tmall.", "com.alibaba.", "com.alipay.",
             "com.meituan.", "com.sankuai.", "com.dianping.",
-            "com.jingdong.", "com.jd.",
+            "com.jingdong.", "com.jd.", "com.jd.lib.", "com.jd.my jd.", "com.jingdong.purplecat.",
             "com.ss.android.ugc.aweme", "com.ss.android.article.news", "com.ss.android.article.lite",
             "com.tencent.mm", "com.tencent.mobileqq", "com.tencent.qqlive", "com.tencent.qqmusic",
             "com.sina.weibo", "com.eleme.", "com.ctrip.", "com.baidu.searchbox",
             "com.dragon.read", "com.qidian.", "com.UCMobile", "com.uc.", "com.quark.",
-            "com.heytap.market", "com.heytap.themestore", "com.huawei.appmarket"
+            "com.heytap.market", "com.heytap.themestore", "com.huawei.appmarket",
+            "com.vipshop", "com.vip.", "com.sec.android.app.kidstoys",
+            "com.fanqie", "com.shuqi", "com.xiaoshuo", "com.reading",
+            "com.xiaomi.market", "com.huawei.appgallery", "com.oppo.market",
+            "com.netease.cloudmusic", "music.163.com"
         )
         val labelHints = listOf(
             "淘宝", "天猫", "美团", "大众点评", "京东", "拼多多", "唯品会",
             "今日头条", "头条", "抖音", "快手", "微博", "微信", "qq", "支付宝",
             "百度地图", "高德地图", "美团外卖", "饿了么", "携程", "飞猪", "百度网盘",
-            "wps", "网易云音乐", "番茄小说", "起点", "uc浏览器", "夸克", "喜马拉雅"
+            "wps", "网易云音乐", "番茄小说", "起点", "uc 浏览器", "夸克", "喜马拉雅",
+            "书旗小说", "七猫小说", "掌阅", "咪咕阅读", "qq 阅读", "微信读书",
+            "得物", "小红书", "豆瓣", "知乎", "b 站", "哔哩哔哩", "汽水音乐",
+            "应用商店", "软件商店", "游戏中心", "手机商店"
         )
         return wellKnownPrefixes.any { lowerPackage.startsWith(it) } || labelHints.any { lowerLabel.contains(it) }
     }
@@ -130,12 +137,14 @@ object PromoGovernTargetRepository {
     private fun isLikelyOemPromoPackage(packageName: String, label: String): Boolean {
         val lowerPackage = packageName.lowercase()
         val lowerLabel = label.lowercase()
-        val vendorHints = listOf("miui", "xiaomi", "mipicks", "heytap", "oppo", "vivo", "bbk", "huawei", "honor", "samsung")
+        val vendorHints = listOf("miui", "xiaomi", "mipicks", "heytap", "oppo", "vivo", "bbk", "huawei", "honor", "samsung", "meizu", "flyme", "oneplus", "oxygenos", "hydrogenos")
         val promoPackageHints = listOf(
             "appstore", "market", "browser", "theme", "wallpaper", "pictorial", "content", "reader",
-            "gamecenter", "quicksearch", "search", "assistant", "feed", "recommend", "ad", "ads", "systemad"
+            "gamecenter", "quicksearch", "search", "assistant", "feed", "recommend", "ad", "ads", "systemad",
+            "video", "music", "weather", "calendar", "clock", "calculator", "filemanager", "recorder"
         )
-        val promoLabelHints = listOf("应用商店", "软件商店", "浏览器", "主题", "壁纸", "画报", "内容", "阅读", "游戏中心", "搜索", "助手", "推荐", "广告")
+        val promoLabelHints = listOf("应用商店", "软件商店", "浏览器", "主题", "壁纸", "画报", "内容", "阅读", "游戏中心", "搜索", "助手", "推荐", "广告",
+            "视频", "音乐", "天气", "日历", "时钟", "计算器", "文件管理", "录音机", "指南针", "手电筒", "锁屏", "画报", "智能助理", "负一屏")
         return (vendorHints.any(lowerPackage::contains) && promoPackageHints.any(lowerPackage::contains)) ||
             promoLabelHints.any(lowerLabel::contains)
     }
@@ -146,28 +155,40 @@ object PromoGovernTargetRepository {
             "com.meituan.", "com.sankuai.", "com.dianping.", "com.ss.android.", "com.iesdouyin.",
             "com.tencent.mm", "com.tencent.mobileqq", "com.tencent.qqlive", "com.smile.gifmaker",
             "com.kuaishou.", "tv.danmaku.bili", "com.sina.weibo", "com.dragon.read",
-            "com.eg.android.", "com.ctrip.", "com.qunar.", "com.tongcheng.", "com.netease.", "com.163."
+            "com.eg.android.", "com.ctrip.", "com.qunar.", "com.tongcheng.", "com.netease.", "com.163.",
+            "com.qidian.", "com.shuqi", "com.fanqie", "com.xiaoshuo.", "com.reading.",
+            "com.vipshop.", "com.xiaomi.", "com.huawei.", "com.oppo.", "com.vivo.",
+            "com.google.android.", "com.facebook.", "com.instagram.", "com.twitter.",
+            "com.netflix.", "com.spotify.", "com.amazon.", "com.google.play.",
+            "com.moji.", "com.moji.android", "com.zhangshang", "com.tianqi", "com.android.browser",
+            "com.android.calendar", "com.android.thememanager", "com.android.deskclock"
         )
         val labelHints = listOf(
             "应用商店", "软件商店", "浏览器", "阅读", "小说", "短剧", "视频", "资讯", "新闻",
             "直播", "漫画", "音乐", "游戏中心", "内容中心", "推荐", "精选", "热点", "发现",
             "赚钱", "福利", "红包", "免费", "活动", "优惠", "折扣", "秒杀", "领券",
             "淘宝", "天猫", "美团", "京东", "拼多多", "今日头条", "抖音", "快手", "微博",
-            "支付宝", "饿了么", "携程", "百度网盘", "网易云音乐", "喜马拉雅"
+            "支付宝", "饿了么", "携程", "百度网盘", "网易云音乐", "喜马拉雅",
+            "书旗", "七猫", "掌阅", "咪咕", "qq 阅读", "微信读书", "番茄小说", "起点",
+            "唯品会", "得物", "小红书", "豆瓣", "知乎", "b 站", "哔哩哔哩", "汽水音乐",
+            "天气", "日历", "时钟", "闹钟", "计算器", "文件管理", "录音机", "指南针"
         )
         val packageHints = listOf(
             "appstore", "market", "browser", "reader", "novel", "book", "video", "news",
             "gamecenter", "content", "promo", "recommend", "discover", "reward", "benefit", "ad",
             "marketing", "advert", "promotion", "mall", "shop", "activity", "sale", "discount",
             "coupon", "welfare", "lottery", "task", "jd.com", "jingdong", "sankuai", "meituan",
-            "taobao", "tmall", "alibaba", "toutiao", "douyin", "bytedance", "kuaishou", "bilibili"
+            "taobao", "tmall", "alibaba", "toutiao", "douyin", "bytedance", "kuaishou", "bilibili",
+            "xiaomi", "huawei", "oppo", "vivo", "samsung", "sony", "lg", "motorola",
+            "moji", "tianqi", "weather", "calendar", "clock", "alarm", "calculator", "filemanager",
+            "recorder", "compass", "music", "player", "gallery", "photo", "camera"
         )
-        val oemHints = listOf("heytap", "coloros", "realme", "vivo", "oppo", "miui", "xiaomi", "huawei", "honor")
+        val oemHints = listOf("heytap", "coloros", "realme", "vivo", "oppo", "miui", "xiaomi", "huawei", "honor", "samsung")
         val distributionHints = listOf("contentcenter", "contentservice", "feed", "recommend", "discovery", "gamecenter", "appstore", "market", "adsdk", "union", "push", "marketing", "promo")
         val knownThirdParty = knownThirdPartyPrefixes.any { lowerPackage.startsWith(it) }
-        val labelHighConfidence = labelHints.any(lowerLabel::contains)
-        val packageHighConfidence = packageHints.any(lowerPackage::contains)
-        val oemDistributionMatched = oemHints.any(lowerPackage::contains) && distributionHints.any(lowerPackage::contains)
+        val labelHighConfidence = labelHints.any { lowerLabel.contains(it) }
+        val packageHighConfidence = packageHints.any { lowerPackage.contains(it) }
+        val oemDistributionMatched = oemHints.any { lowerPackage.contains(it) } && distributionHints.any { lowerPackage.contains(it) }
         return knownThirdParty || (labelHighConfidence && oemDistributionMatched) || (packageHighConfidence && !lowerPackage.startsWith("com.android.") && !lowerPackage.contains("aosp"))
     }
 
@@ -189,7 +210,8 @@ object PromoGovernTargetRepository {
     private fun assessNotificationRisk(lowerLabel: String, lowerPackage: String): NotificationRiskLevel {
         val highRiskKeywords = listOf("资讯", "新闻", "热点", "推荐", "精选", "发现", "头条", "news", "hot", "feed", "recommend", "discover", "toutiao")
         val activityKeywords = listOf("活动", "优惠", "折扣", "秒杀", "特卖", "团购", "签到", "任务", "领奖", "抽奖", "福利", "红包", "赚钱", "coupon", "bonus", "welfare", "lottery", "promotion")
-        val mediumRiskKeywords = listOf("应用商店", "软件商店", "浏览器", "视频", "短剧", "直播", "漫画", "游戏中心", "market", "browser", "video", "gamecenter")
+        val mediumRiskKeywords = listOf("应用商店", "软件商店", "浏览器", "视频", "短剧", "直播", "漫画", "游戏中心", "market", "browser", "video", "gamecenter",
+            "小说", "阅读", "读书", "书屋", "看书", "追书", "novel", "reader", "book", "read", "shuqi", "fanqie", "qidian", "qimao")
         return when {
             highRiskKeywords.any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> NotificationRiskLevel.HIGH
             activityKeywords.any { lowerLabel.contains(it) || lowerPackage.contains(it) } -> NotificationRiskLevel.HIGH
