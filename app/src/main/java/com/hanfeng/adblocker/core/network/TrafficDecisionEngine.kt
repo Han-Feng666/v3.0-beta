@@ -130,9 +130,16 @@ object TrafficDecisionEngine {
         if (input.localProxyReachable != true) return false
         val port = input.configPort ?: return false
         if (port !in 1..65535) return false
-        if (input.targetPackages.isEmpty()) return false
-        input.cachedFlowDecision?.let { return it }
-        input.cachedSourcePortDecision?.let { return it }
+        
+        // 全流量 MITM 模式：没有配置目标 App 时，默认拦截所有 TCP 流量
+        if (input.targetPackages.isEmpty()) {
+            val destinationIp = input.destinationIp ?: return true
+            if (isLocalProxyEndpoint(destinationIp, input.packet.destinationPort, input.configHost, port)) {
+                return false
+            }
+            return true
+        }
+        
         val destinationIp = input.destinationIp ?: return false
         if (isLocalProxyEndpoint(destinationIp, input.packet.destinationPort, input.configHost, port)) {
             return false
