@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">寒枫</string>
-    <string name="game_combo_accessibility_description">寒枫辅助服务</string>
 </resources>
