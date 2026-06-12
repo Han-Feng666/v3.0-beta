@@ -10,7 +10,7 @@ android {
     defaultConfig {
         applicationId = "com.HanFeng"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 34
         versionCode = 161
         versionName = "1.6.1"
 
