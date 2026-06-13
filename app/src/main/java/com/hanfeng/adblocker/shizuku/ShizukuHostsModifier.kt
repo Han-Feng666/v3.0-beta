@@ -5,6 +5,7 @@ import android.os.IInterface
 import android.util.Log
 import rikka.shizuku.ShizukuBinderWrapper
 import java.lang.reflect.Method
+import java.util.concurrent.TimeUnit
 
 /**
  * Shizuku 增强工具 - Hosts 文件修改
@@ -51,8 +52,8 @@ class ShizukuHostsModifier {
      */
     fun readHosts(): List<String> {
         return try {
-            val process = ProcessBuilder("su", "-c", "cat $HOSTS_PATH").start()
-            process.inputStream.bufferedReader().readLines()
+            val result = runShellCommand("cat $HOSTS_PATH")
+            if (result.exitCode == 0) result.output.lines() else emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to read hosts", e)
             emptyList()
@@ -136,10 +137,7 @@ class ShizukuHostsModifier {
      */
     private fun backupHosts() {
         try {
-            Runtime.getRuntime().exec(arrayOf(
-                "su", "-c",
-                "cp $HOSTS_PATH $HOSTS_BACKUP_PATH"
-            ))
+            runShellCommand("cp $HOSTS_PATH $HOSTS_BACKUP_PATH")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to backup hosts", e)
         }
@@ -150,18 +148,13 @@ class ShizukuHostsModifier {
      */
     private fun writeHosts(lines: List<String>) {
         val content = lines.joinToString("\n")
-        val process = ProcessBuilder("su", "-c", "cat > $HOSTS_PATH").start()
-        process.outputStream.writer().use {
-            it.write(content)
-            it.flush()
+        val writeResult = runShellCommand("cat > $HOSTS_PATH", input = content)
+        if (writeResult.exitCode != 0) {
+            throw IllegalStateException("写入 Hosts 失败：${writeResult.output.ifBlank { writeResult.exitCode.toString() }}")
         }
-        process.waitFor()
         
         // 设置正确权限
-        Runtime.getRuntime().exec(arrayOf(
-            "su", "-c",
-            "chmod 644 $HOSTS_PATH"
-        ))
+        runShellCommand("chmod 644 $HOSTS_PATH")
     }
     
     /**
@@ -169,10 +162,7 @@ class ShizukuHostsModifier {
      */
     fun restoreOriginalHosts() {
         try {
-            Runtime.getRuntime().exec(arrayOf(
-                "su", "-c",
-                "if [ -f $HOSTS_BACKUP_PATH ]; then cp $HOSTS_BACKUP_PATH $HOSTS_PATH; fi"
-            ))
+            runShellCommand("if [ -f $HOSTS_BACKUP_PATH ]; then cp $HOSTS_BACKUP_PATH $HOSTS_PATH; fi")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to restore hosts", e)
         }
@@ -183,11 +173,43 @@ class ShizukuHostsModifier {
      */
     fun verifyHostsBlock(hostname: String): Boolean {
         return try {
-            val process = ProcessBuilder("su", "-c", "getent hosts $hostname").start()
-            val result = process.inputStream.bufferedReader().readText()
-            result.contains("127.0.0.1") || result.contains("::1")
+            val result = runShellCommand("getent hosts $hostname")
+            result.output.contains("127.0.0.1") || result.output.contains("::1")
         } catch (e: Exception) {
             false
         }
     }
+
+    private fun runShellCommand(command: String, input: String? = null, timeoutSeconds: Long = 8L): CommandResult {
+        return try {
+            val process = ProcessBuilder("su", "-c", command)
+                .redirectErrorStream(true)
+                .start()
+            if (input != null) {
+                process.outputStream.writer().use { writer ->
+                    writer.write(input)
+                    writer.flush()
+                }
+            } else {
+                process.outputStream.close()
+            }
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return CommandResult(-1, "timeout")
+            }
+            val output = process.inputStream.bufferedReader().use { reader ->
+                val buffer = CharArray(4096)
+                val read = reader.read(buffer)
+                if (read <= 0) "" else String(buffer, 0, read)
+            }
+            CommandResult(process.exitValue(), output)
+        } catch (e: Exception) {
+            CommandResult(-1, e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    private data class CommandResult(
+        val exitCode: Int,
+        val output: String
+    )
 }

@@ -74,6 +74,16 @@ object HttpsMitmRepository {
         cachedCertificateInstallPending = false
     }
 
+    fun clearCertificateInstalled(context: Context) {
+        prefs(context).edit()
+            .putBoolean(KEY_CERT_INSTALLED, false)
+            .putBoolean(KEY_CERT_INSTALL_PENDING, true)
+            .apply()
+        cachedCertificateReady = true
+        cachedCertificateInstalled = false
+        cachedCertificateInstallPending = true
+    }
+
     fun clear(context: Context) {
         prefs(context).edit().clear().apply()
         cachedCertificateReady = null

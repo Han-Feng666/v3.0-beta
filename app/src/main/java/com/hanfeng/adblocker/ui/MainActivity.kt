@@ -96,6 +96,7 @@ class MainActivity : BaseActivity() {
 
     override fun onResume() {
         super.onResume()
+        syncMitmCertificateStateIfNeeded()
         refreshHomeStatus()
     }
 
@@ -120,6 +121,21 @@ class MainActivity : BaseActivity() {
             .replace(R.id.homeContainer, HomeFragment())
             .replace(R.id.statsContainer, StatsFragment())
             .commitNowAllowingStateLoss()
+    }
+
+    private fun syncMitmCertificateStateIfNeeded() {
+        if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
+        val wasInstalled = HttpsMitmRepository.isCertificateInstalled(this)
+        lifecycleScope.launch {
+            val installed = withContext(Dispatchers.Default) {
+                CertificateAuthorityManager.syncInstalledState(applicationContext)
+            }
+            if (!installed || isFinishing || isDestroyed) return@launch
+            if (!wasInstalled) {
+                NetworkKernel.reloadIfRunning(this@MainActivity)
+            }
+            refreshHomeStatus()
+        }
     }
 
     fun requestToggleVpn() {
@@ -480,7 +496,12 @@ class MainActivity : BaseActivity() {
                 if (certificateInstalled) {
                     showShortToast("MITM 模式已开启")
                 } else {
-                    showInstallCaDialog(cert)
+                    // 检查是否是证书重新生成
+                    if (cert.newlyGenerated) {
+                        showInstallCaDialog(cert, isNewCertificate = true)
+                    } else {
+                        showInstallCaDialog(cert, isNewCertificate = false)
+                    }
                 }
             }.onFailure {
                 LogRepository.append(this@MainActivity, "Prepare HTTPS MITM certificate failed: ${it.message ?: it.javaClass.simpleName}")
@@ -490,7 +511,7 @@ class MainActivity : BaseActivity() {
         }
     }
 
-    private fun showInstallCaDialog(certificate: CertificateAuthorityManager.GeneratedCertificate) {
+    private fun showInstallCaDialog(certificate: CertificateAuthorityManager.GeneratedCertificate, isNewCertificate: Boolean = false) {
         val downloadPathText = certificate.downloadDisplayPath ?: "Download/HanFeng/HanFeng.crt"
         if (isFinishing || isDestroyed) {
             LogRepository.append(this, "Skip certificate install dialog: activity not ready")
@@ -498,13 +519,22 @@ class MainActivity : BaseActivity() {
         }
         runCatching {
             StableDialog.builder(this)
-                .setTitle("安装 MITM 证书")
+                .setTitle("安装MITM证书")
                 .setMessage(
                     buildString {
-                        append(if (certificate.newlyGenerated) "本地 CA 证书已生成。" else "已复用现有 CA 证书。")
-                        append("\n\n证书文件位置：\n")
+                        if (isNewCertificate) {
+                            append("检测到证书已更新，需要重新安装新证书。\n\n")
+                            append("这可能是因为：\n")
+                            append("- 卸载后重新安装了 App\n")
+                            append("- App 数据被清空\n")
+                            append("- 证书文件损坏已自动修复\n\n")
+                        } else {
+                            append("检测到您还未安装 MITM 证书。\n\n")
+                        }
+                        append("证书文件位置：\n")
                         append(downloadPathText)
-                        append("\n\n安装步骤：\n1. 打开手机“设置”。\n2. 搜索“安装证书”或进入“安全 / 密码与隐私 / 更多安全设置”中的证书安装入口。\n3. 选择“CA 证书”或“从存储设备安装证书”。\n4. 前往 Download/HanFeng/ 目录，选择 HanFeng.crt 完成安装。\n5. 安装完成后返回应用，应用会自动检查证书状态。")
+                        append("\n\n安装步骤：\n1. 打开手机设置。\n2. 搜索安装证书或进入安全 - 密码与隐私 - 更多安全设置中的证书安装入口。\n3. 选择 CA 证书或从存储设备安装证书。\n4. 前往 Download/HanFeng/ 目录，选择 HanFeng.crt 完成安装。\n5. 安装完成后返回应用，应用会自动检查证书状态。\n\n")
+                        append("提示：如果是从应用商店更新 App，不需要重新安装证书。只有卸载后重装才需要。")
                     }
                 )
                 .setPositiveButton("我知道了", null)
@@ -512,8 +542,10 @@ class MainActivity : BaseActivity() {
                 .showSafely(this, "Show install CA dialog failed")
         }.onFailure {
             LogRepository.append(this, "Show certificate install dialog failed: ${it.message ?: it.javaClass.simpleName}")
-            if (certificate.newlyGenerated) {
-                showLongToast("证书已导出到 Download/HanFeng/HanFeng.crt，请到系统设置手动安装")
+            if (isNewCertificate) {
+                showLongToast("证书已更新，请到系统设置手动安装新证书：$downloadPathText")
+            } else {
+                showLongToast("证书已导出到 $downloadPathText，请到系统设置手动安装")
             }
         }
     }

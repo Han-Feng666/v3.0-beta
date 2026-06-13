@@ -67,6 +67,8 @@ class LocalProxyCoexistActivity : BaseActivity() {
         val port = binding.portInput.text?.toString()?.trim().orEmpty()
         val controllerPackage = binding.controllerPackageInput.text?.toString()?.trim().orEmpty()
         val remarks = binding.remarksInput.text?.toString()?.trim().orEmpty()
+        val coexistPackages = WhitelistRepository.getCoexistPackages(this)
+        val targetPackages = WhitelistRepository.getLocalProxyTargetPackages(this)
         binding.previewText.text = buildString {
             append("当前配置预览\n")
             append("地址：")
@@ -80,6 +82,21 @@ class LocalProxyCoexistActivity : BaseActivity() {
             append('\n')
             append("备注：")
             append(if (remarks.isBlank()) "未填写" else remarks)
+            append("\n\n共存诊断\n")
+            append("代理本体：")
+            append(if (controllerPackage.isBlank()) "未指定，保存后会尝试按已选加速器识别" else "将从寒枫 VPN 排除")
+            append('\n')
+            append("目标应用：")
+            append(
+                when {
+                    targetPackages.isNotEmpty() -> "${targetPackages.size} 个目标会经寒枫转发到本地代理，仍可保留 DNS/MITM 拦截"
+                    port.isNotBlank() -> "未单独选择目标应用，保存后只记录代理配置，不承接全 TCP 流量"
+                    else -> "未配置端口，当前不会启用本地代理共存"
+                }
+            )
+            append('\n')
+            append("共存列表：")
+            append(if (coexistPackages.isEmpty()) "暂无应用" else "${coexistPackages.size} 个应用已参与共存/跟随代理")
         }
     }
 

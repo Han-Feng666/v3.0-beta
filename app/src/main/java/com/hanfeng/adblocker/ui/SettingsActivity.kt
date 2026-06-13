@@ -1,5 +1,6 @@
 package com.HanFeng.ui
 
+import android.Manifest
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.ComponentInfo
@@ -13,6 +14,7 @@ import android.widget.Button
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import com.HanFeng.core.network.NetworkKernel
 import androidx.core.view.ViewCompat
@@ -21,7 +23,9 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.HanFeng.R
 import com.HanFeng.data.AppSettingsRepository
+import com.HanFeng.data.HttpsMitmRepository
 import com.HanFeng.data.LogRepository
+import com.HanFeng.data.RuleRepositoryExport
 import com.HanFeng.data.ShizukuAdControlCatalog
 import com.HanFeng.data.ShizukuAdControlRepository
 import com.HanFeng.data.ShizukuConnectionOwnerRepository
@@ -29,6 +33,7 @@ import com.HanFeng.data.ShizukuRepository
 import com.HanFeng.security.CertificateAuthorityManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
@@ -37,6 +42,7 @@ class SettingsActivity : BaseActivity() {
 
     private lateinit var switchShizuku: Switch
     private lateinit var switchHideBackground: Switch
+    private lateinit var switchMitmFullCaptureExperiment: Switch
     private lateinit var textShizukuStatus: TextView
     private lateinit var btnShizukuAdControl: Button
     private lateinit var btnCoexistSettings: Button
@@ -44,9 +50,13 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnJoinGroupSettings: Button
     private lateinit var btnResetHideBackground: Button
     private lateinit var btnExportLogs: Button
+    private lateinit var btnExportRules: Button
     private lateinit var btnExportCertificate: Button
     private lateinit var btnBack: Button
     private lateinit var settingsRoot: View
+    private var cachedShizukuServiceHealthy = false
+    private var lastShizukuServiceHealthCheckAt = 0L
+    private var shizukuStatusRefreshJob: Job? = null
     
     private lateinit var btnHostsEditor: Button
     private lateinit var btnNetworkPermission: Button
@@ -62,6 +72,22 @@ class SettingsActivity : BaseActivity() {
         updateShizukuActionState()
     }
 
+    private val certificateExportPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            exportCertificateToUser()
+        } else {
+            showShortToast("需要存储权限以导出证书")
+        }
+    }
+
+    private val ruleExportPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            exportRulesToUser()
+        } else {
+            showShortToast("需要存储权限以导出规则")
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
@@ -71,6 +97,7 @@ class SettingsActivity : BaseActivity() {
         settingsRoot = findViewById(R.id.settingsRoot)
         switchShizuku = findViewById(R.id.switchUseShizuku)
         switchHideBackground = findViewById(R.id.switchHideBackground)
+        switchMitmFullCaptureExperiment = findViewById(R.id.switchMitmFullCaptureExperiment)
         textShizukuStatus = findViewById(R.id.textShizukuStatus)
         btnShizukuAdControl = findViewById(R.id.btnShizukuAdControl)
         btnCoexistSettings = findViewById(R.id.btnCoexistSettings)
@@ -78,6 +105,7 @@ class SettingsActivity : BaseActivity() {
         btnJoinGroupSettings = findViewById(R.id.btnJoinGroupSettings)
         btnResetHideBackground = findViewById(R.id.btnResetHideBackground)
         btnExportLogs = findViewById(R.id.btnExportLogs)
+        btnExportRules = findViewById(R.id.btnExportRules)
         btnExportCertificate = findViewById(R.id.btnExportCertificate)
         btnBack = findViewById(R.id.btnBack)
         
@@ -96,6 +124,7 @@ class SettingsActivity : BaseActivity() {
 
         switchShizuku.isChecked = AppSettingsRepository.isShizukuEnabled(this)
         switchHideBackground.isChecked = AppSettingsRepository.isHideBackgroundEnabled(this)
+        switchMitmFullCaptureExperiment.isChecked = AppSettingsRepository.isMitmFullCaptureExperimentEnabled(this)
         updateShizukuActionState()
 
         switchShizuku.setOnCheckedChangeListener { _, isChecked ->
@@ -110,6 +139,9 @@ class SettingsActivity : BaseActivity() {
             AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
             applyHideBackgroundPolicy(isChecked)
             btnResetHideBackground.visibility = View.VISIBLE
+        }
+        switchMitmFullCaptureExperiment.setOnCheckedChangeListener { _, isChecked ->
+            handleMitmFullCaptureExperimentChanged(isChecked)
         }
         btnResetHideBackground.setOnClickListener {
             AppSettingsRepository.resetHideBackground(this)
@@ -143,6 +175,9 @@ class SettingsActivity : BaseActivity() {
         }
         btnExportLogs.setOnClickListener {
             exportLogsToUser()
+        }
+        btnExportRules.setOnClickListener {
+            exportRulesToUser()
         }
         btnExportCertificate.setOnClickListener {
             exportCertificateToUser()
@@ -199,11 +234,13 @@ class SettingsActivity : BaseActivity() {
         super.onResume()
         syncShizukuSwitch()
         syncHideBackgroundSwitch()
-        prewarmShizukuIfPossible()
         updateShizukuActionState()
+        refreshShizukuActionStateAsync(force = false)
+        prewarmShizukuIfPossible()
     }
 
     override fun onDestroy() {
+        shizukuStatusRefreshJob?.cancel()
         Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
         super.onDestroy()
     }
@@ -222,9 +259,38 @@ class SettingsActivity : BaseActivity() {
         }
     }
 
+    private fun handleMitmFullCaptureExperimentChanged(enabled: Boolean) {
+        if (!enabled) {
+            AppSettingsRepository.setMitmFullCaptureExperimentEnabled(this, false)
+            NetworkKernel.reloadIfRunning(this)
+            showShortToast("已关闭强力 MITM 试验模式")
+            return
+        }
+        switchMitmFullCaptureExperiment.setOnCheckedChangeListener(null)
+        switchMitmFullCaptureExperiment.isChecked = false
+        switchMitmFullCaptureExperiment.setOnCheckedChangeListener { _, isChecked ->
+            handleMitmFullCaptureExperimentChanged(isChecked)
+        }
+        StableDialog.builder(this)
+            .setTitle("开启强力 MITM 试验模式")
+            .setMessage("该模式会启用全量承接以提高深度拦截覆盖率，可能导致部分 App 断网、连接重置或网速下降。出现异常时请回到这里关闭。")
+            .setPositiveButton("开启") { _, _ ->
+                AppSettingsRepository.setMitmFullCaptureExperimentEnabled(this, true)
+                switchMitmFullCaptureExperiment.setOnCheckedChangeListener(null)
+                switchMitmFullCaptureExperiment.isChecked = true
+                switchMitmFullCaptureExperiment.setOnCheckedChangeListener { _, isChecked ->
+                    handleMitmFullCaptureExperimentChanged(isChecked)
+                }
+                NetworkKernel.reloadIfRunning(this)
+                showShortToast("已开启强力 MITM 试验模式")
+            }
+            .setNegativeButton("取消", null)
+            .showSafely(this, "Show MITM full-capture experiment dialog failed")
+    }
+
     private fun handleShizukuEnableRequested(fromUser: Boolean) {
         val status = ShizukuRepository.getStatus(this)
-        val serviceHealthy = status.installed && status.binderAlive && ShizukuAdControlRepository.isServiceAlive()
+        val serviceHealthy = status.installed && status.binderAlive && cachedShizukuServiceHealthy
         when {
             !status.installed -> {
                 StableDialog.builder(this)
@@ -247,6 +313,7 @@ class SettingsActivity : BaseActivity() {
                 }
             }
             status.permissionGranted -> {
+                refreshShizukuActionStateAsync(force = true)
                 prewarmShizukuIfPossible()
                 if (fromUser) {
                     showShortToast("Shizuku 已连接")
@@ -281,7 +348,7 @@ class SettingsActivity : BaseActivity() {
         val shizukuEnabled = AppSettingsRepository.isShizukuEnabled(this)
         val status = if (shizukuEnabled) ShizukuRepository.getStatus(this) else null
         val baseReady = status?.let { it.installed && it.binderAlive } == true
-        val serviceHealthy = shizukuEnabled && baseReady && ShizukuAdControlRepository.isServiceAlive()
+        val serviceHealthy = shizukuEnabled && baseReady && cachedShizukuServiceHealthy
         val shizukuReady = status?.let { it.installed && it.binderAlive && (it.permissionGranted || serviceHealthy) } == true
         btnShizukuAdControl.isEnabled = true
         btnCoexistSettings.isEnabled = true
@@ -289,6 +356,28 @@ class SettingsActivity : BaseActivity() {
         btnJoinGroupSettings.isEnabled = true
         btnShizukuAdControl.alpha = if (shizukuReady) 1f else 0.72f
         textShizukuStatus.text = buildShizukuStatusText(shizukuEnabled, shizukuReady, serviceHealthy, status)
+    }
+
+    private fun refreshShizukuActionStateAsync(force: Boolean) {
+        val shizukuEnabled = AppSettingsRepository.isShizukuEnabled(this)
+        if (!shizukuEnabled) {
+            cachedShizukuServiceHealthy = false
+            lastShizukuServiceHealthCheckAt = 0L
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (!force && now - lastShizukuServiceHealthCheckAt < SHIZUKU_STATUS_REFRESH_INTERVAL_MILLIS) return
+        if (shizukuStatusRefreshJob?.isActive == true) return
+        lastShizukuServiceHealthCheckAt = now
+        shizukuStatusRefreshJob = lifecycleScope.launch {
+            val serviceHealthy = withContext(Dispatchers.IO) {
+                runCatching { ShizukuAdControlRepository.isServiceAlive() }.getOrDefault(false)
+            }
+            cachedShizukuServiceHealthy = serviceHealthy
+            if (!isFinishing && !isDestroyed) {
+                updateShizukuActionState()
+            }
+        }
     }
 
     private fun warmShizukuServices(): Boolean {
@@ -313,21 +402,78 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun exportLogsToUser() {
-        val uri = LogRepository.exportZip(this)
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/zip"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        lifecycleScope.launch {
+            val uri = withContext(Dispatchers.IO) {
+                runCatching { LogRepository.exportZip(applicationContext) }
+            }.getOrElse {
+                LogRepository.append(this@SettingsActivity, "Export logs failed: ${it.message ?: it.javaClass.simpleName}")
+                showShortToast("导出日志失败")
+                return@launch
+            }
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/zip"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching {
+                startActivity(Intent.createChooser(intent, "导出日志"))
+            }.onFailure {
+                LogRepository.append(this@SettingsActivity, "Export logs chooser failed: ${it.message}")
+                showShortToast("打开日志导出失败")
+            }
         }
-        runCatching {
-            startActivity(Intent.createChooser(intent, "导出日志"))
-        }.onFailure {
-            LogRepository.append(this, "Export logs chooser failed: ${it.message}")
-            showShortToast("打开日志导出失败")
+    }
+
+    private fun exportRulesToUser() {
+        if (needsLegacyStoragePermission()) {
+            ruleExportPermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            return
+        }
+        lifecycleScope.launch {
+            btnExportRules.isEnabled = false
+            try {
+                val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.CHINA)
+                    .format(java.util.Date())
+                val fileName = "hanfeng_rules_$timestamp.txt"
+                val exported = withContext(Dispatchers.IO) {
+                    RuleRepositoryExport.buildRulesText(
+                        context = applicationContext,
+                        includeWhitelist = true,
+                        includeSmartScored = true
+                    )
+                }
+                if (exported.count <= 0) {
+                    showShortToast("当前没有规则可导出")
+                    return@launch
+                }
+                val exportPath = withContext(Dispatchers.IO) {
+                    CertificateAuthorityManager.exportTextFileToDownloads(
+                        context = applicationContext,
+                        fileName = fileName,
+                        content = exported.content
+                    )
+                }
+                if (exportPath != null) {
+                    showLongToast("导出成功：${exported.count} 条规则\n文件位置：$exportPath")
+                    LogRepository.append(this@SettingsActivity, "规则导出成功：文件=$exportPath, 规则数=${exported.count}")
+                } else {
+                    showShortToast("导出规则失败")
+                    LogRepository.append(this@SettingsActivity, "Export rules failed: path is null")
+                }
+            } catch (e: Exception) {
+                LogRepository.append(this@SettingsActivity, "Export rules failed: ${e.message ?: e.javaClass.simpleName}")
+                showShortToast("导出规则失败：${e.message ?: e.javaClass.simpleName}")
+            } finally {
+                btnExportRules.isEnabled = true
+            }
         }
     }
 
     private fun exportCertificateToUser() {
+        if (needsLegacyStoragePermission()) {
+            certificateExportPermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            return
+        }
         lifecycleScope.launch {
             try {
                 val result = withContext(Dispatchers.Default) {
@@ -339,11 +485,14 @@ class SettingsActivity : BaseActivity() {
                         showShortToast("证书文件不存在")
                         return@onSuccess
                     }
-                    val exportPath = CertificateAuthorityManager.exportCertificateToDownloads(
-                        this@SettingsActivity,
-                        publicCertFile
-                    )
+                    val exportPath = withContext(Dispatchers.IO) {
+                        CertificateAuthorityManager.exportCertificateToDownloads(
+                            applicationContext,
+                            publicCertFile
+                        )
+                    }
                     if (exportPath != null) {
+                        HttpsMitmRepository.saveCertificateExportPath(this@SettingsActivity, exportPath)
                         showShortToast("证书已导出到：$exportPath")
                         LogRepository.append(
                             this@SettingsActivity,
@@ -364,16 +513,25 @@ class SettingsActivity : BaseActivity() {
         }
     }
 
+    private fun needsLegacyStoragePermission(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+    }
+
     private fun prewarmShizukuIfPossible() {
         val shizukuEnabled = AppSettingsRepository.isShizukuEnabled(this)
         if (!shizukuEnabled) return
         val status = ShizukuRepository.getStatus(this)
         if (!status.installed || !status.binderAlive) return
-        if (!status.permissionGranted && !ShizukuAdControlRepository.isServiceAlive()) return
+        if (!status.permissionGranted && !cachedShizukuServiceHealthy) {
+            refreshShizukuActionStateAsync(force = false)
+            return
+        }
         lifecycleScope.launch {
             val warmed = withContext(Dispatchers.IO) {
                 warmShizukuServices()
             }
+            cachedShizukuServiceHealthy = warmed || cachedShizukuServiceHealthy
             if (!isFinishing && !isDestroyed && warmed) {
                 updateShizukuActionState()
             }
@@ -446,7 +604,7 @@ class SettingsActivity : BaseActivity() {
         AlertDialog.Builder(this)
             .setTitle("批量治理")
             .setMessage("当前列表内识别到 ${targets.size} 个可批量处理的治理目标。")
-            .setItems(arrayOf("智能治理当前列表", "关闭推送广告", "恢复推送广告", "整包停用", "恢复已停用项目", "整包暂停", "恢复暂停")) { _, which ->
+            .setItems(arrayOf("智能治理当前列表", "关闭推送广告", "恢复推送广告", "整包冻结", "解冻已冻结项目", "整包暂停", "恢复暂停")) { _, which ->
                 when (which) {
                     0 -> runBatchShizukuAdControl(targets, mode = BatchAdControlMode.SMART_GOVERN)
                     1 -> runBatchShizukuAdControl(targets, mode = BatchAdControlMode.BLOCK_NOTIFICATIONS)
@@ -562,8 +720,8 @@ class SettingsActivity : BaseActivity() {
             BatchAdControlMode.SMART_GOVERN -> if (hasHighRiskNotificationApps) "智能治理（高风险通知已强制关闭）" else "智能治理"
             BatchAdControlMode.BLOCK_NOTIFICATIONS -> "关闭推送广告"
             BatchAdControlMode.ALLOW_NOTIFICATIONS -> "恢复推送广告"
-            BatchAdControlMode.DISABLE -> "整包停用"
-            BatchAdControlMode.ENABLE -> "恢复"
+            BatchAdControlMode.DISABLE -> "整包冻结"
+            BatchAdControlMode.ENABLE -> "解冻"
             BatchAdControlMode.SUSPEND -> "整包暂停"
             BatchAdControlMode.UNSUSPEND -> "恢复暂停"
         }
@@ -687,7 +845,7 @@ class SettingsActivity : BaseActivity() {
             val systemBadge = if (target.systemApp) "系统" else "第三方"
             val stateBadge = when {
                 target.packageStatus.suspended -> "已暂停"
-                isDisabledState(target.packageStatus.enabledState) -> "已停用"
+                isDisabledState(target.packageStatus.enabledState) -> "已冻结"
                 else -> "可治理"
             }
             "[$badge/$systemBadge/$stateBadge] ${target.title} (${target.category} / ${target.sourceLabel})"
@@ -752,7 +910,7 @@ class SettingsActivity : BaseActivity() {
                 append("\n\n批量保护：")
                 append("该项目属于")
                 append(reason)
-                append("，批量停用和智能治理会默认跳过，建议仅在确认风险后手动处理。")
+                append("，批量冻结和智能治理会默认跳过，建议仅在确认风险后手动处理。")
             }
             append("\n\n来源：")
             append(target.sourceLabel)
@@ -776,17 +934,15 @@ class SettingsActivity : BaseActivity() {
             actions += "智能治理" to {
                 executeGovernAction {
                     val lightGoverned = ShizukuAdControlRepository.blockPackageNotifications(this@SettingsActivity, target.packageName)
-                    val disableRequested = if (!lightGoverned && canDisable) {
+                    if (!lightGoverned && canDisable) {
                         ShizukuAdControlRepository.disablePackage(this@SettingsActivity, target.packageName)
-                    } else {
-                        false
                     }
                     val disabledStatus = ShizukuAdControlRepository.queryPackageStatus(this@SettingsActivity, target.packageName)
                     val disableSuccess = isDisabledState(disabledStatus.enabledState)
                     if (lightGoverned) {
                         "治理成功，当前已关闭推送广告能力"
                     } else if (disableSuccess) {
-                        "治理成功，当前已停用"
+                        "治理成功，当前已冻结"
                     } else {
                         val suspendRequested = if (!disabledStatus.suspended && canSuspend) {
                             ShizukuAdControlRepository.suspendPackage(this@SettingsActivity, target.packageName)
@@ -795,7 +951,7 @@ class SettingsActivity : BaseActivity() {
                         }
                         val suspendStatus = ShizukuAdControlRepository.queryPackageStatus(this@SettingsActivity, target.packageName)
                         val suspendSuccess = suspendRequested && suspendStatus.suspended
-                        if (suspendSuccess) "停用未生效，已自动回退为暂停" else "治理失败，请确认系统支持停用或暂停"
+                        if (suspendSuccess) "冻结未生效，已自动回退为暂停" else "治理失败，请确认系统支持冻结或暂停"
                     }
                 }
             }
@@ -815,17 +971,17 @@ class SettingsActivity : BaseActivity() {
             }
         }
         if (canDisable) {
-            actions += "停用" to {
+            actions += "冻结" to {
                 executeGovernAction {
                     val requested = ShizukuAdControlRepository.disablePackage(this@SettingsActivity, target.packageName)
                     val refreshed = ShizukuAdControlRepository.queryPackageStatus(this@SettingsActivity, target.packageName)
                     val success = requested && isDisabledState(refreshed.enabledState)
-                    if (success) "停用成功" else "停用失败，请确认该项目支持停用"
+                    if (success) "冻结成功" else "冻结失败，请确认该项目支持冻结"
                 }
             }
         }
         if (canEnable) {
-            actions += "恢复" to {
+            actions += "解冻" to {
                 executeGovernAction {
                     val requested = ShizukuAdControlRepository.enablePackage(this@SettingsActivity, target.packageName)
                     val refreshed = ShizukuAdControlRepository.queryPackageStatus(this@SettingsActivity, target.packageName)
@@ -833,7 +989,7 @@ class SettingsActivity : BaseActivity() {
                         refreshed.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
                             refreshed.enabledState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
                         )
-                    if (success) "恢复成功" else "恢复失败，请确认该项目仍然存在"
+                    if (success) "解冻成功" else "解冻失败，请确认该项目仍然存在"
                 }
             }
         }
@@ -854,7 +1010,10 @@ class SettingsActivity : BaseActivity() {
         }
         if (status.installed) {
             actions += "组件治理" to {
-                showComponentGovernDialog(target)
+                launchActivitySafely(
+                    PromoComponentGovernActivity.createIntent(this, target.packageName, target.title),
+                    "打开组件治理页面失败"
+                )
             }
         }
         if (actions.isEmpty()) {
@@ -862,62 +1021,156 @@ class SettingsActivity : BaseActivity() {
             return
         }
         StableDialog.builder(this)
-            .setTitle(target.title)
-            .setMessage(message)
+            .setTitle("选择治理方式：${target.title}")
             .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
                 actions.getOrNull(which)?.second?.invoke()
+            }
+            .setNeutralButton("详情") { _, _ ->
+                showGovernTargetDetails(target.title, message)
             }
             .setNegativeButton("关闭", null)
             .showSafely(this, "Show govern target actions dialog failed")
     }
 
+    private fun showGovernTargetDetails(title: String, message: String) {
+        StableDialog.builder(this)
+            .setTitle("治理详情：$title")
+            .setMessage(message)
+            .setPositiveButton("确定", null)
+            .showSafely(this, "Show govern target details dialog failed")
+    }
+
     private fun showComponentGovernDialog(target: PromoGovernTarget) {
         lifecycleScope.launch {
-            val candidates = withContext(Dispatchers.Default) {
-                discoverPromoComponentCandidates(target.packageName)
+            val (candidates, activities) = withContext(Dispatchers.Default) {
+                discoverPromoComponentCandidates(target.packageName) to discoverAllActivityComponentCandidates(target.packageName)
             }
             if (isFinishing || isDestroyed) return@launch
-            if (candidates.isNotEmpty()) {
-                StableDialog.builder(this@SettingsActivity)
-                    .setTitle("组件治理")
-                    .setMessage("已识别 ${candidates.size} 个高相关组件，可直接选择治理，也可以进入手动输入。")
-                    .setItems(candidates.map { candidate ->
-                        val state = if (candidate.enabled) "启用中" else "已停用"
-                        "[${candidate.typeLabel}/$state] ${candidate.shortName}"
-                    }.toTypedArray()) { _, which ->
-                        showComponentActionDialog(target, candidates[which].componentName)
+            if (candidates.isNotEmpty() || activities.isNotEmpty()) {
+                val selectableComponents = (candidates + activities)
+                    .distinctBy { it.componentName }
+                    .sortedWith(compareByDescending<PromoComponentCandidate> { it.score }.thenBy { it.typeLabel }.thenBy { it.shortName })
+                val checked = BooleanArray(selectableComponents.size) { index ->
+                    selectableComponents[index].enabled && selectableComponents[index].score > 0
+                }
+                val labels = selectableComponents.map { candidate ->
+                    buildComponentChoiceLabel(candidate)
+                }.toTypedArray()
+                val dialog = StableDialog.builder(this@SettingsActivity)
+                    .setTitle("勾选要冻结的组件（${selectableComponents.size} 个）")
+                    .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
+                        checked[which] = isChecked
                     }
-                    .setNeutralButton("手动输入") { _, _ ->
-                        showManualComponentGovernDialog(target, candidates.firstOrNull()?.componentName.orEmpty())
+                    .setPositiveButton("冻结选中", null)
+                    .setNeutralButton("全部 Activity", null)
+                    .setNegativeButton("更多", null)
+                    .create()
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val selected = selectableComponents.filterIndexed { index, _ -> checked[index] }
+                        if (selected.isEmpty()) {
+                            showShortToast("请先选择组件")
+                            return@setOnClickListener
+                        }
+                        dialog.dismiss()
+                        executeComponentBatchAction(selected, disable = true)
                     }
-                    .setNegativeButton("取消", null)
-                    .showSafely(this@SettingsActivity, "Show component candidates dialog failed")
+                    dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                        if (activities.isEmpty()) {
+                            showShortToast("未识别到 Activity")
+                            return@setOnClickListener
+                        }
+                        showAllActivityGovernDialog(activities)
+                    }
+                    dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+                        val selected = selectableComponents.filterIndexed { index, _ -> checked[index] }
+                        showComponentMoreDialog(target, selected, selectableComponents.firstOrNull()?.componentName.orEmpty())
+                    }
+                }
+                dialog.showSafely(this@SettingsActivity, "Show component candidates dialog failed")
                 return@launch
             }
             showManualComponentGovernDialog(target, "${target.packageName}/")
         }
     }
 
-    private fun showComponentActionDialog(target: PromoGovernTarget, componentName: String) {
+    private fun showComponentMoreDialog(
+        target: PromoGovernTarget,
+        selected: List<PromoComponentCandidate>,
+        initialValue: String
+    ) {
+        val actions = arrayOf("解冻选中组件", "高级手动输入")
         StableDialog.builder(this)
-            .setTitle("组件治理")
-            .setMessage(componentName)
-            .setPositiveButton("停用组件") { _, _ ->
-                executeGovernAction {
-                    val success = ShizukuAdControlRepository.disableComponent(this@SettingsActivity, componentName)
-                    if (success) "组件停用成功" else "组件停用失败，请确认组件名完整且系统支持该操作"
+            .setTitle("更多组件操作")
+            .setItems(actions) { _, which ->
+                when (which) {
+                    0 -> {
+                        if (selected.isEmpty()) {
+                            showShortToast("请先选择组件")
+                        } else {
+                            executeComponentBatchAction(selected, disable = false)
+                        }
+                    }
+                    1 -> showManualComponentGovernDialog(target, initialValue)
                 }
             }
-            .setNeutralButton("恢复组件") { _, _ ->
-                executeGovernAction {
-                    val success = ShizukuAdControlRepository.enableComponent(this@SettingsActivity, componentName)
-                    if (success) "组件恢复成功" else "组件恢复失败，请确认组件名完整且系统支持该操作"
-                }
+            .setNegativeButton("取消", null)
+            .showSafely(this, "Show component more actions dialog failed")
+    }
+
+    private fun buildComponentChoiceLabel(candidate: PromoComponentCandidate): String {
+        val state = if (candidate.enabled) "启用中" else "已冻结"
+        val lowerName = candidate.componentName.lowercase()
+        val groupLabel = when {
+            candidate.typeLabel == "Activity" && listOf("splash", "startup", "launchad", "interstitial").any(lowerName::contains) -> "启动广告 Activity"
+            candidate.typeLabel == "Activity" && listOf("feed", "recommend", "discover", "hot", "operation", "market").any(lowerName::contains) -> "推荐流/活动页 Activity"
+            candidate.typeLabel == "Activity" && listOf("launcher", "mainactivity", "homeactivity", "main").any(lowerName::contains) -> "主入口 Activity"
+            candidate.typeLabel == "Activity" && listOf("login", "account", "passport", "auth", "oauth").any(lowerName::contains) -> "账号登录 Activity"
+            candidate.typeLabel == "Activity" && listOf("setting", "permission", "privacy", "security").any(lowerName::contains) -> "设置/权限 Activity"
+            candidate.typeLabel == "Activity" && listOf("webview", "browser", "hybrid", "h5").any(lowerName::contains) -> "网页容器 Activity"
+            candidate.typeLabel == "Activity" && listOf("pay", "payment", "wallet", "cashier").any(lowerName::contains) -> "支付/钱包 Activity"
+            candidate.typeLabel == "Activity" && listOf("share", "invite", "deeplink", "scheme").any(lowerName::contains) -> "分享/跳转 Activity"
+            candidate.typeLabel == "Receiver" && listOf("push", "alarm", "message", "notice").any(lowerName::contains) -> "推送 Receiver"
+            candidate.typeLabel == "Service" && listOf("push", "job", "message", "notice").any(lowerName::contains) -> "推送 Service"
+            candidate.typeLabel == "Service" && listOf("ad", "advert", "union", "reward").any(lowerName::contains) -> "广告 Service"
+            else -> "普通 ${candidate.typeLabel}"
+        }
+        val riskLabel = when (groupLabel) {
+            "主入口 Activity", "账号登录 Activity", "支付/钱包 Activity" -> "高风险"
+            "设置/权限 Activity", "网页容器 Activity", "推送 Receiver", "推送 Service", "广告 Service" -> "中风险"
+            else -> if (candidate.score > 0) "需确认" else "普通"
+        }
+        val recommendation = when (groupLabel) {
+            "启动广告 Activity" -> "通常影响启动页广告，可优先尝试冻结。"
+            "推荐流/活动页 Activity" -> "可能影响活动页或推荐入口，按需冻结。"
+            "主入口 Activity" -> "冻结后图标或主页面可能不可用，适合冻结式处理。"
+            "账号登录 Activity" -> "通常影响登录授权，建议保留。"
+            "设置/权限 Activity" -> "可能影响应用设置或权限引导，谨慎处理。"
+            "网页容器 Activity" -> "可能承载广告页，也可能承载正文/业务网页，先确认来源。"
+            "支付/钱包 Activity" -> "可能影响支付和钱包功能，建议保留。"
+            "分享/跳转 Activity" -> "可能影响外链、分享和深链跳转，按需处理。"
+            "推送 Receiver" -> "适合治理推送广告，失败时可解冻。"
+            "推送 Service" -> "适合治理后台推送广告，建议保留解冻路径。"
+            "广告 Service" -> "适合治理广告加载服务，确认后冻结。"
+            else -> "未命中明显广告特征，建议确认用途后处理。"
+        }
+        return "[$groupLabel / $riskLabel / $state] ${candidate.shortName}\n${candidate.componentName}\n建议：$recommendation"
+    }
+
+    private fun showAllActivityGovernDialog(activities: List<PromoComponentCandidate>) {
+        StableDialog.builder(this)
+            .setTitle("全部 Activity 治理")
+            .setMessage(
+                "将处理 ${activities.size} 个 Activity。冻结全部 Activity 后，桌面图标可能消失，应用页面通常无法打开，效果接近冰箱冻结。解冻全部 Activity 可撤销该组件级处理。"
+            )
+            .setPositiveButton("冻结全部 Activity") { _, _ ->
+                executeComponentBatchAction(activities, disable = true)
             }
-            .setNegativeButton("手动输入") { _, _ ->
-                showManualComponentGovernDialog(target, componentName)
+            .setNeutralButton("解冻全部 Activity") { _, _ ->
+                executeComponentBatchAction(activities, disable = false)
             }
-            .showSafely(this, "Show component actions dialog failed")
+            .setNegativeButton("取消", null)
+            .showSafely(this, "Show all activity govern dialog failed")
     }
 
     private fun showManualComponentGovernDialog(target: PromoGovernTarget, initialValue: String) {
@@ -930,8 +1183,8 @@ class SettingsActivity : BaseActivity() {
             .setTitle("组件治理")
             .setMessage("适合处理启动页 Activity、推荐页 Activity、广告 Service、推送 Receiver 等单个组件。请输入完整组件名后选择动作。")
             .setView(input)
-            .setPositiveButton("停用组件", null)
-            .setNeutralButton("恢复组件", null)
+            .setPositiveButton("冻结组件", null)
+            .setNeutralButton("解冻组件", null)
             .setNegativeButton("取消", null)
             .create()
         dialog.setOnShowListener {
@@ -962,12 +1215,46 @@ class SettingsActivity : BaseActivity() {
                 ShizukuAdControlRepository.enableComponent(this@SettingsActivity, componentName)
             }
             if (success) {
-                if (disable) "组件停用成功" else "组件恢复成功"
+                if (disable) "组件冻结成功" else "组件解冻成功"
             } else {
-                if (disable) "组件停用失败，请确认组件名完整且系统支持该操作" else "组件恢复失败，请确认组件名完整且系统支持该操作"
+                if (disable) "组件冻结失败，请确认组件名完整且系统支持该操作" else "组件解冻失败，请确认组件名完整且系统支持该操作"
             }
         }
         return true
+    }
+
+    private fun executeComponentBatchAction(
+        candidates: List<PromoComponentCandidate>,
+        disable: Boolean
+    ) {
+        executeGovernAction {
+            var successCount = 0
+            val failed = mutableListOf<String>()
+            candidates.forEach { candidate ->
+                val success = if (disable) {
+                    ShizukuAdControlRepository.disableComponent(this@SettingsActivity, candidate.componentName)
+                } else {
+                    ShizukuAdControlRepository.enableComponent(this@SettingsActivity, candidate.componentName)
+                }
+                if (success) {
+                    successCount += 1
+                } else {
+                    failed += candidate.shortName
+                }
+            }
+            val actionText = if (disable) "冻结" else "解冻"
+            buildString {
+                append("组件${actionText}完成：成功 ")
+                append(successCount)
+                append(" 个，失败 ")
+                append(failed.size)
+                append(" 个")
+                if (failed.isNotEmpty()) {
+                    append("\n失败组件：")
+                    append(failed.joinToString("、"))
+                }
+            }
+        }
     }
 
     private fun executeGovernAction(action: () -> String) {
@@ -1024,6 +1311,43 @@ class SettingsActivity : BaseActivity() {
             .take(12)
     }
 
+    private fun discoverAllActivityComponentCandidates(packageName: String): List<PromoComponentCandidate> {
+        val packageInfo = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.PackageInfoFlags.of(
+                        (PackageManager.GET_ACTIVITIES or packageQueryFlags()).toLong()
+                    )
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.GET_ACTIVITIES or packageQueryFlags()
+                )
+            }
+        }.getOrNull() ?: return emptyList()
+
+        return packageInfo.activities.orEmpty()
+            .filter { it.name.startsWith(packageName) }
+            .map { component ->
+                val className = component.name
+                val flattenedComponentName = packageName + "/" + className.removePrefix(packageName)
+                val enabled = packageManager.getComponentEnabledSetting(android.content.ComponentName(packageName, className))
+                    .let { state -> state == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT || state == PackageManager.COMPONENT_ENABLED_STATE_ENABLED }
+                PromoComponentCandidate(
+                    componentName = flattenedComponentName,
+                    shortName = className.removePrefix(packageName).ifBlank { className },
+                    typeLabel = "Activity",
+                    enabled = enabled,
+                    score = promoComponentScore(className.lowercase(), "Activity")
+                )
+            }
+            .distinctBy { it.componentName }
+            .sortedBy { it.shortName }
+    }
+
     private fun buildPromoComponentCandidate(packageName: String, className: String, typeLabel: String): PromoComponentCandidate? {
         val lowerName = className.lowercase()
         val score = promoComponentScore(lowerName, typeLabel)
@@ -1058,8 +1382,8 @@ class SettingsActivity : BaseActivity() {
         return score
     }
 
-    private fun discoverPromoGovernTargets(installedOnly: Boolean, scope: PromoGovernScope): List<PromoGovernTarget> {
-        val autoTargets = packageManager.getInstalledApplications(0)
+    private fun discoverPromoGovernTargets(scope: PromoGovernScope): List<PromoGovernTarget> {
+        val autoTargets = packageManager.getInstalledApplications(packageQueryFlags())
             .asSequence()
             .filter { it.packageName != packageName }
             .filter { appInfo ->
@@ -1082,9 +1406,14 @@ class SettingsActivity : BaseActivity() {
             .sortedWith(compareBy<PromoGovernTarget> { it.category }.thenBy { it.title })
     }
 
+    private fun packageQueryFlags(): Int {
+        return PackageManager.MATCH_DISABLED_COMPONENTS or
+            PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
+    }
+
     private fun buildThirdPartyPromoTarget(appInfo: ApplicationInfo): PromoGovernTarget? {
         val packageName = appInfo.packageName
-        val label = packageManager.getApplicationLabel(appInfo)?.toString().orEmpty().ifBlank { packageName }
+        val label = packageManager.getApplicationLabel(appInfo).toString().ifBlank { packageName }
         val lowerLabel = label.lowercase()
         val lowerPackage = packageName.lowercase()
         val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
@@ -1211,6 +1540,10 @@ class SettingsActivity : BaseActivity() {
             )
             .setPositiveButton("确定", null)
             .showSafely(this, "Show govern result dialog failed")
+    }
+
+    companion object {
+        private const val SHIZUKU_STATUS_REFRESH_INTERVAL_MILLIS = 3_000L
     }
     
 }

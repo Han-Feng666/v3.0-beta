@@ -60,6 +60,10 @@
             android:exported="false" />
 
         <activity
+            android:name="com.HanFeng.ui.PromoComponentGovernActivity"
+            android:exported="false" />
+
+        <activity
             android:name="com.HanFeng.ui.GuideActivity"
             android:exported="false" />
 

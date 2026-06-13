@@ -23,8 +23,6 @@
 ```
 ! Title: 寒枫广告 blocking 规则导出
 ! Description: 从寒枫 App 导出的自定义广告拦截规则
-! Homepage: https://github.com/Han-Feng666/v3.0-beta
-! License: MIT
 ! Version: 2026-06-12 15:30:45
 !
 ! 导出时间：2026-06-12 15:30:45
@@ -69,14 +67,15 @@ banner.example.org
 import com.HanFeng.data.RuleRepositoryExport
 import java.io.File
 
-// 导出 AdGuard 风格规则
+// 生成 AdGuard 风格规则文本
 val outputFile = File("/sdcard/Download/hanfeng-rules.txt")
-val count = RuleRepositoryExport.exportRulesToTxt(
+val exported = RuleRepositoryExport.buildRulesText(
     context = this,
-    outputFile = outputFile,
     includeWhitelist = false,      // 不包含@@白名单规则
     includeSmartScored = false     // 不包含智能评分规则
 )
+outputFile.writeText(exported.content)
+val count = exported.count
 println("导出成功：$count 条规则")
 
 // 导出纯域名列表
@@ -93,7 +92,7 @@ println("导出成功：$domainCount 个域名")
 | 参数名称 | 类型 | 默认值 | 说明 |
 |---------|------|--------|------|
 | context | Context | - | Android 上下文 |
-| outputFile | File | - | 输出文件路径 |
+| outputFile | File | - | 纯域名列表导出时的输出文件 |
 | includeWhitelist | Boolean | false | 是否包含@@白名单规则 |
 | includeSmartScored | Boolean | false | 是否包含智能评分规则 |
 
@@ -193,22 +192,27 @@ sed 's/^/0.0.0.0 /' hanfeng-domains.txt >> /etc/hosts
 
 ## 注意事项
 
-1. **规则兼容性**：
+1. **导出位置**：
+   - App 内“导出规则到文件”会写入系统下载目录
+   - Android 10 及以上使用 MediaStore 写入下载目录
+   - Android 9 及以下需要授予存储权限后写入下载目录
+
+2. **规则兼容性**：
    - `app=` 限定符只有寒枫等少数工具支持
    - `path=`、`keyword=` 是寒枫特有功能
    - 标准 DNS 拦截（`||domain.com`）在所有工具中都支持
 
-2. **更新频率**：
+3. **更新频率**：
    - 建议每周导出一次
    - 规则变化频繁时可以每天导出
    - 导出后记得在其他工具中刷新规则
 
-3. **性能影响**：
+4. **性能影响**：
    - 规则过多可能影响 DNS 解析速度
    - AdGuard Home 建议不超过 10 万条规则
    - Pi-hole 建议不超过 5 万条规则
 
-4. **误杀处理**：
+5. **误杀处理**：
    - 如导致某些 App 功能异常，请将相关域名加入白名单
    - 可使用 `@@domain.com` 格式豁免特定域名
    - 导出时设置 `includeWhitelist=true` 可包含已有白名单
@@ -251,4 +255,3 @@ A: 可以：
 ## 许可证
 
 MIT License
-

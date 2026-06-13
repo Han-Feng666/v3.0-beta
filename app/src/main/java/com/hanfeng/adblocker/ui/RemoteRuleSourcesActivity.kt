@@ -217,7 +217,10 @@ class RemoteRuleSourcesActivity : BaseActivity() {
                 val total = progress.totalBytes?.let { " / ${formatBytes(it)}" }.orEmpty()
                 "$prefix\n正在下载：${formatBytes(progress.bytesRead)}$total"
             }
-            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.IMPORTING -> "$prefix\n下载完成，正在导入规则..."
+            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.IMPORTING -> {
+                val detail = progress.detail?.takeIf { it.isNotBlank() } ?: "正在导入规则..."
+                "$prefix\n下载完成，$detail"
+            }
             RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.COMPLETED -> "$prefix\n导入完成：${progress.addedCount ?: 0} 条规则"
         }
     }

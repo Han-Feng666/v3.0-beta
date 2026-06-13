@@ -4,66 +4,53 @@
     android:layout_height="wrap_content"
     android:layout_marginBottom="8dp"
     android:background="@drawable/bg_panel"
-    android:descendantFocusability="afterDescendants"
     android:gravity="center_vertical"
     android:orientation="horizontal"
     android:padding="12dp">
 
+    <CheckBox
+        android:id="@+id/checkBox"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
         android:layout_weight="1"
         android:orientation="vertical">
 
         <TextView
             android:id="@+id/titleText"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textColor="@color/hf_text_primary"
-            android:textSize="16sp"
+            android:textSize="15sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/metaText"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
             android:textColor="@color/hf_text_secondary"
             android:textSize="12sp" />
 
         <TextView
-            android:id="@+id/descText"
-            android:layout_width="wrap_content"
+            android:id="@+id/nameText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textColor="@color/hf_text_secondary"
+            android:textIsSelectable="true"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/recommendText"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
             android:textColor="@color/hf_text_secondary"
             android:textSize="12sp" />
     </LinearLayout>
-
-    <TextView
-        android:id="@+id/stateText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="12dp"
-        android:textColor="@color/hf_text_primary"
-        android:textSize="12sp"
-        android:textStyle="bold" />
-
-    <Button
-        android:id="@+id/btnGovern"
-        android:layout_width="wrap_content"
-        android:layout_height="36dp"
-        android:layout_marginStart="12dp"
-        android:background="@drawable/bg_button"
-        android:backgroundTint="@null"
-        android:clickable="true"
-        android:enabled="true"
-        android:focusable="false"
-        android:focusableInTouchMode="false"
-        android:minWidth="72dp"
-        android:text="选择治理"
-        android:textAllCaps="false"
-        android:textColor="@color/hf_text_primary"
-        android:textSize="13sp" />
-
 </LinearLayout>

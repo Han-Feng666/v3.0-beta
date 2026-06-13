@@ -7,6 +7,7 @@ import com.HanFeng.model.RemoteRuleSourceConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -16,6 +17,7 @@ object RemoteRuleSourceRepository {
     private const val CONNECT_TIMEOUT_MILLIS = 180_000  // 180 秒（3 分钟，大规则文件需要更长时间建立连接）
     private const val READ_TIMEOUT_MILLIS = 1_800_000  // 30 分钟（超大规则文件下载可能需要更长时间）
     private const val SYNC_INTERVAL_MILLIS = 24 * 60 * 60 * 1000L
+    private const val MAX_TEXT_DOWNLOAD_BYTES = 2 * 1024 * 1024
 
     enum class WhitelistImportMode {
         BLOCK,
@@ -30,7 +32,8 @@ object RemoteRuleSourceRepository {
         val stage: Stage,
         val bytesRead: Long = 0L,
         val totalBytes: Long? = null,
-        val addedCount: Int? = null
+        val addedCount: Int? = null,
+        val detail: String? = null
     ) {
         enum class Stage { CONNECTING, DOWNLOADING, IMPORTING, COMPLETED }
     }
@@ -124,7 +127,18 @@ object RemoteRuleSourceRepository {
                     source.id,
                     tempFile.inputStream(),
                     allowWhitelistDomains = whitelistImportMode != WhitelistImportMode.BLOCK
-                )
+                ) { detail ->
+                    onDetailedProgress?.invoke(
+                        RemoteRuleSyncProgress(
+                            current = 1,
+                            total = 1,
+                            source = source,
+                            stage = RemoteRuleSyncProgress.Stage.IMPORTING,
+                            bytesRead = tempFile.length(),
+                            detail = detail
+                        )
+                    )
+                }
                 val totalTime = System.currentTimeMillis() - startTime
                 
                 val updatedSource = source.copy(
@@ -205,13 +219,12 @@ object RemoteRuleSourceRepository {
             
             if (responseCode !in 200..299) {
                 val errorText = runCatching {
-                    connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText().take(200) }
+                    connection.errorStream?.readTextPrefix(200)
                 }.getOrNull().orEmpty().ifBlank { "HTTP $responseCode" }
                 throw IOException("规则源下载失败：HTTP $responseCode ${errorText.trim()}")
             }
             
-            val inputStream = connection.inputStream
-            val content = inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val content = connection.inputStream.readLimitedText(MAX_TEXT_DOWNLOAD_BYTES)
             
             if (content.isBlank()) {
                 throw IOException("规则源内容为空")
@@ -245,13 +258,11 @@ object RemoteRuleSourceRepository {
             
             if (responseCode !in 200..299) {
                 val errorText = runCatching {
-                    connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText().take(200) }
+                    connection.errorStream?.readTextPrefix(200)
                 }.getOrNull().orEmpty().ifBlank { "HTTP $responseCode" }
                 throw IOException("规则源下载失败：HTTP $responseCode ${errorText.trim()}")
             }
             
-            val inputStream = connection.inputStream
-            val outputStream = tempFile.outputStream()
             val contentLength = connection.contentLengthLong.takeIf { it > 0L }
             
             // P0.5 优化：使用更大的缓冲区，减少 IO 操作
@@ -261,20 +272,21 @@ object RemoteRuleSourceRepository {
             var lastProgressAt = 0L
             onProgress?.invoke(0L, contentLength)
             
-            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                outputStream.write(buffer, 0, bytesRead)
-                totalBytes += bytesRead
-                val now = System.currentTimeMillis()
-                if (now - lastProgressAt >= 500L || contentLength != null && totalBytes >= contentLength) {
-                    lastProgressAt = now
-                    onProgress?.invoke(totalBytes, contentLength)
+            connection.inputStream.use { inputStream ->
+                tempFile.outputStream().use { outputStream ->
+                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                        outputStream.write(buffer, 0, bytesRead)
+                        totalBytes += bytesRead
+                        val now = System.currentTimeMillis()
+                        if (now - lastProgressAt >= 500L || contentLength != null && totalBytes >= contentLength) {
+                            lastProgressAt = now
+                            onProgress?.invoke(totalBytes, contentLength)
+                        }
+                    }
+                    outputStream.flush()
                 }
             }
             onProgress?.invoke(totalBytes, contentLength)
-            
-            outputStream.flush()
-            outputStream.close()
-            inputStream.close()
             
             if (totalBytes == 0L) {
                 tempFile.delete()
@@ -304,7 +316,34 @@ object RemoteRuleSourceRepository {
         return connectivityManager.allNetworks.firstOrNull { network ->
             val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@firstOrNull false
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
                 !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        }
+    }
+
+    private fun InputStream.readLimitedText(maxBytes: Int): String {
+        return bufferedReader(Charsets.UTF_8).use { reader ->
+            val builder = StringBuilder()
+            val buffer = CharArray(4096)
+            var bytes = 0
+            while (true) {
+                val read = reader.read(buffer)
+                if (read < 0) break
+                bytes += read * 2
+                if (bytes > maxBytes) {
+                    throw IOException("规则源文本内容超过 ${maxBytes / 1024}KB，请使用流式同步导入")
+                }
+                builder.append(buffer, 0, read)
+            }
+            builder.toString()
+        }
+    }
+
+    private fun InputStream.readTextPrefix(maxChars: Int): String {
+        return bufferedReader(Charsets.UTF_8).use { reader ->
+            val buffer = CharArray(maxChars)
+            val read = reader.read(buffer)
+            if (read <= 0) "" else String(buffer, 0, read)
         }
     }
 

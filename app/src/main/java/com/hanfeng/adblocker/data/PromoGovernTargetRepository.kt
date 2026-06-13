@@ -2,6 +2,7 @@ package com.HanFeng.data
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 
 object PromoGovernTargetRepository {
     data class DiscoveryResult(
@@ -19,7 +20,7 @@ object PromoGovernTargetRepository {
 
     fun discover(context: Context): DiscoveryResult {
         val pm = context.packageManager
-        val installedApps = pm.getInstalledApplications(0)
+        val installedApps = pm.getInstalledApplications(packageQueryFlags())
         val selfPackage = context.packageName
         val presetPackages = ShizukuAdControlCatalog.allPresets().mapTo(linkedSetOf()) { it.packageName }
         var excludedPureSystem = 0
@@ -33,7 +34,7 @@ object PromoGovernTargetRepository {
                 includedByPreset++
                 return@filter true
             }
-            val label = pm.getApplicationLabel(appInfo)?.toString().orEmpty()
+            val label = pm.getApplicationLabel(appInfo).toString()
             if (isWellKnownThirdPartyPromoApp(appInfo.packageName, label)) {
                 includedByWellKnown++
                 return@filter true
@@ -47,7 +48,7 @@ object PromoGovernTargetRepository {
         }
         var scanned = 0
         val categoryCounts = linkedMapOf<String, Int>()
-        val targets = eligibleApps.asSequence()
+        val strictTargets = eligibleApps.asSequence()
             .mapNotNull { appInfo ->
                 scanned++
                 buildTarget(context, appInfo)?.also { target ->
@@ -56,6 +57,24 @@ object PromoGovernTargetRepository {
             }
             .sortedWith(compareBy<PromoGovernTarget> { it.category }.thenBy { it.title })
             .toList()
+        val discoveredTargets = strictTargets.ifEmpty {
+            val fallbackPool = eligibleApps.ifEmpty {
+                installedApps.filter { appInfo ->
+                    appInfo.packageName != selfPackage && pm.getLaunchIntentForPackage(appInfo.packageName) != null
+                }
+            }
+            fallbackPool.asSequence()
+                .sortedBy { appInfo -> pm.getApplicationLabel(appInfo).toString() }
+                .take(80)
+                .mapNotNull { appInfo -> buildFallbackTarget(context, appInfo) }
+                .toList()
+                .also { fallbackTargets ->
+                    if (fallbackTargets.isNotEmpty()) {
+                        categoryCounts["可选治理"] = fallbackTargets.size
+                    }
+                }
+        }
+        val targets = includeLatestSnapshotTargetIfMissing(context, discoveredTargets)
         return DiscoveryResult(
             targets = targets,
             installedCount = installedApps.size,
@@ -68,10 +87,56 @@ object PromoGovernTargetRepository {
         )
     }
 
+    private fun includeLatestSnapshotTargetIfMissing(
+        context: Context,
+        targets: List<PromoGovernTarget>
+    ): List<PromoGovernTarget> {
+        val snapshot = PromoGovernSnapshotRepository.latest(context) ?: return targets
+        if (targets.any { it.packageName == snapshot.packageName }) return targets
+        val status = ShizukuAdControlRepository.queryPackageStatus(context, snapshot.packageName)
+        if (!status.installed) return targets
+        val snapshotTarget = PromoGovernTarget(
+            packageName = snapshot.packageName,
+            title = snapshot.title,
+            category = "最近治理",
+            description = "这是最近被治理过的 App。即使冻结后桌面图标消失，也可以在这里解冻并恢复暂停状态和推送广告权限。",
+            sourceLabel = "最近治理记录",
+            systemApp = false,
+            detectionTags = listOf("recent-governed", "restore-entry"),
+            relatedPresets = ShizukuAdControlCatalog.allPresets().filter { it.packageName == snapshot.packageName },
+            packageStatus = status
+        )
+        return listOf(snapshotTarget) + targets
+    }
+
+    private fun packageQueryFlags(): Int {
+        return PackageManager.MATCH_DISABLED_COMPONENTS or
+            PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
+    }
+
+    private fun buildFallbackTarget(context: Context, appInfo: ApplicationInfo): PromoGovernTarget? {
+        val pm = context.packageManager
+        val packageName = appInfo.packageName
+        val label = pm.getApplicationLabel(appInfo).toString().ifBlank { packageName }
+        val status = ShizukuAdControlRepository.queryPackageStatus(context, packageName)
+        if (!status.installed) return null
+        return PromoGovernTarget(
+            packageName = packageName,
+            title = label,
+            category = "可选治理",
+            description = "未命中内置推广规则，但这是可启动的第三方 App。可按需关闭推送广告、暂停或进入组件治理，冻结前请确认不会影响正常使用。",
+            sourceLabel = "第三方 App（手动确认）",
+            systemApp = false,
+            detectionTags = listOf("fallback", "launchable", "manual-confirm"),
+            relatedPresets = emptyList(),
+            packageStatus = status
+        )
+    }
+
     private fun buildTarget(context: Context, appInfo: ApplicationInfo): PromoGovernTarget? {
         val pm = context.packageManager
         val packageName = appInfo.packageName
-        val label = pm.getApplicationLabel(appInfo)?.toString().orEmpty().ifBlank { packageName }
+        val label = pm.getApplicationLabel(appInfo).toString().ifBlank { packageName }
         val lowerLabel = label.lowercase()
         val lowerPackage = packageName.lowercase()
         val matchedPresets = ShizukuAdControlCatalog.allPresets().filter { it.packageName == packageName }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.PowerManager
 import android.util.Log
+import java.util.concurrent.TimeUnit
 
 /**
  * Shizuku 增强工具 - 强制后台限制
@@ -35,8 +36,7 @@ class ShizukuBackgroundRestrictor(private val context: Context) {
      */
     fun forceStopPackage(packageName: String): Boolean {
         return try {
-            val process = ProcessBuilder("su", "-c", "am force-stop $packageName").start()
-            val exitCode = process.waitFor()
+            val exitCode = runShellCommand("am force-stop $packageName").exitCode
             
             if (exitCode == 0) {
                 Log.d(TAG, "Force stopped: $packageName")
@@ -67,12 +67,10 @@ class ShizukuBackgroundRestrictor(private val context: Context) {
             }
             
             val command = "appops set $packageName RUN_IN_BACKGROUND ignore"
-            val process = ProcessBuilder("su", "-c", command).start()
-            process.waitFor()
+            runShellCommand(command)
             
             val standbyCommand = "pm set-app-standby-bucket $packageName $modeName"
-            val standbyProcess = ProcessBuilder("su", "-c", standbyCommand).start()
-            val exitCode = standbyProcess.waitFor()
+            val exitCode = runShellCommand(standbyCommand).exitCode
             
             if (exitCode == 0) {
                 Log.d(TAG, "Set standby mode $modeName for $packageName")
@@ -93,15 +91,13 @@ class ShizukuBackgroundRestrictor(private val context: Context) {
     fun disableBackgroundWakeup(packageName: String): Boolean {
         return try {
             // 禁用 WAKE_LOCK
-            val process1 = ProcessBuilder("su", "-c", "appops set $packageName WAKE_LOCK ignore").start()
-            process1.waitFor()
+            val wakeLockResult = runShellCommand("appops set $packageName WAKE_LOCK ignore")
             
             // 禁用 RUN_ANY_IN_BACKGROUND
-            val process2 = ProcessBuilder("su", "-c", "appops set $packageName RUN_ANY_IN_BACKGROUND ignore").start()
-            process2.waitFor()
+            val runAnyResult = runShellCommand("appops set $packageName RUN_ANY_IN_BACKGROUND ignore")
             
             Log.d(TAG, "Disabled background wakeup for $packageName")
-            true
+            wakeLockResult.exitCode == 0 || runAnyResult.exitCode == 0
         } catch (e: Exception) {
             Log.e(TAG, "Exception disabling background wakeup", e)
             false
@@ -114,15 +110,13 @@ class ShizukuBackgroundRestrictor(private val context: Context) {
     fun enableBackgroundWakeup(packageName: String): Boolean {
         return try {
             // 启用 WAKE_LOCK
-            val process1 = ProcessBuilder("su", "-c", "appops set $packageName WAKE_LOCK allow").start()
-            process1.waitFor()
+            val wakeLockResult = runShellCommand("appops set $packageName WAKE_LOCK allow")
             
             // 启用 RUN_ANY_IN_BACKGROUND
-            val process2 = ProcessBuilder("su", "-c", "appops set $packageName RUN_ANY_IN_BACKGROUND allow").start()
-            process2.waitFor()
+            val runAnyResult = runShellCommand("appops set $packageName RUN_ANY_IN_BACKGROUND allow")
             
             Log.d(TAG, "Enabled background wakeup for $packageName")
-            true
+            wakeLockResult.exitCode == 0 || runAnyResult.exitCode == 0
         } catch (e: Exception) {
             Log.e(TAG, "Exception enabling background wakeup", e)
             false
@@ -135,18 +129,17 @@ class ShizukuBackgroundRestrictor(private val context: Context) {
     fun deepFreeze(packageName: String): Boolean {
         return try {
             // 强制停止
-            forceStopPackage(packageName)
+            val forceStopped = forceStopPackage(packageName)
             
             // 禁用所有后台活动
-            disableBackgroundWakeup(packageName)
-            setAppStandbyMode(packageName, STANDBY_RESTRICTED)
+            val wakeupDisabled = disableBackgroundWakeup(packageName)
+            val standbySet = setAppStandbyMode(packageName, STANDBY_RESTRICTED)
             
             // 禁用通知（可选）
-            val disableNotif = ProcessBuilder("su", "-c", "appops set $packageName POST_NOTIFICATION ignore").start()
-            disableNotif.waitFor()
+            val notificationResult = runShellCommand("appops set $packageName POST_NOTIFICATION ignore")
             
             Log.d(TAG, "Deep frozen: $packageName")
-            true
+            forceStopped || wakeupDisabled || standbySet || notificationResult.exitCode == 0
         } catch (e: Exception) {
             Log.e(TAG, "Exception deep freezing package", e)
             false
@@ -159,15 +152,14 @@ class ShizukuBackgroundRestrictor(private val context: Context) {
     fun unfreezePackage(packageName: String): Boolean {
         return try {
             // 启用所有后台活动
-            enableBackgroundWakeup(packageName)
-            setAppStandbyMode(packageName, STANDBY_FREQUENT)
+            val wakeupEnabled = enableBackgroundWakeup(packageName)
+            val standbySet = setAppStandbyMode(packageName, STANDBY_FREQUENT)
             
             // 启用通知
-            val enableNotif = ProcessBuilder("su", "-c", "appops set $packageName POST_NOTIFICATION allow").start()
-            enableNotif.waitFor()
+            val notificationResult = runShellCommand("appops set $packageName POST_NOTIFICATION allow")
             
             Log.d(TAG, "Unfrozen: $packageName")
-            true
+            wakeupEnabled || standbySet || notificationResult.exitCode == 0
         } catch (e: Exception) {
             Log.e(TAG, "Exception unfreezing package", e)
             false
@@ -179,8 +171,7 @@ class ShizukuBackgroundRestrictor(private val context: Context) {
      */
     fun getStandbyMode(packageName: String): Int {
         return try {
-            val process = ProcessBuilder("pm get-app-standby-bucket $packageName").start()
-            val result = process.inputStream.bufferedReader().readText().trim().lowercase()
+            val result = runCommand(listOf("pm", "get-app-standby-bucket", packageName)).output.trim().lowercase()
             
             when {
                 result.contains("active") -> STANDBY_ACTIVE
@@ -195,4 +186,33 @@ class ShizukuBackgroundRestrictor(private val context: Context) {
             STANDBY_FREQUENT
         }
     }
+
+    private fun runShellCommand(command: String): CommandResult {
+        return runCommand(listOf("su", "-c", command))
+    }
+
+    private fun runCommand(command: List<String>, timeoutSeconds: Long = 8L): CommandResult {
+        return try {
+            val process = ProcessBuilder(command)
+                .redirectErrorStream(true)
+                .start()
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return CommandResult(-1, "timeout")
+            }
+            val output = process.inputStream.bufferedReader().use { reader ->
+                val buffer = CharArray(1024)
+                val read = reader.read(buffer)
+                if (read <= 0) "" else String(buffer, 0, read)
+            }
+            CommandResult(process.exitValue(), output)
+        } catch (e: Exception) {
+            CommandResult(-1, e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    private data class CommandResult(
+        val exitCode: Int,
+        val output: String
+    )
 }

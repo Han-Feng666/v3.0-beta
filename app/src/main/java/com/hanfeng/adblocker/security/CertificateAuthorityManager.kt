@@ -61,11 +61,12 @@ object CertificateAuthorityManager {
                 val generated = generateCaCertificate()
                 storePkcs12(certFile, generated.keyPair, generated.certificate)
                 storePublicCertificate(publicCertFile, generated.certificate)
-                // 新证书生成后，标记需要重新导出
                 HttpsMitmRepository.clearCertificateExportPath(context)
+                // 证书已重新生成，标记需要用户重新安装
+                HttpsMitmRepository.markCertificateInstallRequested(context)
+                HttpsMitmRepository.clearCertificateInstalled(context)
             }
             HttpsMitmRepository.saveCertificateMeta(context, CERT_ALIAS, CERT_PASSWORD, CERT_PUBLIC_FILE_NAME, CERT_FILE_NAME)
-            // 只有在导出路径为空时才重新导出（避免反复覆盖下载目录）
             val downloadDisplayPath = if (HttpsMitmRepository.getCertificateExportPath(context).isNullOrBlank()) {
                 exportCertificateToDownloads(context, publicCertFile)
             } else {
@@ -114,17 +115,6 @@ object CertificateAuthorityManager {
     private fun certificateMatchesExpected(installed: X509Certificate, expected: X509Certificate): Boolean {
         if (installed.encoded.contentEquals(expected.encoded)) return true
         if (installed.subjectX500Principal == expected.subjectX500Principal && installed.publicKey.encoded.contentEquals(expected.publicKey.encoded)) {
-            return true
-        }
-        if (installed.issuerX500Principal == expected.issuerX500Principal && installed.serialNumber == expected.serialNumber) {
-            return true
-        }
-        val expectedSubject = expected.subjectX500Principal.name
-        val installedSubject = installed.subjectX500Principal.name
-        if (installedSubject.contains("HanFeng HTTPS MITM CA") && installed.publicKey.encoded.contentEquals(expected.publicKey.encoded)) {
-            return true
-        }
-        if (installedSubject.contains("HanFeng HTTPS MITM CA") && expectedSubject.contains("HanFeng HTTPS MITM CA")) {
             return true
         }
         return false
@@ -320,7 +310,9 @@ object CertificateAuthorityManager {
                     }
                 )
                 ?: return "下载/$DOWNLOAD_SUBDIR/$fileName"
-            resolver.openOutputStream(targetUri, "wt")?.use { output ->
+            val outputStream = resolver.openOutputStream(targetUri, "wt")
+                ?: error("Cannot open output stream for $fileName")
+            outputStream.use { output ->
                 output.write(bytes)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

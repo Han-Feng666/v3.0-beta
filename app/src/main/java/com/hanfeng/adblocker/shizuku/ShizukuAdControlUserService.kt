@@ -2,6 +2,7 @@ package com.HanFeng.shizuku
 
 import android.content.Context
 import android.content.pm.PackageManager
+import java.util.concurrent.TimeUnit
 import androidx.annotation.Keep
 
 class ShizukuAdControlUserService() : IAdControlService.Stub() {
@@ -153,7 +154,7 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
     override fun isPackageInstalled(packageName: String): Boolean {
         val context = serviceContext ?: return false
         return runCatching {
-            context.packageManager.getPackageInfo(packageName, 0)
+            context.packageManager.getPackageInfo(packageName, packageQueryFlags())
             true
         }.getOrDefault(false)
     }
@@ -168,7 +169,7 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
     override fun isPackageSuspended(packageName: String): Boolean {
         val context = serviceContext ?: return false
         return runCatching {
-            context.packageManager.getPackageInfo(packageName, 0).applicationInfo?.flags?.let { flags ->
+            context.packageManager.getPackageInfo(packageName, packageQueryFlags()).applicationInfo?.flags?.let { flags ->
                 (flags and android.content.pm.ApplicationInfo.FLAG_SUSPENDED) != 0
             } ?: false
         }.getOrDefault(false)
@@ -184,7 +185,7 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
         val attemptSummaries = mutableListOf<String>()
         commands.forEachIndexed { index, command ->
             val result = runCommand(command)
-            attemptSummaries += "try${index + 1}:${result.summary}"
+            attemptSummaries += "第${index + 1}次：${result.summary}"
             if (result.success) {
                 lastOperationSummary = attemptSummaries.joinToString(" | ")
                 return true
@@ -209,7 +210,7 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
             var opSucceeded = false
             commands.forEachIndexed { index, command ->
                 val result = runCommand(command)
-                attemptSummaries += "$opName-try${index + 1}:${result.summary}"
+                attemptSummaries += "${translateAppOpName(opName)}第${index + 1}次：${result.summary}"
                 if (result.success) {
                     opSucceeded = true
                     anySuccess = true
@@ -220,7 +221,7 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
                 }
             }
             if (!opSucceeded) {
-                attemptSummaries += "$opName-no-success"
+                attemptSummaries += "${translateAppOpName(opName)}未成功"
             }
         }
         lastOperationSummary = attemptSummaries.joinToString(" | ")
@@ -232,20 +233,28 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
             val process = ProcessBuilder(command)
                 .redirectErrorStream(true)
                 .start()
-            val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
+            if (!process.waitFor(8, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return@runCatching CommandResult(false, true, "执行超时，命令=${command.joinToString(" ")}")
+            }
+            val output = process.inputStream.bufferedReader().use { reader ->
+                val buffer = CharArray(1024)
+                val read = reader.read(buffer)
+                if (read <= 0) "" else String(buffer, 0, read)
+            }.trim()
             val exitCode = process.waitFor()
             val commandText = command.joinToString(" ")
             val summary = buildSummary(commandText, exitCode, output)
             when {
-                exitCode == 0 -> CommandResult(true, false, "success $summary")
-                isUnsupportedCommand(output) -> CommandResult(false, true, "unsupported $summary")
-                isPermissionFailure(output) -> CommandResult(false, false, "permission $summary")
-                output.contains("SecurityException", ignoreCase = true) -> CommandResult(false, false, "security $summary")
-                output.contains("Unknown package", ignoreCase = true) -> CommandResult(false, false, "package-missing $summary")
-                else -> CommandResult(false, false, "failed $summary")
+                exitCode == 0 -> CommandResult(true, false, "执行成功，$summary")
+                isUnsupportedCommand(output) -> CommandResult(false, true, "当前命令不受系统支持，$summary")
+                isPermissionFailure(output) -> CommandResult(false, false, "权限不足，$summary")
+                output.contains("SecurityException", ignoreCase = true) -> CommandResult(false, false, "系统安全限制，$summary")
+                output.contains("Unknown package", ignoreCase = true) -> CommandResult(false, false, "未找到目标应用，$summary")
+                else -> CommandResult(false, false, "执行失败，$summary")
             }
         }.getOrElse {
-            CommandResult(false, true, "exception command=${command.joinToString(" ")} error=${it.message ?: it.javaClass.simpleName}")
+            CommandResult(false, true, "执行异常，命令=${command.joinToString(" ")}，错误=${it.message ?: it.javaClass.simpleName}")
         }
     }
 
@@ -255,15 +264,31 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
 
     private fun buildSummary(command: String, exitCode: Int, output: String): String {
         return buildString {
-            append("command=")
+            append("命令=")
             append(command)
-            append(" exit=")
+            append("，退出码=")
             append(exitCode)
             if (output.isNotBlank()) {
-                append(" output=")
+                append("，输出=")
                 append(output.replace('\n', ' ').take(240))
             }
         }
+    }
+
+    private fun translateAppOpName(opName: String): String {
+        return when (opName) {
+            "POST_NOTIFICATION" -> "通知权限"
+            "RUN_ANY_IN_BACKGROUND" -> "后台运行权限"
+            "RUN_IN_BACKGROUND" -> "后台活动权限"
+            "WAKE_LOCK" -> "唤醒锁权限"
+            "INTERNET" -> "联网权限"
+            else -> opName
+        }
+    }
+
+    private fun packageQueryFlags(): Int {
+        return PackageManager.MATCH_DISABLED_COMPONENTS or
+            PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
     }
 
     private fun isUnsupportedCommand(output: String): Boolean {

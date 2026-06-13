@@ -175,12 +175,12 @@ class SuspiciousDomainsActivity : BaseActivity() {
                 RuleRepository.addRules(applicationContext, pendingDomains, RuleSource.MANUAL)
             }
             if (isFinishing || isDestroyed) return@launch
-                if (added.isNotEmpty()) {
-                    hasChanges = true
-                    selectedDomains.removeAll(added.map { it.domain }.toSet())
-                    NetworkKernel.reloadIfRunning(this@SuspiciousDomainsActivity)
-                    Toast.makeText(this@SuspiciousDomainsActivity, "已添加 ${added.size} 条拦截规则", Toast.LENGTH_SHORT).show()
-                } else {
+            if (added.isNotEmpty()) {
+                hasChanges = true
+                selectedDomains.removeAll(added.map { it.domain }.toSet())
+                NetworkKernel.reloadIfRunning(this@SuspiciousDomainsActivity)
+                Toast.makeText(this@SuspiciousDomainsActivity, "已添加 ${added.size} 条拦截规则", Toast.LENGTH_SHORT).show()
+            } else {
                 Toast.makeText(this@SuspiciousDomainsActivity, "这些域名已经在规则里了", Toast.LENGTH_SHORT).show()
             }
             loadSamples()
@@ -220,7 +220,6 @@ class SuspiciousDomainsActivity : BaseActivity() {
                 append(" 条")
             }
         }
-        val novelVisibleCount = visible.count { it.novelHits > 0 || RuleRepository.isNovelVendor(it.lastVendor) }
         val selectableVisibleCount = visible.count { it.domain !in addedDomains }
         val recommendedVisibleCount = recommendCount - visible.count { it.domain in addedDomains && RuleRepository.isHighConfidenceSuspiciousDomain(it.domain, it.lastVendor, it.novelHits, it.count, it.lastAppName, it.dnsHits, it.aliasHits, it.tlsSniHits, it.httpHits, it.pathHits, it.redirectHits, it.appSignalHits, it.vendorSignalHits, it.confidenceBoost, it.refererDomain) }
         val actionableSelectedCount = selectedDomains.count { domain ->

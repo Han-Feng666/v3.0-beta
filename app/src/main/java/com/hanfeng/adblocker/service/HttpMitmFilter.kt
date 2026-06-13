@@ -287,7 +287,9 @@ object HttpMitmFilter {
         "adview", "domob", "duomeng", "adwo", "youmioffer", "bzadx", "beizisdk", "vpadn",
         "mvad", "mvads", "openalliance", "hwads", "ads-drcn", "iflytekad", "atanx", "simba.taobao",
         "magneticengine", "kuaibusiness", "qtadx", "ubix", "ubixad", "ubixio", "ubixai", "ubiadx",
-        "zghd", "zhghd", "hxltad", "adintl", "qxm", "qxmad", "qxmads", "52qumao"
+        "zghd", "zhghd", "hxltad", "adintl", "qxm", "qxmad", "qxmads", "52qumao",
+        "bidmachine", "liftoff", "smaato", "pubmatic", "openx", "moloco", "fyber",
+        "digitalturbine", "dt_exchange", "ogury", "maio", "reklamup", "yandexads", "mytarget"
     )
     private val pangleAndGdtHostSignals = listOf(
         "pangolin-sdk-toutiao", "pangle", "pangolin", "gromore", "csj", "oceanengine",
@@ -296,7 +298,9 @@ object HttpMitmFilter {
     private val pangleAndGdtPathSignals = listOf(
         "/union/sdk", "/sdk/union", "/ad/get", "/ad/fetch", "/ad/dispatch", "/ad/request",
         "/material/list", "/creative/list", "/placement/list", "/sdk/config", "/waterfall", "/mediation",
-        "/auction", "/bidding", "/reward/video", "/open_screen", "/splash", "/launch", "/startup"
+        "/auction", "/bidding", "/reward/video", "/open_screen", "/splash", "/launch", "/startup",
+        "/rtb", "/bid/request", "/bid/response", "/ad/auction", "/ad/waterfall", "/ad/mediation",
+        "/sdk/init", "/sdk/preload", "/rewarded", "/interstitial", "/native/express"
     )
     private val pangleAndGdtBodySignals = listOf(
         "\"pangle\"", "\"pangolin\"", "\"gromore\"", "\"csj\"", "\"gdt\"", "\"youlianghui\"",
@@ -324,6 +328,9 @@ object HttpMitmFilter {
         "waterfall", "waterfallid", "waterfall_id", "mediation", "mediationid", "mediation_id", "bidding", "biddingtoken",
         "bidtoken", "bid_token", "auctionid", "auction_id", "fillrate", "fill_rate", "requestscene", "request_scene",
         "preloadad", "preload_ad", "prefetchad", "prefetch_ad", "cachead", "cache_ad", "loadstrategy", "load_strategy",
+        "adload", "loadads", "requestads", "fetchads", "getads", "adserver", "adserverapi",
+        "rewarded", "rewardedvideo", "nativeexpress", "bidrequest", "bidresponse", "rtbrequest",
+        "winnotice", "lossnotice", "adm", "vast", "omid", "mraid", "skadn", "skadnetwork",
         "dns", "dnsquery", "dns-query", "dns_message", "dns-message", "dnsjson", "dns-json", "httpdns", "resolver"
     )
     private val dohPathKeywords = listOf(
@@ -467,7 +474,13 @@ object HttpMitmFilter {
         "\"title_text\"", "\"icon_url\"", "\"icon_urls\"", "\"img_list\"",
         "\"image_list\"", "\"materials\"", "\"material_list\"", "\"creatives\"",
         "\"creative_list\"", "\"reward_video\"", "\"rewardvideo\"", "\"fullscreen_video\"",
-        "\"native_express\"", "\"landing_page_url\"", "\"download_button\"", "\"download_btn\""
+        "\"native_express\"", "\"landing_page_url\"", "\"download_button\"", "\"download_btn\"",
+        "\"bid_request\"", "\"bid_response\"", "\"bidrequest\"", "\"bidresponse\"",
+        "\"rtb_request\"", "\"rtb_response\"", "\"adm\"", "\"vast\"", "\"mraid\"", "\"omid\"",
+        "\"skadn\"", "\"skadnetwork\"", "\"win_notice_url\"", "\"loss_notice_url\"",
+        "\"event_trackers\"", "\"tracking_events\"", "\"ad_payload\"", "\"ad_meta\"",
+        "\"adn\"", "\"adn_name\"", "\"network_name\"", "\"network_placement\"", "\"bidfloor\"", "\"bid_floor\"",
+        "\"auction_price\"", "\"auction_token\"", "\"sdk_ad\"", "\"sdk_ads\"", "\"ad_ecpm\"", "\"ad_bid\"", "\"ad_bid_id\""
     )
     private val generalAdFieldTokens = listOf(
         "\"banner\"", "\"banner_list\"", "\"bannerlist\"", "\"banner_infos\"", "\"banner_info\"",
@@ -500,7 +513,13 @@ object HttpMitmFilter {
         "\"message_center_ad\"", "\"message_center_banner\"", "\"inbox_ad\"", "\"notify_ad\"",
         "\"promotion_card\"", "\"promo_card\"", "\"discover_card\"", "\"discover_ad\"",
         "\"operation_banner\"", "\"operation_card\"", "\"service_popup_ad\"", "\"benefit_popup_ad\"",
-        "\"sign_popup_ad\"", "\"daily_popup_ad\"", "\"mission_popup_ad\"", "\"welfare_popup_ad\""
+        "\"sign_popup_ad\"", "\"daily_popup_ad\"", "\"mission_popup_ad\"", "\"welfare_popup_ad\"",
+        "\"bid_request\"", "\"bid_response\"", "\"ad_payload\"", "\"ad_meta\"", "\"ad_event\"",
+        "\"event_trackers\"", "\"tracking_events\"", "\"win_notice_url\"", "\"loss_notice_url\"",
+        "\"ad_markup\"", "\"ad_html\"", "\"ad_template\"", "\"ad_unit_config\"",
+        "\"rewarded_ad\"", "\"rewarded_ads\"", "\"rewarded_video_ad\"", "\"inspire_video_ad\"", "\"incentive_ad\"",
+        "\"offerwall_ad\"", "\"draw_video_ad\"", "\"short_drama_ad\"", "\"comic_insert_ad\"", "\"manga_insert_ad\"",
+        "\"adn\"", "\"adn_name\"", "\"network_name\"", "\"bidfloor\"", "\"bid_floor\"", "\"auction_token\""
     )
     private val novelAdFieldTokens = listOf(
         "\"book_id\"", "\"book_name\"", "\"chapter_id\"", "\"chapter_name\"", "\"reader_type\"",
@@ -522,14 +541,17 @@ object HttpMitmFilter {
         "\"task_center\"", "\"benefit_center\"", "\"welfare_center\"", "\"reader_task_center\"", "\"reader_benefit_center\"",
         "\"watch_ad_task\"", "\"daily_reward\"", "\"sign_reward\"", "\"coin_bonus\"", "\"chapter_unlock_popup\"",
         "\"sign_popup_ad\"", "\"daily_popup_ad\"", "\"mission_popup_ad\"", "\"task_popup_ad\"",
-        "\"benefit_popup_ad\"", "\"welfare_popup_ad\"", "\"reader_sign_reward\"", "\"novel_sign_task\""
+        "\"benefit_popup_ad\"", "\"welfare_popup_ad\"", "\"reader_sign_reward\"", "\"novel_sign_task\"",
+        "\"listen_reward_ad\"", "\"audio_reward_ad\"", "\"comic_unlock_ad\"", "\"manga_unlock_ad\"",
+        "\"short_drama_unlock_ad\"", "\"drama_reward_ad\"", "\"chapter_preload_ad\"", "\"reader_preload_ad\""
     )
     private val mediaAdFieldTokens = listOf(
         "\"episode_id\"", "\"episode_name\"", "\"drama_id\"", "\"drama_name\"", "\"short_drama\"",
         "\"short_video\"", "\"live_room\"", "\"live_room_id\"", "\"anchor_id\"", "\"stream_id\"",
         "\"stream_url\"", "\"play_scene\"", "\"comic_id\"", "\"comic_name\"", "\"manga_id\"",
+        "\"manga_name\"", "\"drama_scene\"", "\"short_drama_scene\"", "\"episode_unlock_ad\"",
         "\"chapter_unlock_ad\"", "\"pause_ad\"", "\"player_ad\"", "\"video_patch\"", "\"patch_ads\"",
-        "\"live_ad\"", "\"draw_ad\"", "\"floating_banner\""
+        "\"live_ad\"", "\"draw_ad\"", "\"floating_banner\"", "\"short_drama_ad\"", "\"comic_ad\"", "\"manga_ad\""
     )
     private val http2JsonAdFieldTokens = listOf(
         "\"ad\"", "\"ads\"", "\"adId\"", "\"adid\"", "\"ad_id\"",
@@ -553,7 +575,12 @@ object HttpMitmFilter {
         "\"reward_amount\"", "\"coin_reward\"", "\"reading_bonus\"", "\"task_reward\"",
         "\"chapter_reward\"", "\"ad_reward\"", "\"watch_ad\"", "\"watch_ad_unlock\"",
         "\"welfare_page\"", "\"benefit_page\"", "\"offerwall\"", "\"free_read\"",
-        "\"unlock_chapter\"", "\"chapter_unlock\"", "\"excitation_ad\""
+        "\"unlock_chapter\"", "\"chapter_unlock\"", "\"excitation_ad\"",
+        "\"rewarded_video\"", "\"rewardedvideo\"", "\"incentive_video\"", "\"incentivevideo\"",
+        "\"ad_payload\"", "\"ad_meta\"", "\"ad_event\"", "\"event_trackers\"",
+        "\"bid_request\"", "\"bid_response\"", "\"win_notice_url\"", "\"loss_notice_url\"",
+        "\"adn\"", "\"adn_name\"", "\"network_name\"", "\"bidfloor\"", "\"auction_token\"",
+        "\"rewarded_ad\"", "\"rewarded_ads\"", "\"offerwall_ad\"", "\"short_drama_ad\"", "\"comic_insert_ad\""
     )
     private val jsonNovelFieldTokens = listOf(
         "\"reward_amount\"", "\"coin_reward\"", "\"reading_bonus\"", "\"task_reward\"",
@@ -570,7 +597,11 @@ object HttpMitmFilter {
         "\"page_tail_popup\"", "\"chapter_tail_popup\"", "\"reader_tail_popup\"", "\"page_end_card\"", "\"chapter_end_card\"",
         "\"startup_preload_ad\"", "\"launch_preload_ad\"", "\"comment_feed_ad\"", "\"comment_flow_ad\"", "\"reply_flow_ad\"",
         "\"sign_popup_ad\"", "\"daily_popup_ad\"", "\"mission_popup_ad\"", "\"benefit_popup_ad\"",
-        "\"welfare_popup_ad\"", "\"message_center_ad\"", "\"promotion_card\"", "\"discover_card\""
+        "\"welfare_popup_ad\"", "\"message_center_ad\"", "\"promotion_card\"", "\"discover_card\"",
+        "\"listen_reward_ad\"", "\"audio_reward_ad\"", "\"comic_unlock_ad\"", "\"manga_unlock_ad\"",
+        "\"short_drama_unlock_ad\"", "\"shortdrama_unlock_ad\"", "\"drama_reward_ad\"", "\"episode_unlock_ad\"",
+        "\"episode_reward_ad\"", "\"episode_preload_ad\"", "\"drama_interstitial_ad\"", "\"drama_feed_ad\"",
+        "\"comic_reward_ad\"", "\"comic_page_ad\"", "\"manga_page_ad\"", "\"listen_unlock_ad\"", "\"audio_unlock_ad\""
     )
     private val htmlNovelMarkerTokens = listOf(
         "welfare-page", "welfare_page", "task-center", "task_center", "coin-reward", "coin_reward",
@@ -645,7 +676,14 @@ object HttpMitmFilter {
     private val adInfraRequestSignals = listOf(
         "waterfall", "mediation", "bidding", "auction", "preload", "prefetch", "cache/ad",
         "ad/cache", "sdk/config", "ad/config", "material/list", "creative/list", "placement/list",
-        "fill/rate", "request_scene", "load_strategy"
+        "fill/rate", "request_scene", "load_strategy", "bid/request", "bid/response", "rtb/request",
+        "ad/payload", "ad/meta", "ad/event", "win/notice", "loss/notice", "event/track",
+        "reward/video", "rewarded/video", "inspire/video", "incentive/video", "offerwall",
+        "shortdrama/ad", "short_drama/ad", "mini_drama/ad", "drama/ad", "episode/ad", "episode/reward",
+        "episode/unlock", "episode/preload", "episode/material", "drama/reward", "drama/unlock", "drama/material",
+        "comic/ad", "manga/ad", "comic/reward", "manga/reward", "comic/unlock", "manga/unlock",
+        "listen/reward", "audio/reward", "listen/unlock", "audio/unlock",
+        "adserver", "ad/slot", "slot/ad", "sdk/ad", "adn/config", "network/config"
     )
 
     private val TRANSPARENT_1X1_GIF = byteArrayOf(
@@ -1105,6 +1143,7 @@ object HttpMitmFilter {
         val lowerBody = decoded.lowercase()
         if (RuleRepository.shouldProtectMediaTraffic(headerInspection.authority)) return null
         if (RuleRepository.shouldProtectBusinessTraffic(headerInspection.authority)) return null
+        if (shouldProtectNormalNovelHttpTraffic(context, headerInspection.authority, headerInspection.path, session.appName)) return null
         val vendor = headerInspection.vendor.ifBlank {
             RuleRepository.classifyVendorFromHints(context, headerInspection.authority, session.appName)
         }
@@ -1146,6 +1185,16 @@ object HttpMitmFilter {
         if (jsonAdArrayMatched) {
             reasons += "json-ad-array"
         }
+        RuleRepository.reportUnknownVendorIfNeeded(
+            context = context,
+            vendor = vendor,
+            domain = headerInspection.authority,
+            appName = session.appName,
+            signal = RuleRepository.SuspiciousSignal.HTTP_FLOW,
+            confidenceBoost = if (suspiciousScore >= 4) 3 else 2,
+            matchedPathHint = headerInspection.path,
+            refererDomain = extractRequestDomain(headerInspection)
+        )
         return Http2DataInspection(
             suspiciousScore = suspiciousScore,
             suspiciousReasons = reasons.distinct(),
@@ -1540,7 +1589,9 @@ object HttpMitmFilter {
     }
 
     private fun inspectPathRiskHttp1HeaderBranch(environment: Http1HeaderEnvironment): String? {
+        if (shouldProtectNormalNovelHttpTraffic(environment.context, environment.host, environment.lowerPath, environment.appName)) return null
         if (environment.pathInspection.strongSuspicious) return "neutralized-strong-suspicious-path"
+        if (environment.isNovelApp && looksLikeNovelAdPath(environment.lowerPath)) return "neutralized-novel-ad-path"
         if (environment.aggressiveAdApp && environment.pathInspection.rewardUnlock) return "neutralized-reward-unlock-path"
         if (environment.aggressiveAdApp && environment.pathInspection.suspicious &&
             (isKnownAdVendor(environment.vendor) || environment.headerTrackingHits >= 1 || environment.headerMaterialHit)) {
@@ -1553,6 +1604,7 @@ object HttpMitmFilter {
     }
 
     private fun inspectGeneralHttp1HeaderBranch(environment: Http1HeaderEnvironment): String? {
+        if (shouldProtectNormalNovelHttpTraffic(environment.context, environment.host, environment.lowerPath, environment.appName)) return null
         if (environment.aggressiveAdApp && environment.headerTrackingHits >= 1 &&
             (environment.locationRecommendCardHit || environment.headerMaterialHit || environment.strongHeaderOrKeywordHit)) {
             return "neutralized-aggressive-app-tracking-header"
@@ -1671,6 +1723,7 @@ object HttpMitmFilter {
         if (RuleRepository.isSensitiveAuthDomain(host)) return null
         if (RuleRepository.shouldProtectMediaTraffic(host)) return null
         if (RuleRepository.shouldProtectBusinessTraffic(host)) return null
+        if (shouldProtectNormalNovelHttpTraffic(context, host, requestInspection?.path, session.appName)) return null
         val vendor = RuleRepository.classifyVendorFromHints(context, host, session.appName)
         return Http1BodyEnvironment(
             context = context,
@@ -1898,6 +1951,33 @@ object HttpMitmFilter {
         return commentCommercePathSignals.any(path::contains) ||
             pangleAndGdtPathSignals.any(path::contains) ||
             containsAny(path, "gdt", "guangdiantong", "youlianghui", "douyin", "shop", "mall")
+    }
+
+    private fun looksLikeNovelAdPath(path: String): Boolean {
+        if (path.isBlank()) return false
+        if (looksLikeRewardUnlockPath(path)) return true
+        val readerScene = containsAny(
+            path,
+            "reader", "reading", "chapter", "book", "novel", "page", "read", "comic", "manga", "manhua", "drama", "shortdrama", "short_drama", "episode", "listen", "audio"
+        )
+        val adPlacement = containsAny(
+            path,
+            "/ad", "_ad", "ad_", "ads", "banner", "popup", "float", "insert_ad", "ad_insert", "ad_material", "creative",
+            "splash_ad", "startup_ad", "launch_ad", "reward_ad", "ad_reward", "watch_ad", "unlock_by_ad", "ad_unlock",
+            "offerwall", "waterfall", "mediation", "bidding", "auction", "inspire_ad", "incentive_ad", "excitation_ad"
+        )
+        if (readerScene && adPlacement) return true
+        return containsAny(
+            path,
+            "reader_banner", "reader_bottom", "reader_float", "reader_popup", "reader_reward", "reader_task",
+            "chapter_ad", "chapter_reward_ad", "chapter_unlock_ad", "chapter_offerwall", "chapter_popup_ad",
+            "page_turn_ad", "turn_page_ad", "flip_page_ad", "page_insert_ad", "page_footer_ad", "page_tail_ad",
+            "book_bonus", "book_task", "novel_reward", "novel_task", "novel_welfare", "watch_ad_unlock", "unlock_by_ad",
+            "episode_reward_ad", "episode_unlock_ad", "episode_ad", "episode_ad_material", "drama_reward_ad", "drama_unlock_ad", "drama_ad",
+            "shortdrama_reward_ad", "shortdrama_unlock_ad", "short_drama_reward_ad", "short_drama_unlock_ad",
+            "comic_reward_ad", "comic_unlock_ad", "comic_page_ad", "manga_reward_ad", "manga_unlock_ad", "manga_page_ad",
+            "listen_reward_ad", "listen_unlock_ad", "audio_reward_ad", "audio_unlock_ad"
+        )
     }
 
     private fun buildCosmeticHtml(selectors: List<String>): String {
@@ -2224,6 +2304,7 @@ object HttpMitmFilter {
         if (RuleRepository.isWhitelistedDomain(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.shouldProtectMediaTraffic(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.shouldProtectBusinessTraffic(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, false)
+        if (shouldProtectNormalNovelHttpTraffic(context, normalizedHost, lowerPath, appName)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.isBypassProtectionDomain(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, true)
         val vendor = vendorHint?.trim()?.takeIf { it.isNotBlank() }
             ?: RuleRepository.classifyVendorFromHints(context, normalizedHost, appName)
@@ -2236,6 +2317,9 @@ object HttpMitmFilter {
         val apiFeedPathHit = containsAny(lowerPath, "feed", "splash", "popup", "insert")
         if (RuleRepository.shouldForcePushRecommendInspection(normalizedHost, appName, vendor) &&
             pushRecommendPathHit) {
+            return cacheDeepInspectionDecision(cacheKey, true)
+        }
+        if (RuleRepository.isNovelAppHint(appName) && looksLikeNovelAdPath(lowerPath)) {
             return cacheDeepInspectionDecision(cacheKey, true)
         }
         if (messageScenePathHit && messageAdPathHit) {
@@ -3921,7 +4005,8 @@ object HttpMitmFilter {
         if (blockedHost || blockedUrl) return false
         if (RuleRepository.isWhitelistedDomain(lowerAuthority)) return true
         if (RuleRepository.shouldProtectMediaTraffic(lowerAuthority)) return true
-        return RuleRepository.shouldProtectBusinessTraffic(lowerAuthority)
+        if (RuleRepository.shouldProtectBusinessTraffic(lowerAuthority)) return true
+        return RuleRepository.isNovelContentDomain(lowerAuthority) || RuleRepository.isProtectedNovelAppDomain(lowerAuthority)
     }
 
     private fun buildHttp2HeaderInspection(
@@ -3962,6 +4047,7 @@ object HttpMitmFilter {
         isNovelApp: Boolean,
         pathInspection: PathInspection
     ) {
+        if (shouldProtectNormalNovelHttpTraffic(context, lowerAuthority, lowerPath, appName)) return
         accumulator.addIf(
             RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(context, lowerAuthority, lowerPath, appName),
             4,
@@ -3970,6 +4056,7 @@ object HttpMitmFilter {
         accumulator.addIf(pathInspection.strongSuspicious, if (isNovelApp) 4 else 3, "path-strong-suspicious")
         accumulator.addIf(looksLikeCommentAdPath(lowerPath), 3, "comment-ad-path")
         accumulator.addIf(looksLikeCommentCommerceAdPath(lowerPath), 4, "comment-commerce-path")
+        accumulator.addIf(isNovelApp && looksLikeNovelAdPath(lowerPath), 4, "novel-ad-path")
         accumulator.addIf(pathInspection.rewardUnlock, if (isNovelApp) 4 else 2, "reward-unlock-path")
     }
 
@@ -4288,14 +4375,28 @@ object HttpMitmFilter {
         val unlockHit = path.contains("unlock")
         val watchAdHit = path.contains("watch_ad")
         val unlockByAdHit = path.contains("unlock_by_ad")
-        val chapterUnlockHit = path.contains("chapter_unlock")
+        val chapterUnlockHit = path.contains("chapter_unlock_ad")
         val benefitHit = path.contains("benefit")
         val taskHit = path.contains("task")
-        return rewardHit && unlockHit ||
+        val adHit = path.contains("/ad") || path.contains("_ad") || path.contains("ad_") || path.contains("ads")
+        return rewardHit && unlockHit && adHit ||
             watchAdHit ||
             unlockByAdHit ||
             chapterUnlockHit ||
-            benefitHit && taskHit
+            benefitHit && taskHit && adHit
+    }
+
+    private fun shouldProtectNormalNovelHttpTraffic(
+        context: android.content.Context,
+        host: String,
+        path: String?,
+        appName: String?
+    ): Boolean {
+        val normalizedHost = normalizeAuthority(host)
+        if (normalizedHost.isBlank()) return false
+        if (RuleRepository.isNovelContentDomain(normalizedHost)) return true
+        if (!RuleRepository.isProtectedNovelAppDomain(normalizedHost)) return false
+        return !RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(context, normalizedHost, path, appName)
     }
 
     private fun queryContainsKeywordAssignment(query: String, keyword: String): Boolean {

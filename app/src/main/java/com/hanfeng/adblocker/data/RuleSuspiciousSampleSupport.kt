@@ -232,7 +232,7 @@ object RuleSuspiciousSampleSupport {
             val normalized = compact.replace('-', '+').replace('_', '/')
             val padded = normalized.padEnd(((normalized.length + 3) / 4) * 4, '=')
             return runCatching {
-                String(java.util.Base64.getDecoder().decode(padded), java.nio.charset.StandardCharsets.UTF_8)
+                String(android.util.Base64.decode(padded, android.util.Base64.DEFAULT), java.nio.charset.StandardCharsets.UTF_8)
             }.getOrNull()?.takeIf { decoded ->
                 decoded.isNotBlank() &&
                     decoded.length <= suspiciousSampleDecodeMaxLength &&

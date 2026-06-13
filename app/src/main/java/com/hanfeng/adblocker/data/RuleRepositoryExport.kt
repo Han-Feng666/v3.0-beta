@@ -24,9 +24,22 @@ object RuleRepositoryExport {
         includeWhitelist: Boolean = false,
         includeSmartScored: Boolean = false
     ): Int {
+        val exported = buildRulesText(
+            context = context,
+            includeWhitelist = includeWhitelist,
+            includeSmartScored = includeSmartScored
+        )
+        outputFile.writeText(exported.content)
+        return exported.count
+    }
+
+    fun buildRulesText(
+        context: Context,
+        includeWhitelist: Boolean = false,
+        includeSmartScored: Boolean = false
+    ): ExportedRules {
         val rules = RuleRepository.getRules(context)
         
-        // 过滤规则
         val filteredRules = rules.filter { rule ->
             if (!includeSmartScored && rule.id.startsWith("smart-score-")) return@filter false
             if (!includeWhitelist && (rule.domain.startsWith("@@") || rule.id.contains("whitelist"))) return@filter false
@@ -34,27 +47,25 @@ object RuleRepositoryExport {
         }
         
         if (filteredRules.isEmpty()) {
-            outputFile.writeText("# 没有可导出的规则\n")
-            return 0
+            return ExportedRules("# 没有可导出的规则\n", 0)
         }
         
         var exportedCount = 0
-        
-        BufferedWriter(FileWriter(outputFile)).use { writer ->
-            writer.writeLine("! Title: 寒枫广告 blocking 规则导出")
-            writer.writeLine("! Description: 从寒枫 App 导出的自定义广告拦截规则")
-            writer.writeLine("! Version: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}")
-            writer.writeLine("!")
-            writer.writeLine("! 导出时间：${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())}")
-            writer.writeLine("! 规则总数：${filteredRules.size}")
-            writer.writeLine("! 来源：寒枫 App 本地规则库")
-            writer.writeLine("!")
-            writer.writeLine("! 使用说明：")
-            writer.writeLine("! 1. 可在 AdGuard、AdGuard Home、Pi-hole 等工具中使用")
-            writer.writeLine("! 2. 部分寒枫特有功能（如 app= 限定）可能不被其他工具支持")
-            writer.writeLine("! 3. 如导致 App 功能异常，请将相关域名加入白名单")
-            writer.writeLine("!")
-            writer.writeLine("")
+        val content = buildString {
+            appendLine("! Title: 寒枫广告 blocking 规则导出")
+            appendLine("! Description: 从寒枫 App 导出的自定义广告拦截规则")
+            appendLine("! Version: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}")
+            appendLine("!")
+            appendLine("! 导出时间：${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())}")
+            appendLine("! 规则总数：${filteredRules.size}")
+            appendLine("! 来源：寒枫 App 本地规则库")
+            appendLine("!")
+            appendLine("! 使用说明：")
+            appendLine("! 1. 可在 AdGuard、AdGuard Home、Pi-hole 等工具中使用")
+            appendLine("! 2. 部分寒枫特有功能（如 app= 限定）可能不被其他工具支持")
+            appendLine("! 3. 如导致 App 功能异常，请将相关域名加入白名单")
+            appendLine("!")
+            appendLine("")
             
             val rulesByVendor = filteredRules.groupBy { it.vendor }
                 .toList()
@@ -64,31 +75,33 @@ object RuleRepositoryExport {
                         "其它 (Other)" -> 1
                         else -> 2
                     }
-                }
+            }
             
             for ((vendor, vendorRules) in rulesByVendor) {
-                writer.writeLine("")
-                writer.writeLine("! ===========================================================================")
-                writer.writeLine("! ${vendor}")
-                writer.writeLine("! ===========================================================================")
-                writer.writeLine("")
+                appendLine("")
+                appendLine("! ===========================================================================")
+                appendLine("! ${vendor}")
+                appendLine("! ===========================================================================")
+                appendLine("")
                 
                 for (rule in vendorRules.sortedBy { it.domain }) {
                     val ruleLine = buildRuleLine(rule)
-                    writer.writeLine(ruleLine)
+                    appendLine(ruleLine)
                     exportedCount++
                 }
             }
             
-            writer.writeLine("")
-            writer.writeLine("! ===========================================================================")
-            writer.writeLine("! 导出完成")
-            writer.writeLine("! 总计：${exportedCount} 条规则")
-            writer.writeLine("! ===========================================================================")
+            appendLine("")
+            appendLine("! ===========================================================================")
+            appendLine("! 导出完成")
+            appendLine("! 总计：${exportedCount} 条规则")
+            appendLine("! ===========================================================================")
         }
         
-        return exportedCount
+        return ExportedRules(content, exportedCount)
     }
+
+    data class ExportedRules(val content: String, val count: Int)
     
     private fun buildRuleLine(rule: BlockRule): String {
         val parts = mutableListOf<String>()

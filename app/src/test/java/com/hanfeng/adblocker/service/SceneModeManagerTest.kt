@@ -19,7 +19,13 @@ class SceneModeManagerTest {
             "com.qidian.reader" to SceneMode.AGGRESSIVE,
             "com.jinjiang.app" to SceneMode.AGGRESSIVE,
             "com.fanqie.novel" to SceneMode.AGGRESSIVE,
-            "com.qimao.reader" to SceneMode.AGGRESSIVE
+            "com.qimao.reader" to SceneMode.AGGRESSIVE,
+            "com.hongguo.drama" to SceneMode.AGGRESSIVE,
+            "com.example.manga" to SceneMode.AGGRESSIVE,
+            "com.example.duanju" to SceneMode.AGGRESSIVE,
+            "com.example.shortdrama" to SceneMode.AGGRESSIVE,
+            "com.example.minidrama.episode" to SceneMode.AGGRESSIVE,
+            "com.example.audio.listen" to SceneMode.AGGRESSIVE
         )
         
         testCases.forEach { (packageName, expectedMode) ->

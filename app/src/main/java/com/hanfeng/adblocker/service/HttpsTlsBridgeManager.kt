@@ -695,7 +695,7 @@ object HttpsTlsBridgeManager {
                 socket.enabledProtocols = filteredProtocols.toTypedArray()
             }
         }
-        if (offeredAlpnProtocols.isNotEmpty()) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q && offeredAlpnProtocols.isNotEmpty()) {
             runCatching {
                 val parameters = socket.sslParameters ?: SSLParameters()
                 parameters.applicationProtocols = offeredAlpnProtocols.distinct().toTypedArray()
@@ -712,7 +712,7 @@ object HttpsTlsBridgeManager {
                 socket.enabledProtocols = filteredProtocols.toTypedArray()
             }
         }
-        if (offeredAlpnProtocols.isNotEmpty()) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q && offeredAlpnProtocols.isNotEmpty()) {
             runCatching {
                 val parameters = socket.sslParameters ?: SSLParameters()
                 parameters.applicationProtocols = offeredAlpnProtocols.distinct().toTypedArray()
@@ -740,6 +740,7 @@ object HttpsTlsBridgeManager {
     }
 
     private fun readApplicationProtocol(socket: SSLSocket): String? {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return null
         return runCatching { socket.applicationProtocol }.getOrNull()?.ifBlank { null }
     }
 

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.util.Log
 import java.lang.reflect.Method
+import java.util.concurrent.TimeUnit
 
 /**
  * Shizuku 增强工具 - 应用网络权限控制
@@ -84,8 +85,8 @@ class ShizukuNetworkPermissionController(private val context: Context) {
                 "appops set $packageName INTERNET ignore"
             }
             
-            val process = ProcessBuilder("su", "-c", command).start()
-            val exitCode = process.waitFor()
+            val result = runCommand(listOf("su", "-c", command))
+            val exitCode = result.exitCode
             
             if (exitCode == 0) {
                 Log.d(TAG, "Network ${if (enabled) "enabled" else "disabled"} for $packageName")
@@ -105,13 +106,39 @@ class ShizukuNetworkPermissionController(private val context: Context) {
      */
     fun isNetworkEnabled(packageName: String): Boolean {
         return try {
-            val process = ProcessBuilder("appops get $packageName INTERNET").start()
-            val result = process.inputStream.bufferedReader().readText()
-            result.contains("allow", ignoreCase = true) && !result.contains("ignore", ignoreCase = true)
+            val result = runCommand(listOf("appops", "get", packageName, "INTERNET"))
+            result.exitCode == 0 &&
+                result.output.contains("allow", ignoreCase = true) &&
+                !result.output.contains("ignore", ignoreCase = true)
         } catch (e: Exception) {
             true // 默认允许
         }
     }
+
+    private fun runCommand(command: List<String>, timeoutSeconds: Long = 8L): CommandResult {
+        return try {
+            val process = ProcessBuilder(command)
+                .redirectErrorStream(true)
+                .start()
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return CommandResult(-1, "timeout")
+            }
+            val output = process.inputStream.bufferedReader().use { reader ->
+                val buffer = CharArray(1024)
+                val read = reader.read(buffer)
+                if (read <= 0) "" else String(buffer, 0, read)
+            }
+            CommandResult(process.exitValue(), output)
+        } catch (e: Exception) {
+            CommandResult(-1, e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    private data class CommandResult(
+        val exitCode: Int,
+        val output: String
+    )
     
     /**
      * 获取应用网络状态

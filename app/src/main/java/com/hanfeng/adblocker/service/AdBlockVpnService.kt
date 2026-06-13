@@ -66,7 +66,6 @@ import com.HanFeng.security.CertificateAuthorityManager
 import com.HanFeng.security.TlsClientHelloParser
 import com.HanFeng.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
-import com.hanfeng.adblocker.service.SslPinningBypasser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -114,6 +113,9 @@ class AdBlockVpnService : VpnService() {
     private val httpsBridgeSocketCache = LinkedHashMap<String, HttpsBridgeSocketSession>(128, 0.75f, true)
     private val localProxyTcpFlowCache = LinkedHashMap<String, LocalProxyTcpFlow>(256, 0.75f, true)
     private val localProxyBridgeSocketCache = LinkedHashMap<String, LocalProxyBridgeSocketSession>(128, 0.75f, true)
+    private val passthroughTcpFlowCache = LinkedHashMap<String, PassthroughTcpFlow>(512, 0.75f, true)
+    private val passthroughTcpSocketCache = LinkedHashMap<String, PassthroughTcpSocketSession>(256, 0.75f, true)
+    private val passthroughUdpSessionCache = LinkedHashMap<String, PassthroughUdpSession>(256, 0.75f, true)
     private val localProxyTargetAppCache = ConcurrentHashMap<String, Boolean>(512)
     
     // HTTPS 增强：SSL Pinning 绕过
@@ -192,8 +194,14 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var localProxyTargetPackages: Set<String> = emptySet()
     @Volatile private var localProxyReachable: Boolean? = null
     @Volatile private var lightweightPassThroughMode = false
+    private val passthroughHealthLock = Any()
+    @Volatile private var mitmFullCaptureDisabledUntil = 0L
+    private var passthroughHealthWindowStartedAt = 0L
+    private var passthroughHealthAttempts = 0
+    private var passthroughHealthFailures = 0
     @Volatile private var networkCallbackRegistered = false
     @Volatile private var lastForegroundNotificationRefreshAt = 0L
+    @Volatile private var lastAppliedUnderlyingNetworkSummary: String? = null
     private var connectivityNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private val handledDnsHosts by lazy(LazyThreadSafetyMode.NONE) {
         setOf(localDnsV4, localDnsV6).mapNotNull { host ->
@@ -375,6 +383,7 @@ class AdBlockVpnService : VpnService() {
         registerNetworkMonitoringIfNeeded()
         invalidateDnsServerCache()
         refreshForegroundNotification()
+        lastAppliedUnderlyingNetworkSummary = null
         applyUnderlyingNetworks()
         probeLocalProxyCoexistAsync()
     }
@@ -485,6 +494,7 @@ class AdBlockVpnService : VpnService() {
         vpnInterface = nextInterface
         registerNetworkMonitoringIfNeeded()
         invalidateDnsServerCache()
+        lastAppliedUnderlyingNetworkSummary = null
         applyUnderlyingNetworks()
         packetJob = scope.launch {
             runCatching { runPacketLoop(tunGeneration) }
@@ -529,6 +539,7 @@ class AdBlockVpnService : VpnService() {
         cancelPacketLoop()
         activeTunGeneration += 1L
         unregisterNetworkMonitoring()
+        lastAppliedUnderlyingNetworkSummary = null
         vpnInterface?.close()
         vpnInterface = null
         clearRuntimeState()
@@ -659,6 +670,9 @@ class AdBlockVpnService : VpnService() {
         FlowCacheSupport.clear(httpsBridgeSocketCache) { it.close() }
         localProxyTcpFlowCache.clear()
         FlowCacheSupport.clear(localProxyBridgeSocketCache) { it.close() }
+        passthroughTcpFlowCache.clear()
+        FlowCacheSupport.clear(passthroughTcpSocketCache) { it.close() }
+        FlowCacheSupport.clear(passthroughUdpSessionCache) { it.close() }
         upstreamServerStates.clear()
         cachedDnsServers = null
         dnsSocketPool.forEach { (_, socket) -> socket.close() }
@@ -711,6 +725,7 @@ class AdBlockVpnService : VpnService() {
 
     private fun buildInterfaceInternal(stableMode: Boolean): ParcelFileDescriptor? {
         val localProxyFullCapture = shouldCaptureFullTrafficForLocalProxy()
+        val mitmFullCapture = shouldCaptureFullTrafficForMitm(stableMode)
         val builder = Builder()
             .setSession(getString(R.string.app_name))
             .setMtu(1500)
@@ -730,12 +745,13 @@ class AdBlockVpnService : VpnService() {
             builder.allowFamily(OsConstants.AF_INET6)
         }
 
-        if (localProxyFullCapture) {
+        if (localProxyFullCapture || mitmFullCapture) {
             runCatching {
                 builder.addRoute("0.0.0.0", 0)
                 builder.addRoute("::", 0)
             }.onFailure {
-                LogRepository.append(this, "Enable local proxy full-capture routes failed: ${it.message ?: it.javaClass.simpleName}")
+                val routeMode = if (localProxyFullCapture) "local proxy" else "MITM"
+                LogRepository.append(this, "Enable $routeMode full-capture routes failed: ${it.message ?: it.javaClass.simpleName}")
             }
         } else if (!stableMode) {
             blockedIpNetworks.forEach { network ->
@@ -796,6 +812,8 @@ class AdBlockVpnService : VpnService() {
 
         if (localProxyFullCapture) {
             LogRepository.append(this, "VPN established with local proxy full-capture routes")
+        } else if (mitmFullCapture) {
+            LogRepository.append(this, "VPN established with MITM full-capture routes")
         } else if (stableMode) {
             LogRepository.append(this, "VPN established with stable fallback mode")
         } else {
@@ -825,6 +843,8 @@ class AdBlockVpnService : VpnService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         val networks = currentUnderlyingNetworks()
         val summary = describeUnderlyingNetworks()
+        if (summary == lastAppliedUnderlyingNetworkSummary) return
+        lastAppliedUnderlyingNetworkSummary = summary
         runCatching { setUnderlyingNetworks(networks) }
             .onSuccess {
                 logDecisionOnce(
@@ -859,6 +879,7 @@ class AdBlockVpnService : VpnService() {
         return selected
             .sortedWith(compareByDescending<UnderlyingNetworkCandidate> { underlyingNetworkPriority(it.capabilities) }
                 .thenBy { it.network.hashCode() })
+            .take(1)
             .map { it.network }
     }
 
@@ -910,6 +931,7 @@ class AdBlockVpnService : VpnService() {
         val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                if (!isEligibleUnderlyingNetwork(connectivityManager, network)) return
                 handleUnderlyingNetworkChanged()
             }
 
@@ -918,15 +940,18 @@ class AdBlockVpnService : VpnService() {
             }
 
             override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                if (!isEligibleUnderlyingNetwork(networkCapabilities)) return
                 handleUnderlyingNetworkChanged()
             }
 
             override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                if (!isEligibleUnderlyingNetwork(connectivityManager, network)) return
                 handleUnderlyingNetworkChanged()
             }
         }
         val request = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             .build()
         runCatching {
             connectivityManager.registerNetworkCallback(request, callback)
@@ -968,6 +993,16 @@ class AdBlockVpnService : VpnService() {
             message = "Underlying networks updated after connectivity change summary=${describeUnderlyingNetworks()}",
             minIntervalMillis = 5_000L
         )
+    }
+
+    private fun isEligibleUnderlyingNetwork(connectivityManager: ConnectivityManager, network: Network): Boolean {
+        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+        return isEligibleUnderlyingNetwork(capabilities)
+    }
+
+    private fun isEligibleUnderlyingNetwork(capabilities: NetworkCapabilities): Boolean {
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
     }
 
     private fun invalidateDnsServerCache() {
@@ -1034,7 +1069,8 @@ class AdBlockVpnService : VpnService() {
         if (handleBlockedPacketTargets(info)) return
         if (handleDnsPacket(info, output, isUdp)) return
         if (handleLocalProxyPacket(info, isTcp, isUdp)) return
-        handleHttpDecryptPacket(info, output, isTcp, isUdp)
+        if (handleHttpDecryptPacket(info, output, isTcp, isUdp)) return
+        handlePassthroughPacket(info, isTcp, isUdp)
     }
 
     private fun shouldBypassPacketHandling(
@@ -1066,6 +1102,15 @@ class AdBlockVpnService : VpnService() {
         }
         findAdIpTarget(info)?.let { target ->
             StatsRepository.recordBlockedHttp(this, target.vendor, target.appName, 32 * 1024)
+            RuleRepository.reportUnknownVendorIfNeeded(
+                context = this,
+                vendor = target.vendor,
+                domain = target.domain,
+                appName = target.appName,
+                signal = RuleRepository.SuspiciousSignal.HTTP_FLOW,
+                confidenceBoost = 2,
+                matchedPathHint = "direct-ip:${formatAddress(info.destinationAddress)}:${info.destinationPort}"
+            )
             logDecisionOnce(
                 key = "ad-ip-block:${target.domain}:${formatAddress(info.destinationAddress)}:${info.destinationPort}",
                 message = "Blocked ad IP flow ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} domain=${target.domain} app=${target.appName} vendor=${target.vendor} source=${target.source}",
@@ -1160,15 +1205,18 @@ class AdBlockVpnService : VpnService() {
         
         val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
         val addresses = DnsMessageParser.extractAnswerAddresses(upstreamResponse, question)
+        val protectedQuestion = isProtectedTrafficDomain(question.domain) ||
+            RuleRepository.isWhitelistedDomain(question.domain) ||
+            RuleRepository.isSensitiveAuthDomain(question.domain)
         
         // 先缓存 IP 和目标信息（无论是否拦截）
-        if (addresses.isNotEmpty()) {
+        if (addresses.isNotEmpty() && !protectedQuestion) {
             rememberQuicTargets(question, upstreamResponse, appName, vendor)
             rememberHttpDecryptTargets(question, upstreamResponse, appName, vendor)
             rememberHttpsDecryptTargets(question, upstreamResponse, appName, vendor)
             rememberAdIpTargets(question, upstreamResponse, appName, vendor)
         }
-        if (aliasTargets.isNotEmpty()) {
+        if (aliasTargets.isNotEmpty() && !protectedQuestion) {
             rememberHttpDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
             rememberHttpsDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
             rememberQuicAliasTargets(question, aliasTargets, upstreamResponse, appName)
@@ -1176,7 +1224,7 @@ class AdBlockVpnService : VpnService() {
         }
         
         // 规则匹配检查：命中规则则拦截
-        if (domainContext.matchedRule != null) {
+        if (domainContext.matchedRule != null && !protectedQuestion) {
             output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
             StatsRepository.recordBlockedDns(this, vendor, appName, 512)
             logDecisionOnce(
@@ -1287,7 +1335,7 @@ class AdBlockVpnService : VpnService() {
         isUdp: Boolean
     ): Boolean {
         if (httpDecryptEnabled && shouldBlockEncryptedDnsDirectFlow(info)) return true
-        if (!httpDecryptEnabled) return true
+        if (!httpDecryptEnabled) return false
         if (isTcp) {
             if (shouldBlockHttpDecryptConnection(info)) return true
             observeHttpsClientHello(info)
@@ -1363,6 +1411,134 @@ class AdBlockVpnService : VpnService() {
             minIntervalMillis = 30_000L
         )
         return true
+    }
+
+    private fun handlePassthroughPacket(
+        info: com.HanFeng.model.PacketInfo,
+        isTcp: Boolean,
+        isUdp: Boolean
+    ): Boolean {
+        if (!isFullCaptureRoutingActive()) return false
+        if (isTcp) return handlePassthroughTcpPacket(info)
+        if (isUdp) return handlePassthroughUdpPacket(info)
+        return false
+    }
+
+    private fun handlePassthroughTcpPacket(info: com.HanFeng.model.PacketInfo): Boolean {
+        if (info.destinationPort <= 0) return false
+        val flowKey = buildCacheKeys(info).flowKey
+        if (info.tcpFlags.hasTcpFlag(TCP_FLAG_SYN) && !info.tcpFlags.hasTcpFlag(TCP_FLAG_ACK)) {
+            trackPassthroughTcpFlow(flowKey, info)
+        }
+        return executeCachedSyntheticHandshake(
+            info = info,
+            flowCache = passthroughTcpFlowCache,
+            flowKey = flowKey,
+            destinationPort = 443,
+            buildHandlers = { packetState, activeCurrent ->
+                buildPassthroughHandshakeHandlers(
+                    flowKey = flowKey,
+                    current = activeCurrent,
+                    info = info,
+                    sequenceNumber = packetState.sequenceNumber,
+                    acknowledgementNumber = packetState.acknowledgementNumber,
+                    payloadLength = packetState.payloadLength,
+                    now = packetState.now
+                )
+            }
+        )
+    }
+
+    private fun handlePassthroughUdpPacket(info: com.HanFeng.model.PacketInfo): Boolean {
+        if (info.destinationPort <= 0 || info.destinationPort == 53) return false
+        val flowKey = buildCacheKeys(info).flowKey
+        val session = ensurePassthroughUdpSession(flowKey, info) ?: return true
+        scope.launch {
+            runCatching {
+                session.socket.send(DatagramPacket(info.payload, info.payload.size))
+                recordPassthroughSuccess("udp-write")
+            }.onFailure { error ->
+                recordPassthroughFailure("udp-write", "target=${session.targetIp}:${session.targetPort} error=${error.message ?: error.javaClass.simpleName}")
+                closePassthroughUdpSession(flowKey, "Forward passthrough UDP failed target=${session.targetIp}:${session.targetPort} error=${error.message ?: error.javaClass.simpleName}")
+            }
+        }
+        return true
+    }
+
+    private fun ensurePassthroughUdpSession(flowKey: String, info: com.HanFeng.model.PacketInfo): PassthroughUdpSession? {
+        synchronized(passthroughUdpSessionCache) {
+            passthroughUdpSessionCache[flowKey]?.let { existing ->
+                passthroughUdpSessionCache[flowKey] = existing.copy(lastSeenAt = System.currentTimeMillis())
+                return existing
+            }
+        }
+        val targetIp = formatAddress(info.destinationAddress)
+        val socket = runCatching {
+            DatagramSocket().apply {
+                soTimeout = PASSTHROUGH_UDP_READ_TIMEOUT_MILLIS
+                if (!protect(this)) {
+                    LogRepository.append(this@AdBlockVpnService, "Protect passthrough UDP socket failed target=$targetIp:${info.destinationPort}")
+                    recordPassthroughFailure("udp-protect", "target=$targetIp:${info.destinationPort}")
+                }
+                connect(InetAddress.getByAddress(info.destinationAddress), info.destinationPort)
+            }
+        }.getOrElse { error ->
+            recordPassthroughFailure("udp-connect", "target=$targetIp:${info.destinationPort} error=${error.message ?: error.javaClass.simpleName}")
+            logDecisionOnce(
+                key = "passthrough-udp-connect-failed:$targetIp:${info.destinationPort}",
+                message = "Connect passthrough UDP failed target=$targetIp:${info.destinationPort} error=${error.message ?: error.javaClass.simpleName}",
+                minIntervalMillis = 10_000L
+            )
+            return null
+        }
+        recordPassthroughSuccess("udp-connect")
+        val session = PassthroughUdpSession(
+            flowKey = flowKey,
+            requestTemplate = info,
+            socket = socket,
+            targetIp = targetIp,
+            targetPort = info.destinationPort,
+            lastSeenAt = System.currentTimeMillis()
+        )
+        FlowCacheSupport.putPruned(passthroughUdpSessionCache, flowKey, session, 256)
+        scope.launch { runPassthroughUdpReader(session) }
+        return session
+    }
+
+    private fun runPassthroughUdpReader(session: PassthroughUdpSession) {
+        val buffer = ByteArray(16 * 1024)
+        while (scope.isActive && isRunning) {
+            val packet = DatagramPacket(buffer, buffer.size)
+            val count = try {
+                session.socket.receive(packet)
+                packet.length
+            } catch (_: java.net.SocketTimeoutException) {
+                if (System.currentTimeMillis() - session.lastSeenAt > PASSTHROUGH_UDP_IDLE_TIMEOUT_MILLIS) break
+                continue
+            } catch (error: Exception) {
+                recordPassthroughFailure("udp-read", "target=${session.targetIp}:${session.targetPort} error=${error.message ?: error.javaClass.simpleName}")
+                logDecisionOnce(
+                    key = "passthrough-udp-read-failed:${session.flowKey}",
+                    message = "Read passthrough UDP failed target=${session.targetIp}:${session.targetPort} error=${error.message ?: error.javaClass.simpleName}",
+                    minIntervalMillis = 10_000L
+                )
+                break
+            }
+            if (count > 0) {
+                recordPassthroughSuccess("udp-read")
+                writeTunPacket(PacketCodec.buildUdpResponse(session.requestTemplate, packet.data.copyOf(count)))
+            }
+        }
+        closePassthroughUdpSession(session.flowKey, "Closed passthrough UDP session target=${session.targetIp}:${session.targetPort}")
+    }
+
+    private fun closePassthroughUdpSession(flowKey: String, message: String) {
+        FlowCacheSupport.remove(passthroughUdpSessionCache, flowKey)?.close()
+        logDecisionOnce(
+            key = buildBridgeCloseLogKey("passthrough-udp", flowKey),
+            message = message,
+            minIntervalMillis = 5_000L
+        )
     }
 
     private fun observeLocalProxyUdpFlow(info: com.HanFeng.model.PacketInfo) {
@@ -1769,6 +1945,16 @@ class AdBlockVpnService : VpnService() {
         writeServerPayloadSegments(request, clientAck, segments)
     }
 
+    private fun resendPendingPassthroughTcpPayload(
+        request: com.HanFeng.model.PacketInfo,
+        flow: PassthroughTcpFlow,
+        segments: List<PendingServerSegment>
+    ) {
+        if (segments.isEmpty()) return
+        val clientAck = flow.clientNextSequence ?: ((flow.clientInitialSequence ?: 0L) + 1)
+        writeServerPayloadSegments(request, clientAck, segments)
+    }
+
     private fun ensureLocalProxyBridgeSocket(flowKey: String, flow: LocalProxyTcpFlow, request: com.HanFeng.model.PacketInfo) {
         ensureBridgeSocketConnected(
             sessionCache = localProxyBridgeSocketCache,
@@ -1821,6 +2007,184 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
+    private fun trackPassthroughTcpFlow(flowKey: String, info: com.HanFeng.model.PacketInfo) {
+        val targetIp = formatAddress(info.destinationAddress)
+        val appName = resolveDestinationAppContext(info)?.appName ?: "未知应用"
+        synchronized(passthroughTcpFlowCache) {
+            val current = passthroughTcpFlowCache[flowKey]
+            FlowCacheSupport.putPruned(
+                cache = passthroughTcpFlowCache,
+                key = flowKey,
+                value = PassthroughTcpFlow(
+                    flowKey = flowKey,
+                    targetIp = targetIp,
+                    targetPort = info.destinationPort,
+                    sourcePort = info.sourcePort,
+                    appName = appName,
+                    state = resolveLocalProxyTcpFlowState(current?.state, info.tcpFlags, info.payload.isNotEmpty()),
+                    clientInitialSequence = current?.clientInitialSequence,
+                    serverInitialSequence = current?.serverInitialSequence,
+                    clientNextSequence = current?.clientNextSequence,
+                    serverNextSequence = current?.serverNextSequence,
+                    lastServerPayloadSequence = current?.lastServerPayloadSequence,
+                    lastServerPayload = current?.lastServerPayload,
+                    pendingServerSegments = current?.pendingServerSegments.orEmpty(),
+                    bufferedClientSegments = current?.bufferedClientSegments.orEmpty(),
+                    lastClientPayloadSequence = current?.lastClientPayloadSequence,
+                    lastClientPayloadLength = current?.lastClientPayloadLength,
+                    lastSequenceNumber = info.tcpSequenceNumber,
+                    lastAcknowledgementNumber = info.tcpAcknowledgementNumber,
+                    lastSeenAt = System.currentTimeMillis()
+                ),
+                maxSize = 512
+            )
+        }
+    }
+
+    private fun ensurePassthroughTcpSocket(flowKey: String, flow: PassthroughTcpFlow, request: com.HanFeng.model.PacketInfo) {
+        ensureBridgeSocketConnected(
+            sessionCache = passthroughTcpSocketCache,
+            flowKey = flowKey,
+            bridgeHost = flow.targetIp,
+            bridgePort = flow.targetPort,
+            connectBridge = { host, port ->
+                BridgeSocketSupport.createConnectedSocket(
+                    host = host,
+                    port = port,
+                    timeoutMillis = PASSTHROUGH_TCP_CONNECT_TIMEOUT_MILLIS,
+                    protect = this@AdBlockVpnService::protect,
+                    onProtectFailed = {
+                        logBridgeProtectFailure("passthrough TCP socket", flowKey, "target=${flow.targetIp}:${flow.targetPort}")
+                        recordPassthroughFailure("tcp-protect", "target=${flow.targetIp}:${flow.targetPort}")
+                    }
+                )
+            },
+            createSession = { socket ->
+                PassthroughTcpSocketSession(
+                    flowKey = flowKey,
+                    requestTemplate = request,
+                    socket = socket,
+                    input = socket.getInputStream(),
+                    output = socket.getOutputStream()
+                )
+            },
+            onConnected = { session, _ ->
+                recordPassthroughSuccess("tcp-connect")
+                flushBufferedPassthroughPayload(flowKey)
+                scope.launch { runPassthroughTcpReader(session) }
+                logBridgeConnected("passthrough TCP socket", flowKey, "target=${flow.targetIp}:${flow.targetPort} app=${flow.appName}")
+            },
+            onFailure = buildPassthroughTcpFailureHandler(
+                action = "Connect passthrough TCP failed",
+                flowKey = flowKey,
+                request = request,
+                stage = "connect",
+                target = "${flow.targetIp}:${flow.targetPort}"
+            )
+        )
+    }
+
+    private fun forwardPayloadToPassthroughTcp(flowKey: String, payload: ByteArray) {
+        forwardPayloadToBridge(
+            sessionCache = passthroughTcpSocketCache,
+            flowKey = flowKey,
+            payload = payload,
+            writePayload = { session, bytes -> session.output.write(bytes) },
+            onFailure = buildSessionBridgeFailureHandler(
+                failureHandlerOfRequest = { request ->
+                    buildPassthroughTcpFailureHandler(
+                        action = "Forward passthrough TCP payload failed",
+                        flowKey = flowKey,
+                        request = request,
+                        stage = "write"
+                    )
+                },
+                requestOfSession = { it.requestTemplate }
+            )
+        )
+    }
+
+    private fun flushBufferedPassthroughPayload(flowKey: String) {
+        val segmentsToFlush = synchronized(passthroughTcpFlowCache) {
+            val current = passthroughTcpFlowCache[flowKey] ?: return
+            val flushResult = BridgeFlowStateSupport.flushBufferedClientPayload(
+                flow = current,
+                bufferedSegments = current.bufferedClientSegments,
+                lastSequenceOf = { it.sequenceNumber },
+                payloadSizeOf = { it.payload.size },
+                now = System.currentTimeMillis(),
+                updateFlow = ::updateFlushedPassthroughBufferedPayloadFlow
+            )
+            passthroughTcpFlowCache[flowKey] = flushResult.nextFlow ?: current
+            flushResult.forwardSegments
+        }
+        segmentsToFlush.forEach { segment ->
+            forwardPayloadToPassthroughTcp(flowKey, segment.payload)
+        }
+    }
+
+    private fun runPassthroughTcpReader(session: PassthroughTcpSocketSession) {
+        runBridgeReaderConfigured(
+            session = session,
+            input = session.input,
+            flowKey = session.flowKey,
+            config = buildPassthroughTcpReaderConfig(session)
+        )
+    }
+
+    private fun emitPassthroughTcpPayload(flowKey: String, request: com.HanFeng.model.PacketInfo, payload: ByteArray) {
+        recordPassthroughSuccess("tcp-read")
+        val selectors = BridgeFlowSelectors<PassthroughTcpFlow>(
+            sequence = passthroughSequenceSelectors(),
+            pendingSegmentsOf = { it.pendingServerSegments }
+        )
+        emitBridgePayloadCommon(
+            flowCache = passthroughTcpFlowCache,
+            flowKey = flowKey,
+            request = request,
+            payload = payload,
+            selectors = selectors,
+            onOverflow = {
+                emitPassthroughTcpReset(flowKey, request, "Pending server window overflow target=${it.targetIp}:${it.targetPort}")
+            },
+            updateFlow = ::updatePassthroughBridgePayloadFlow
+        )
+    }
+
+    private fun emitPassthroughTcpFin(flowKey: String, request: com.HanFeng.model.PacketInfo) {
+        emitBridgeFinCommon(
+            flowCache = passthroughTcpFlowCache,
+            flowKey = flowKey,
+            request = request,
+            selectors = BridgeFlowSelectors(
+                sequence = passthroughSequenceSelectors(),
+                stateOf = { it.state }
+            ),
+            updateFlow = ::updatePassthroughBridgeFinFlow
+        )
+    }
+
+    private fun emitPassthroughTcpReset(flowKey: String, request: com.HanFeng.model.PacketInfo, message: String) {
+        emitBridgeResetCommon(
+            flowCache = passthroughTcpFlowCache,
+            flowKey = flowKey,
+            request = request,
+            message = message,
+            selectors = BridgeFlowSelectors(sequence = passthroughSequenceSelectors()),
+            closeFlow = ::closePassthroughTcpFlow
+        )
+    }
+
+    private fun closePassthroughTcpFlow(flowKey: String, message: String) {
+        closeBridgeFlowCommon(
+            flowCache = passthroughTcpFlowCache,
+            sessionCache = passthroughTcpSocketCache,
+            flowKey = flowKey,
+            message = message,
+            logKey = buildBridgeCloseLogKey("passthrough-tcp", flowKey)
+        )
+    }
+
 
     private fun handleHttpsProxyHandshake(info: com.HanFeng.model.PacketInfo, output: FileOutputStream): Boolean {
         val flowKey = buildCacheKeys(info).flowKey
@@ -1868,6 +2232,7 @@ class AdBlockVpnService : VpnService() {
         return when (current) {
             is LocalProxyTcpFlow -> current.state
             is HttpsProxyFlow -> current.state
+            is PassthroughTcpFlow -> current.state
             else -> ""
         }
     }
@@ -1995,6 +2360,24 @@ class AdBlockVpnService : VpnService() {
         }
     }
 
+    private fun buildPassthroughTcpFailureHandler(
+        action: String,
+        flowKey: String,
+        request: com.HanFeng.model.PacketInfo,
+        stage: String,
+        target: String? = null
+    ): (Throwable) -> Unit {
+        return { error ->
+            recordPassthroughFailure("tcp-$stage", "target=${target ?: resolvePassthroughTcpTarget(flowKey)} error=${error.message ?: error.javaClass.simpleName}")
+            logBridgeFailure(action, flowKey, error)
+            emitPassthroughTcpReset(
+                flowKey = flowKey,
+                request = request,
+                message = "Bridge $stage reset passthrough TCP target=${target ?: resolvePassthroughTcpTarget(flowKey)}"
+            )
+        }
+    }
+
     private fun <TSession> buildSessionBridgeFailureHandler(
         failureHandlerOfRequest: (com.HanFeng.model.PacketInfo) -> (Throwable) -> Unit,
         requestOfSession: (TSession) -> com.HanFeng.model.PacketInfo
@@ -2045,6 +2428,12 @@ class AdBlockVpnService : VpnService() {
 
     private fun buildHttpsFlowLabel(domain: String): String {
         return "HTTPS proxy flow domain=$domain"
+    }
+
+    private fun resolvePassthroughTcpTarget(flowKey: String): String {
+        return synchronized(passthroughTcpFlowCache) {
+            passthroughTcpFlowCache[flowKey]?.let { "${it.targetIp}:${it.targetPort}" }
+        } ?: "unknown"
     }
 
     private fun buildLocalProxyResetMessage(stage: String, target: String): String {
@@ -2188,6 +2577,31 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
+    private fun updatePassthroughBridgePayloadFlow(
+        flowState: PassthroughTcpFlow,
+        pendingSegments: List<PendingServerSegment>,
+        serverNextSequence: Long,
+        lastServerPayloadSequence: Long,
+        lastServerPayload: ByteArray,
+        lastSeenAt: Long
+    ): PassthroughTcpFlow {
+        val payloadState = buildBridgePayloadState(
+            pendingSegments = pendingSegments,
+            serverNextSequence = serverNextSequence,
+            lastServerPayloadSequence = lastServerPayloadSequence,
+            lastServerPayload = lastServerPayload,
+            lastSeenAt = lastSeenAt
+        )
+        return flowState.copy(
+            state = payloadState.state,
+            serverNextSequence = payloadState.serverNextSequence,
+            lastServerPayloadSequence = payloadState.lastServerPayloadSequence,
+            lastServerPayload = payloadState.lastServerPayload,
+            pendingServerSegments = payloadState.pendingServerSegments,
+            lastSeenAt = payloadState.lastSeenAt
+        )
+    }
+
     private fun updateHttpsBridgeFinFlow(
         flowState: HttpsProxyFlow,
         transition: BridgeTerminalStateSupport.BridgeFinTransition
@@ -2204,6 +2618,18 @@ class AdBlockVpnService : VpnService() {
         flowState: LocalProxyTcpFlow,
         transition: BridgeTerminalStateSupport.BridgeFinTransition
     ): LocalProxyTcpFlow {
+        val finState = buildBridgeFinState(transition)
+        return flowState.copy(
+            state = finState.state,
+            serverNextSequence = finState.serverNextSequence,
+            lastSeenAt = finState.lastSeenAt
+        )
+    }
+
+    private fun updatePassthroughBridgeFinFlow(
+        flowState: PassthroughTcpFlow,
+        transition: BridgeTerminalStateSupport.BridgeFinTransition
+    ): PassthroughTcpFlow {
         val finState = buildBridgeFinState(transition)
         return flowState.copy(
             state = finState.state,
@@ -2234,6 +2660,17 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
+    private fun updatePassthroughBridgeSocketClosedFlow(
+        flowState: PassthroughTcpFlow,
+        lastSeenAt: Long
+    ): PassthroughTcpFlow {
+        val closedState = buildBridgeSocketClosedState(lastSeenAt)
+        return flowState.copy(
+            state = closedState.state,
+            lastSeenAt = closedState.lastSeenAt
+        )
+    }
+
     private fun updateFlushedLocalProxyBufferedPayloadFlow(
         flowState: LocalProxyTcpFlow,
         bufferedSegments: List<ClientPayloadSegment>,
@@ -2241,6 +2678,22 @@ class AdBlockVpnService : VpnService() {
         lastLength: Long?,
         lastSeenAt: Long
     ): LocalProxyTcpFlow {
+        return flowState.copy(
+            state = "established",
+            bufferedClientSegments = bufferedSegments,
+            lastClientPayloadSequence = lastSequence ?: flowState.lastClientPayloadSequence,
+            lastClientPayloadLength = lastLength ?: flowState.lastClientPayloadLength,
+            lastSeenAt = lastSeenAt
+        )
+    }
+
+    private fun updateFlushedPassthroughBufferedPayloadFlow(
+        flowState: PassthroughTcpFlow,
+        bufferedSegments: List<ClientPayloadSegment>,
+        lastSequence: Long?,
+        lastLength: Long?,
+        lastSeenAt: Long
+    ): PassthroughTcpFlow {
         return flowState.copy(
             state = "established",
             bufferedClientSegments = bufferedSegments,
@@ -2901,6 +3354,29 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
+    private fun applyPassthroughSynAckState(
+        flowState: PassthroughTcpFlow,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        serverSequenceNumber: Long,
+        lastSeenAt: Long
+    ): PassthroughTcpFlow {
+        val synAckState = buildSyntheticSynAckState(
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            serverSequenceNumber = serverSequenceNumber,
+            lastSeenAt = lastSeenAt
+        )
+        return flowState.copy(
+            state = "syn_ack_sent",
+            clientInitialSequence = synAckState.sequenceNumber,
+            serverInitialSequence = synAckState.serverSequenceNumber,
+            lastSequenceNumber = synAckState.sequenceNumber,
+            lastAcknowledgementNumber = synAckState.acknowledgementNumber,
+            lastSeenAt = synAckState.lastSeenAt
+        )
+    }
+
     private data class SyntheticAckEstablishedState(
         val state: String,
         val sequenceNumber: Long,
@@ -2949,6 +3425,27 @@ class AdBlockVpnService : VpnService() {
         acknowledgementNumber: Long,
         now: Long
     ): HttpsProxyFlow {
+        val establishedState = buildSyntheticAckEstablishedState(
+            state = "established",
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            now = now
+        )
+        return flowState.copy(
+            state = establishedState.state,
+            lastSequenceNumber = establishedState.sequenceNumber,
+            lastAcknowledgementNumber = establishedState.acknowledgementNumber,
+            clientNextSequence = establishedState.sequenceNumber,
+            lastSeenAt = establishedState.lastSeenAt
+        )
+    }
+
+    private fun applyPassthroughAckEstablishedState(
+        flowState: PassthroughTcpFlow,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long
+    ): PassthroughTcpFlow {
         val establishedState = buildSyntheticAckEstablishedState(
             state = "established",
             sequenceNumber = sequenceNumber,
@@ -3129,6 +3626,23 @@ class AdBlockVpnService : VpnService() {
         }
     }
 
+    private fun applySyntheticAckedServerState(
+        flowState: PassthroughTcpFlow,
+        nextAckState: ServerAckStateSupport.AckStateTransition
+    ): PassthroughTcpFlow {
+        return applySyntheticAckedServerState(flowState, nextAckState) { activeFlowState, activeAckState ->
+            buildSyntheticAckedServerState(activeAckState) { state, lastSequenceNumber, lastAcknowledgementNumber, lastSeenAt ->
+                activeFlowState.copy(
+                    state = state,
+                    pendingServerSegments = emptyList(),
+                    lastSequenceNumber = lastSequenceNumber,
+                    lastAcknowledgementNumber = lastAcknowledgementNumber,
+                    lastSeenAt = lastSeenAt
+                )
+            }
+        }
+    }
+
     private fun applySyntheticClientFinState(
         flowState: LocalProxyTcpFlow,
         transition: BridgeLifecycleSupport.ClientFinTransition,
@@ -3165,6 +3679,36 @@ class AdBlockVpnService : VpnService() {
         sequenceNumber: Long,
         acknowledgementNumber: Long
     ): HttpsProxyFlow {
+        return applySyntheticClientFinState(flowState, transition, sequenceNumber, acknowledgementNumber) {
+                activeFlowState,
+                activeTransition,
+                activeSequenceNumber,
+                activeAcknowledgementNumber ->
+            buildSyntheticClientFinState(activeTransition, activeSequenceNumber, activeAcknowledgementNumber) {
+                    state,
+                    lastSequenceNumber,
+                    lastAcknowledgementNumber,
+                    serverNextSequence,
+                    clientNextSequence,
+                    lastSeenAt ->
+                activeFlowState.copy(
+                    state = state,
+                    lastSequenceNumber = lastSequenceNumber,
+                    lastAcknowledgementNumber = lastAcknowledgementNumber,
+                    serverNextSequence = serverNextSequence,
+                    clientNextSequence = clientNextSequence,
+                    lastSeenAt = lastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applySyntheticClientFinState(
+        flowState: PassthroughTcpFlow,
+        transition: BridgeLifecycleSupport.ClientFinTransition,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long
+    ): PassthroughTcpFlow {
         return applySyntheticClientFinState(flowState, transition, sequenceNumber, acknowledgementNumber) {
                 activeFlowState,
                 activeTransition,
@@ -3209,6 +3753,21 @@ class AdBlockVpnService : VpnService() {
         updatedBufferedSegments: List<ClientPayloadSegment>,
         now: Long
     ): HttpsProxyFlow {
+        return applyBufferedClientSegmentsState(flowState, updatedBufferedSegments, now) { activeFlowState, bufferedClientSegments, lastSeenAt ->
+            buildBufferedClientSegmentsState(bufferedClientSegments, lastSeenAt) { nextBufferedClientSegments, nextLastSeenAt ->
+                activeFlowState.copy(
+                    bufferedClientSegments = nextBufferedClientSegments,
+                    lastSeenAt = nextLastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applyBufferedClientSegmentsState(
+        flowState: PassthroughTcpFlow,
+        updatedBufferedSegments: List<ClientPayloadSegment>,
+        now: Long
+    ): PassthroughTcpFlow {
         return applyBufferedClientSegmentsState(flowState, updatedBufferedSegments, now) { activeFlowState, bufferedClientSegments, lastSeenAt ->
             buildBufferedClientSegmentsState(bufferedClientSegments, lastSeenAt) { nextBufferedClientSegments, nextLastSeenAt ->
                 activeFlowState.copy(
@@ -3239,6 +3798,21 @@ class AdBlockVpnService : VpnService() {
         remainingSegments: List<PendingServerSegment>,
         now: Long
     ): HttpsProxyFlow {
+        return applyRetransmittedServerSegmentsState(flowState, remainingSegments, now) { activeFlowState, pendingServerSegments, lastSeenAt ->
+            buildRetransmittedServerSegmentsState(pendingServerSegments, lastSeenAt) { nextPendingServerSegments, nextLastSeenAt ->
+                activeFlowState.copy(
+                    pendingServerSegments = nextPendingServerSegments,
+                    lastSeenAt = nextLastSeenAt
+                )
+            }
+        }
+    }
+
+    private fun applyRetransmittedServerSegmentsState(
+        flowState: PassthroughTcpFlow,
+        remainingSegments: List<PendingServerSegment>,
+        now: Long
+    ): PassthroughTcpFlow {
         return applyRetransmittedServerSegmentsState(flowState, remainingSegments, now) { activeFlowState, pendingServerSegments, lastSeenAt ->
             buildRetransmittedServerSegmentsState(pendingServerSegments, lastSeenAt) { nextPendingServerSegments, nextLastSeenAt ->
                 activeFlowState.copy(
@@ -3296,6 +3870,35 @@ class AdBlockVpnService : VpnService() {
                 flushResult = flushResult,
                 bridgeConnected = bridgeConnected
             ),
+            lastClientPayloadSequence = resolveClientPayloadSequence(
+                flowSequence = flowState.lastClientPayloadSequence,
+                lastForwardedSegment = lastForwardedSegment,
+                bridgeConnected = bridgeConnected
+            ),
+            lastClientPayloadLength = resolveClientPayloadLength(
+                flowLength = flowState.lastClientPayloadLength,
+                lastForwardedSegment = lastForwardedSegment,
+                bridgeConnected = bridgeConnected
+            ),
+            lastSeenAt = now
+        )
+    }
+
+    private fun applyPassthroughClientPayloadState(
+        flowState: PassthroughTcpFlow,
+        flushResult: ClientPayloadReplaySupport.DrainResult<ClientPayloadSegment>,
+        bridgeConnected: Boolean,
+        lastForwardedSegment: ClientPayloadSegment?,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long
+    ): PassthroughTcpFlow {
+        return flowState.copy(
+            state = resolveClientPayloadState(bridgeConnected),
+            lastSequenceNumber = sequenceNumber,
+            lastAcknowledgementNumber = acknowledgementNumber,
+            clientNextSequence = flushResult.nextExpectedSequence,
+            bufferedClientSegments = resolveClientPayloadBufferedSegments(flushResult, bridgeConnected),
             lastClientPayloadSequence = resolveClientPayloadSequence(
                 flowSequence = flowState.lastClientPayloadSequence,
                 lastForwardedSegment = lastForwardedSegment,
@@ -3405,6 +4008,29 @@ class AdBlockVpnService : VpnService() {
             },
             closeSession = { it.close() },
             updateFlow = ::updateLocalProxyBridgeSocketClosedFlow
+        )
+    }
+
+    private fun buildPassthroughTcpReaderConfig(
+        session: PassthroughTcpSocketSession
+    ): BridgeReaderConfig<PassthroughTcpSocketSession, PassthroughTcpFlow> {
+        return BridgeReaderConfig(
+            flowCache = passthroughTcpFlowCache,
+            sessionCache = passthroughTcpSocketCache,
+            onPayload = { payload ->
+                emitPassthroughTcpPayload(session.flowKey, session.requestTemplate, payload)
+            },
+            onFailure = buildPassthroughTcpFailureHandler(
+                action = "Read passthrough TCP payload failed",
+                flowKey = session.flowKey,
+                request = session.requestTemplate,
+                stage = "read"
+            ),
+            onResetNotSent = {
+                emitPassthroughTcpFin(session.flowKey, session.requestTemplate)
+            },
+            closeSession = { it.close() },
+            updateFlow = ::updatePassthroughBridgeSocketClosedFlow
         )
     }
 
@@ -3762,6 +4388,20 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
+    private fun closePassthroughTcpFlowForHandshake(
+        flowKey: String,
+        current: PassthroughTcpFlow,
+        action: SyntheticFlowCloseAction
+    ): Boolean {
+        return closeSyntheticFlowForHandshake(
+            flowKey = flowKey,
+            current = current,
+            action = action,
+            buildMessage = ::buildPassthroughTcpFlowCloseMessage,
+            closeFlow = ::closePassthroughTcpFlow
+        )
+    }
+
     private fun closeSyntheticFlowForHandshake(
         flowKey: String,
         message: String,
@@ -3822,6 +4462,19 @@ class AdBlockVpnService : VpnService() {
             bridgeFinMessage = "Closed bridge-finished ${buildHttpsFlowLabel(current.domain)}",
             closedMessage = "Closed synthetic ${buildHttpsFlowLabel(current.domain)}",
             resetMessage = "Reset synthetic ${buildHttpsFlowLabel(current.domain)}"
+        )
+    }
+
+    private fun buildPassthroughTcpFlowCloseMessage(
+        current: PassthroughTcpFlow,
+        action: SyntheticFlowCloseAction
+    ): String {
+        val target = "${current.targetIp}:${current.targetPort}"
+        return buildSyntheticFlowCloseMessage(
+            action = action,
+            bridgeFinMessage = "Closed bridge-finished passthrough TCP target=$target",
+            closedMessage = "Closed synthetic passthrough TCP target=$target",
+            resetMessage = "Reset synthetic passthrough TCP target=$target"
         )
     }
 
@@ -3900,6 +4553,14 @@ class AdBlockVpnService : VpnService() {
         closeHttpsFlowForHandshake(flowKey, current, action)
     }
 
+    private fun closePassthroughTcpFlowAction(
+        flowKey: String,
+        current: PassthroughTcpFlow,
+        action: SyntheticFlowCloseAction
+    ): () -> Boolean = buildCloseFlowAction {
+        closePassthroughTcpFlowForHandshake(flowKey, current, action)
+    }
+
     private fun buildLocalProxyCloseActions(
         flowKey: String,
         current: LocalProxyTcpFlow
@@ -3912,6 +4573,13 @@ class AdBlockVpnService : VpnService() {
         current: HttpsProxyFlow
     ): SyntheticHandshakeCloseActions {
         return buildSyntheticCloseActions(flowKey = flowKey, current = current, closeFlowAction = ::closeHttpsFlowAction)
+    }
+
+    private fun buildPassthroughTcpCloseActions(
+        flowKey: String,
+        current: PassthroughTcpFlow
+    ): SyntheticHandshakeCloseActions {
+        return buildSyntheticCloseActions(flowKey = flowKey, current = current, closeFlowAction = ::closePassthroughTcpFlowAction)
     }
 
     private fun buildHttpsHandshakeCallbacks(
@@ -3986,6 +4654,63 @@ class AdBlockVpnService : VpnService() {
             acknowledgementNumber = acknowledgementNumber,
             payloadLength = payloadLength,
             now = now
+        )
+    }
+
+    private fun buildPassthroughHandshakeConfig(
+        flowKey: String,
+        current: PassthroughTcpFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        now: Long
+    ): SyntheticHandshakeAssemblyConfig<PassthroughTcpFlow, PassthroughTcpSocketSession> {
+        return SyntheticHandshakeAssemblyConfig(
+            flowCache = passthroughTcpFlowCache,
+            sessionCache = passthroughTcpSocketCache,
+            selectors = buildSyntheticFlowSelectors(
+                sequence = passthroughSequenceSelectors(),
+                bufferedSegmentsOf = { it.bufferedClientSegments },
+                lastClientPayloadSequenceOf = { it.lastClientPayloadSequence },
+                lastClientPayloadLengthOf = { it.lastClientPayloadLength },
+                pendingSegmentsOf = { it.pendingServerSegments },
+                stateOf = { it.state }
+            ),
+            ensureBridge = {
+                ensurePassthroughTcpSocket(flowKey, current, info)
+            },
+            isBridgeConnected = { isPassthroughTcpConnected(flowKey) },
+            forwardPayload = { payload -> forwardPayloadToPassthroughTcp(flowKey, payload) },
+            onBufferOverflow = {
+                emitPassthroughTcpReset(flowKey, info, "Buffered client window overflow target=${current.targetIp}:${current.targetPort}")
+            },
+            onReplayOverflow = {
+                emitPassthroughTcpReset(flowKey, info, "Buffered client replay overflow target=${current.targetIp}:${current.targetPort}")
+            },
+            updateSynAckFlow = buildSynAckStateUpdater(sequenceNumber, acknowledgementNumber, ::applyPassthroughSynAckState),
+            updateAckEstablishedFlow = buildAckEstablishedStateUpdater(sequenceNumber, acknowledgementNumber, now, ::applyPassthroughAckEstablishedState),
+            updateOutOfOrderFlow = { flowState, updatedBufferedSegments ->
+                applyBufferedClientSegmentsState(flowState, updatedBufferedSegments, now)
+            },
+            updateFlushFlow = buildClientPayloadFlushUpdater(
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                now = now,
+                updateFlow = ::applyPassthroughClientPayloadState
+            ),
+            resendPendingSegments = { segments ->
+                resendPendingPassthroughTcpPayload(info, current, segments)
+            },
+            updateRetransmitFlow = { flowState, remainingSegments ->
+                applyRetransmittedServerSegmentsState(flowState, remainingSegments, now)
+            },
+            updateAckedFlow = { flowState, nextAckState ->
+                applySyntheticAckedServerState(flowState, nextAckState)
+            },
+            updateClientFinFlow = { flowState, transition ->
+                applySyntheticClientFinState(flowState, transition, sequenceNumber, acknowledgementNumber)
+            },
+            closeActions = buildPassthroughTcpCloseActions(flowKey, current)
         )
     }
 
@@ -4337,6 +5062,12 @@ class AdBlockVpnService : VpnService() {
         }
     }
 
+    private fun isPassthroughTcpConnected(flowKey: String): Boolean {
+        return synchronized(passthroughTcpSocketCache) {
+            passthroughTcpSocketCache.containsKey(flowKey)
+        }
+    }
+
     private data class SyntheticHandshakeCloseActions(
         val onBridgeFinSentAck: () -> Boolean,
         val onFinAckSentBridgeAck: () -> Boolean,
@@ -4383,6 +5114,15 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun httpsSequenceSelectors(): FlowSequenceSelectors<HttpsProxyFlow> {
+        return FlowSequenceSelectors(
+            serverInitialSequenceOf = { it.serverInitialSequence },
+            serverNextSequenceOf = { it.serverNextSequence },
+            clientInitialSequenceOf = { it.clientInitialSequence },
+            clientNextSequenceOf = { it.clientNextSequence }
+        )
+    }
+
+    private fun passthroughSequenceSelectors(): FlowSequenceSelectors<PassthroughTcpFlow> {
         return FlowSequenceSelectors(
             serverInitialSequenceOf = { it.serverInitialSequence },
             serverNextSequenceOf = { it.serverNextSequence },
@@ -4758,6 +5498,34 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
+    private fun buildPassthroughHandshakeHandlers(
+        flowKey: String,
+        current: PassthroughTcpFlow,
+        info: com.HanFeng.model.PacketInfo,
+        sequenceNumber: Long,
+        acknowledgementNumber: Long,
+        payloadLength: Long,
+        now: Long
+    ): SyntheticHandshakeHandlers {
+        return buildSyntheticHandshakeHandlers(
+            flowKey = flowKey,
+            current = current,
+            info = info,
+            sequenceNumber = sequenceNumber,
+            acknowledgementNumber = acknowledgementNumber,
+            payloadLength = payloadLength,
+            now = now,
+            config = buildPassthroughHandshakeConfig(
+                flowKey = flowKey,
+                current = current,
+                info = info,
+                sequenceNumber = sequenceNumber,
+                acknowledgementNumber = acknowledgementNumber,
+                now = now
+            )
+        )
+    }
+
     private data class SyntheticHandshakeHandlers(
         val onSynOpen: () -> Boolean,
         val onAckEstablish: () -> Boolean,
@@ -4814,6 +5582,7 @@ class AdBlockVpnService : VpnService() {
         return when (flow) {
             is LocalProxyTcpFlow -> flow.bridgePort
             is HttpsProxyFlow -> flow.bridgePort
+            is PassthroughTcpFlow -> flow.targetPort
             else -> null
         }
     }
@@ -5157,6 +5926,7 @@ class AdBlockVpnService : VpnService() {
         when (session) {
             is HttpsBridgeSocketSession -> session.close()
             is LocalProxyBridgeSocketSession -> session.close()
+            is PassthroughTcpSocketSession -> session.close()
         }
     }
 
@@ -5408,6 +6178,78 @@ class AdBlockVpnService : VpnService() {
         tunPacketWriter.write(tunOutputStream, packet)
     }
 
+    private fun isMitmFullCaptureCircuitOpen(now: Long = System.currentTimeMillis()): Boolean {
+        return mitmFullCaptureDisabledUntil > now
+    }
+
+    private fun recordPassthroughSuccess(stage: String) {
+        if (!isFullCaptureRoutingActive()) return
+        synchronized(passthroughHealthLock) {
+            refreshPassthroughHealthWindowLocked(System.currentTimeMillis())
+            passthroughHealthAttempts++
+        }
+        logDecisionOnce(
+            key = "passthrough-success:$stage",
+            message = "Passthrough $stage succeeded during full-capture routing",
+            minIntervalMillis = 30_000L
+        )
+    }
+
+    private fun recordPassthroughFailure(stage: String, detail: String) {
+        val now = System.currentTimeMillis()
+        if (isMitmFullCaptureCircuitOpen(now)) return
+        val shouldTrip = synchronized(passthroughHealthLock) {
+            refreshPassthroughHealthWindowLocked(now)
+            passthroughHealthAttempts++
+            passthroughHealthFailures++
+            shouldTripPassthroughCircuitLocked()
+        }
+        logDecisionOnce(
+            key = "passthrough-failure:$stage:$detail",
+            message = "Passthrough $stage failed detail=$detail attempts=$passthroughHealthAttempts failures=$passthroughHealthFailures",
+            minIntervalMillis = 10_000L
+        )
+        if (shouldTrip) {
+            tripMitmFullCaptureCircuit("passthrough $stage failed: $detail")
+        }
+    }
+
+    private fun refreshPassthroughHealthWindowLocked(now: Long) {
+        if (passthroughHealthWindowStartedAt == 0L || now - passthroughHealthWindowStartedAt > PASSTHROUGH_HEALTH_WINDOW_MILLIS) {
+            passthroughHealthWindowStartedAt = now
+            passthroughHealthAttempts = 0
+            passthroughHealthFailures = 0
+        }
+    }
+
+    private fun shouldTripPassthroughCircuitLocked(): Boolean {
+        if (passthroughHealthFailures >= PASSTHROUGH_HEALTH_ABSOLUTE_FAILURES) return true
+        if (passthroughHealthAttempts < PASSTHROUGH_HEALTH_MIN_ATTEMPTS) return false
+        return passthroughHealthFailures * 100 >= passthroughHealthAttempts * PASSTHROUGH_HEALTH_FAILURE_PERCENT
+    }
+
+    private fun tripMitmFullCaptureCircuit(reason: String) {
+        val now = System.currentTimeMillis()
+        val shouldReload = synchronized(passthroughHealthLock) {
+            val alreadyOpen = mitmFullCaptureDisabledUntil > now
+            mitmFullCaptureDisabledUntil = now + MITM_FULL_CAPTURE_CIRCUIT_COOLDOWN_MILLIS
+            passthroughHealthWindowStartedAt = now
+            passthroughHealthAttempts = 0
+            passthroughHealthFailures = 0
+            !alreadyOpen
+        }
+        LogRepository.append(
+            this,
+            "MITM full-capture circuit opened for ${MITM_FULL_CAPTURE_CIRCUIT_COOLDOWN_MILLIS}ms reason=$reason"
+        )
+        FlowCacheSupport.clear(passthroughTcpSocketCache) { it.close() }
+        FlowCacheSupport.clear(passthroughUdpSessionCache) { it.close() }
+        FlowCacheSupport.clear(passthroughTcpFlowCache)
+        if (shouldReload && FeatureSettingsRepository.isAdBlockEnabled(this)) {
+            scheduleVpnReload(delayMillis = 80L)
+        }
+    }
+
     private fun rememberHttpDecryptTargets(
         question: com.HanFeng.model.DnsQuestion,
         response: ByteArray,
@@ -5509,6 +6351,7 @@ class AdBlockVpnService : VpnService() {
         appName: String
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
+        if (shouldSkipDecryptAliasChain(question.domain, appName)) return
         val aliasContexts = HashMap<String, DomainDecisionContext>(aliasTargets.size)
         val matchedAliases = aliasTargets.filter { aliasTarget ->
             if (isProtectedTrafficDomain(aliasTarget)) return@filter false
@@ -5828,6 +6671,7 @@ class AdBlockVpnService : VpnService() {
         appName: String
     ) {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
+        if (shouldSkipDecryptAliasChain(question.domain, appName)) return
         val aliasContexts = HashMap<String, DomainDecisionContext>(aliasTargets.size)
         val matchedAliases = aliasTargets.filter { aliasTarget ->
             if (isProtectedTrafficDomain(aliasTarget)) return@filter false
@@ -5909,6 +6753,14 @@ class AdBlockVpnService : VpnService() {
         return resolvedRule != null
     }
 
+    private fun shouldSkipDecryptAliasChain(domain: String, appName: String): Boolean {
+        if (isProtectedTrafficDomain(domain)) return true
+        if (RuleRepository.isWhitelistedDomain(domain)) return true
+        if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isProtectedNovelAppDomain(domain)) return true
+        if (RuleRepository.isNovelAppHint(appName) && RuleRepository.isNovelContentDomain(domain)) return true
+        return false
+    }
+
     private fun shouldForceImmediateDecryptRouteReload(
         domain: String,
         appName: String,
@@ -5964,6 +6816,9 @@ class AdBlockVpnService : VpnService() {
         if (RuleRepository.shouldProtectBusinessTraffic(normalizedDomain)) return null
         if (RuleRepository.isGameCoreDomain(normalizedDomain)) return null
         if (RuleRepository.isSocialCoreDomain(normalizedDomain)) return null
+        val novelApp = RuleRepository.isNovelAppHint(appName)
+        if (novelApp && RuleRepository.isProtectedNovelAppDomain(normalizedDomain)) return null
+        if (novelApp && RuleRepository.isNovelContentDomain(normalizedDomain)) return null
         
         var score = 0
         val reasons = mutableListOf<String>()
@@ -5986,7 +6841,7 @@ class AdBlockVpnService : VpnService() {
         }
         
         // 2. 域名关键词（权重：2 分）
-        val adKeywords = listOf("ad", "ads", "banner", "promo", "track", "sdk", "material", "creative")
+        val adKeywords = listOf("ads", "banner", "promo", "track", "tracking", "sdk", "material", "creative")
         val matchedKeyword = adKeywords.find { normalizedDomain.contains(it) }
         if (matchedKeyword != null) {
             score += 2
@@ -6015,7 +6870,7 @@ class AdBlockVpnService : VpnService() {
         }
         
         // 5. App 类型加成（小说/视频/社区 App 的可疑域名更可信）
-        if (RuleRepository.isNovelAppHint(appName) && score >= 2) {
+        if (novelApp && score >= 2) {
             score += 2
             reasons += "novel-app-boost"
         }
@@ -6031,7 +6886,7 @@ class AdBlockVpnService : VpnService() {
         }
         
         // 评分达到阈值才拦截
-        val threshold = if (RuleRepository.isNovelAppHint(appName)) 3 else 5
+        val threshold = if (novelApp) 3 else 5
         
         return if (score >= threshold) {
             // 创建一个虚拟规则用于标记（使用 RuleSource.REFERENCE 标记为智能识别）
@@ -6335,6 +7190,16 @@ class AdBlockVpnService : VpnService() {
     private fun requestHttpDecryptRouteReload(forceImmediate: Boolean = false) {
         if (!isRunning) return
         if (!httpDecryptEnabled) return
+        if (isFullCaptureRoutingActive()) {
+            pendingRouteReloadJob?.cancel()
+            pendingRouteReloadJob = null
+            logDecisionOnce(
+                key = "vpn-reload-http-decrypt-routes-skip-full-capture",
+                message = "Skipped VPN reload for HTTP decrypt routes because full-capture routing is active",
+                minIntervalMillis = 15_000L
+            )
+            return
+        }
         val now = System.currentTimeMillis()
         val elapsed = now - lastHttpRouteReloadAt
         if (forceImmediate && elapsed >= HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS) {
@@ -6375,6 +7240,10 @@ class AdBlockVpnService : VpnService() {
             message = "Reloaded VPN for new HTTP decrypt routes reason=$reason",
             minIntervalMillis = HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS
         )
+    }
+
+    private fun isFullCaptureRoutingActive(): Boolean {
+        return shouldCaptureFullTrafficForLocalProxy() || shouldCaptureFullTrafficForMitm(stableMode = false)
     }
 
     private fun loadBlockedIpNetworks(): List<BlockedIpNetwork> {
@@ -6441,7 +7310,10 @@ class AdBlockVpnService : VpnService() {
         if (destinationIp.isBlank()) return null
         return synchronized(adIpTargetCache) {
             adIpTargetCache[destinationIp]?.takeIf {
-                it.expiresAt > System.currentTimeMillis() && !RuleRepository.isWhitelistedDomain(it.domain)
+                it.expiresAt > System.currentTimeMillis() &&
+                    !RuleRepository.isWhitelistedDomain(it.domain) &&
+                    !isProtectedTrafficDomain(it.domain) &&
+                    !RuleRepository.isSensitiveAuthDomain(it.domain)
             }
         }
     }
@@ -6532,11 +7404,14 @@ class AdBlockVpnService : VpnService() {
             sourcePort = sourcePort
         )
         val vendor = knownVendor?.takeIf { it.isNotBlank() } ?: matchedRule?.vendor ?: classifyVendorCached(domain, appName)
+        val smartRule = matchedRule ?: smartDomainScoreAndCreateRule(domain, appName, vendor)
         return DomainDecisionContext(
             appName = appName,
-            matchedRule = matchedRule,
+            matchedRule = smartRule,
             vendor = vendor,
-            reason = if (matchedRule != null) "matched-rule:${matchedRule.id.take(8)}" else explainDomainDecisionReason(domain, appName, vendor)
+            reason = if (matchedRule != null) "matched-rule:${matchedRule.id.take(8)}"
+                else if (smartRule != null) "smart-score-suspicious"
+                else explainDomainDecisionReason(domain, appName, vendor)
         )
     }
 
@@ -6547,6 +7422,10 @@ class AdBlockVpnService : VpnService() {
         if (RuleRepository.isSensitiveAuthDomain(normalizedDomain)) return "sensitive-auth-domain"
         if (RuleRepository.shouldProtectMediaTraffic(normalizedDomain)) return "protected-media-domain"
         if (RuleRepository.shouldProtectBusinessTraffic(normalizedDomain)) return "protected-business-domain"
+        if (RuleRepository.isGameCoreDomain(normalizedDomain)) return "protected-game-domain"
+        if (RuleRepository.isSocialCoreDomain(normalizedDomain)) return "protected-social-domain"
+        if (RuleRepository.isNovelContentDomain(normalizedDomain)) return "protected-novel-content-domain"
+        if (RuleRepository.isProtectedNovelAppDomain(normalizedDomain)) return "protected-novel-app-domain"
         if (!shizukuStrictAppAdBlockEnabled) return "pass"
         if (RuleRepository.shouldAggressivelyBlockForNovelApp(this, normalizedDomain, appName, vendor)) return "shizuku-novel-aggressive"
         if (RuleRepository.shouldForceNovelQuicBlock(normalizedDomain, appName, vendor)) return "shizuku-novel-quic"
@@ -6559,7 +7438,11 @@ class AdBlockVpnService : VpnService() {
 
     private fun isProtectedTrafficDomain(domain: String): Boolean {
         return RuleRepository.shouldProtectMediaTraffic(domain) ||
-            RuleRepository.shouldProtectBusinessTraffic(domain)
+            RuleRepository.shouldProtectBusinessTraffic(domain) ||
+            RuleRepository.isGameCoreDomain(domain) ||
+            RuleRepository.isSocialCoreDomain(domain) ||
+            RuleRepository.isNovelContentDomain(domain) ||
+            RuleRepository.isProtectedNovelAppDomain(domain)
     }
 
     private data class DomainDecisionContext(
@@ -6927,7 +7810,7 @@ class AdBlockVpnService : VpnService() {
             isWaitingForReacquire() -> appendModeSuffix("当前处于 VPN 共存中", localProxyText)
             !isRunning -> appendModeSuffix("当前模式：已关闭", localProxyText)
             httpDecryptEnabled && mitmCertificateInstalled -> appendModeSuffix("当前模式：MITM + DNS 拦截", localProxyText)
-            httpDecryptEnabled -> appendModeSuffix("当前模式：DNS 拦截，等待证书安装", localProxyText)
+            httpDecryptEnabled -> appendModeSuffix("当前模式：DNS/IP 拦截，MITM 等待证书安装", localProxyText)
             else -> appendModeSuffix("当前模式：DNS 拦截", localProxyText)
         }
     }
@@ -7082,6 +7965,24 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
+    private fun shouldCaptureFullTrafficForMitm(stableMode: Boolean): Boolean {
+        if (stableMode || !httpDecryptEnabled || !mitmCertificateInstalled) return false
+        if (AppSettingsRepository.isMitmFullCaptureExperimentEnabled(this)) {
+            logDecisionOnce(
+                key = "mitm-full-capture-experiment-enabled",
+                message = "Enabled MITM full-capture routes by experiment setting",
+                minIntervalMillis = 60_000L
+            )
+            return true
+        }
+        logDecisionOnce(
+            key = "mitm-full-capture-disabled-stable-routing",
+            message = "Skipped MITM full-capture routes; using stable dynamic routes to preserve normal network connectivity",
+            minIntervalMillis = 60_000L
+        )
+        return false
+    }
+
     companion object {
         const val ACTION_START = "com.HanFeng.START"
         const val ACTION_STOP = "com.HanFeng.STOP"
@@ -7107,6 +8008,14 @@ class AdBlockVpnService : VpnService() {
         private const val OWNER_UID_FAILURE_TTL_MILLIS = 60_000L
         private const val SHIZUKU_CONNECTION_OWNER_RETRY_INTERVAL_MILLIS = 45_000L
         private const val HTTPS_BRIDGE_CONNECT_TIMEOUT_MILLIS = 4_000
+        private const val PASSTHROUGH_TCP_CONNECT_TIMEOUT_MILLIS = 5_000
+        private const val PASSTHROUGH_UDP_READ_TIMEOUT_MILLIS = 1_000
+        private const val PASSTHROUGH_UDP_IDLE_TIMEOUT_MILLIS = 30_000L
+        private const val PASSTHROUGH_HEALTH_WINDOW_MILLIS = 30_000L
+        private const val PASSTHROUGH_HEALTH_MIN_ATTEMPTS = 10
+        private const val PASSTHROUGH_HEALTH_ABSOLUTE_FAILURES = 8
+        private const val PASSTHROUGH_HEALTH_FAILURE_PERCENT = 45
+        private const val MITM_FULL_CAPTURE_CIRCUIT_COOLDOWN_MILLIS = 180_000L
         private const val MAX_BUFFERED_CLIENT_SEGMENTS = 32
         private const val MAX_BUFFERED_SERVER_SEGMENTS = 32
         private const val MAX_BUFFERED_CLIENT_BYTES = 256 * 1024
@@ -7269,6 +8178,55 @@ class AdBlockVpnService : VpnService() {
         override fun close() {
             runCatching { input.close() }
             runCatching { output.close() }
+            runCatching { socket.close() }
+        }
+    }
+
+    private data class PassthroughTcpFlow(
+        val flowKey: String,
+        val targetIp: String,
+        val targetPort: Int,
+        val sourcePort: Int,
+        val appName: String,
+        val state: String,
+        val clientInitialSequence: Long? = null,
+        val serverInitialSequence: Long? = null,
+        val clientNextSequence: Long? = null,
+        val serverNextSequence: Long? = null,
+        val lastServerPayloadSequence: Long? = null,
+        val lastServerPayload: ByteArray? = null,
+        val pendingServerSegments: List<PendingServerSegment> = emptyList(),
+        val bufferedClientSegments: List<ClientPayloadSegment> = emptyList(),
+        val lastClientPayloadSequence: Long? = null,
+        val lastClientPayloadLength: Long? = null,
+        val lastSequenceNumber: Long?,
+        val lastAcknowledgementNumber: Long?,
+        val lastSeenAt: Long
+    )
+
+    private data class PassthroughTcpSocketSession(
+        val flowKey: String,
+        val requestTemplate: com.HanFeng.model.PacketInfo,
+        val socket: Socket,
+        val input: java.io.InputStream,
+        val output: java.io.OutputStream
+    ) : ClosableBridgeSession {
+        override fun close() {
+            runCatching { input.close() }
+            runCatching { output.close() }
+            runCatching { socket.close() }
+        }
+    }
+
+    private data class PassthroughUdpSession(
+        val flowKey: String,
+        val requestTemplate: com.HanFeng.model.PacketInfo,
+        val socket: DatagramSocket,
+        val targetIp: String,
+        val targetPort: Int,
+        val lastSeenAt: Long
+    ) : ClosableBridgeSession {
+        override fun close() {
             runCatching { socket.close() }
         }
     }

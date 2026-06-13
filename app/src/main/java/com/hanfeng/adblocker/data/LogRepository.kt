@@ -25,6 +25,7 @@ object LogRepository {
     private const val LOG_FILE = "adblock.log"
     private const val LOG_EXPORT_FILE = "HanFeng-logs.zip"
     private const val LOG_CHANNEL_CAPACITY = 2048
+    private const val LOG_SNAPSHOT_MAX_BYTES = 512 * 1024
     private val legacyLogExportNames = setOf("hanfeng-adblock-logs.zip")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var logChannel = Channel<String>(capacity = LOG_CHANNEL_CAPACITY)
@@ -195,7 +196,7 @@ object LogRepository {
 
     private fun buildLogSnapshot(context: Context): String {
         val logText = runCatching {
-            logFile(context).takeIf { it.exists() }?.readText().orEmpty()
+            logFile(context).takeIf { it.exists() }?.readRecentText(LOG_SNAPSHOT_MAX_BYTES).orEmpty()
         }.getOrDefault("")
         val header = buildString {
             append("寒枫运行日志快照\n")
@@ -212,7 +213,9 @@ object LogRepository {
                 val entryFile = logFile(context)
                 if (entryFile.exists()) {
                     zip.putNextEntry(ZipEntry(entryFile.name))
-                    zip.write(entryFile.readBytes())
+                    entryFile.inputStream().use { input ->
+                        input.copyTo(zip, bufferSize = 256 * 1024)
+                    }
                     zip.closeEntry()
                 }
                 val suspiciousDomainReport = RuleRepository.exportUnknownVendorSamples(context)
@@ -225,6 +228,20 @@ object LogRepository {
     }
 
     private fun logFile(context: Context): File = File(File(context.filesDir, LOG_DIR), LOG_FILE)
+
+    private fun File.readRecentText(maxBytes: Int): String {
+        val start = (length() - maxBytes).coerceAtLeast(0L)
+        return inputStream().use { input ->
+            var remaining = start
+            while (remaining > 0L) {
+                val skipped = input.skip(remaining)
+                if (skipped <= 0L) break
+                remaining -= skipped
+            }
+            val prefix = if (start > 0L) "... 已省略较早日志，仅显示最近 ${maxBytes / 1024}KB ...\n" else ""
+            prefix + input.bufferedReader(Charsets.UTF_8).readText()
+        }
+    }
 
     enum class DomainDecisionType {
         BLOCKED,

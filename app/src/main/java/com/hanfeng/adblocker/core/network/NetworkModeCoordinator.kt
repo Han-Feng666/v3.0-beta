@@ -4,7 +4,7 @@ import com.HanFeng.model.LocalProxyCoexistConfig
 
 object NetworkModeCoordinator {
     fun resolveMode(flags: NetworkFeatureFlags): NetworkMode {
-        return if (shouldUseLocalProxy(flags.localProxyConfig, flags.localProxyTargetPackages)) {
+        return if (isLocalProxyConfigured(flags.localProxyConfig)) {
             NetworkMode.COEXIST_LOCAL_PROXY
         } else {
             NetworkMode.FULL_VPN
@@ -12,7 +12,7 @@ object NetworkModeCoordinator {
     }
 
     fun shouldCaptureFullTraffic(flags: NetworkFeatureFlags): Boolean {
-        return shouldUseLocalProxy(flags.localProxyConfig, flags.localProxyTargetPackages)
+        return isLocalProxyConfigured(flags.localProxyConfig) && flags.localProxyTargetPackages.isNotEmpty()
     }
 
     fun belongsToLocalProxyTarget(appName: String, targetPackages: Set<String>): Boolean {
@@ -27,7 +27,7 @@ object NetworkModeCoordinator {
         return packages.any { packageName -> packageName in targetPackages }
     }
 
-    private fun shouldUseLocalProxy(config: LocalProxyCoexistConfig, targetPackages: Set<String>): Boolean {
-        return config.enabled && targetPackages.isNotEmpty()
+    private fun isLocalProxyConfigured(config: LocalProxyCoexistConfig): Boolean {
+        return config.enabled && config.host.isNotBlank() && config.port in 1..65535
     }
 }

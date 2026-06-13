@@ -1,4 +1,4 @@
-package com.hanfeng.adblocker.service
+package com.HanFeng.service
 
 import android.content.Context
 import android.content.pm.PackageManager

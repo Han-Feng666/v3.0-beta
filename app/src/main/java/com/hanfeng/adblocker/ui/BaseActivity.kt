@@ -90,7 +90,7 @@ open class BaseActivity : AppCompatActivity() {
     protected fun warmShizukuServicesBlocking(): Boolean {
         repeat(3) {
             runCatching { ShizukuConnectionOwnerRepository.ensureBound(this) }
-            runCatching { ShizukuAdControlRepository.ensureBound(this) }
+            runCatching { ShizukuAdControlRepository.ensureBoundAndWait(this) }
             val ownerAlive = runCatching { ShizukuConnectionOwnerRepository.isServiceAlive() }.getOrDefault(false)
             val adAlive = runCatching { ShizukuAdControlRepository.checkServiceHealth(this) }.getOrDefault(false)
             if (ownerAlive || adAlive) return true

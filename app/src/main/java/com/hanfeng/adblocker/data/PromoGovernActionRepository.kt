@@ -13,16 +13,16 @@ object PromoGovernActionRepository {
         if (!isDisabledState(status.enabledState)) {
             ShizukuAdControlRepository.disablePackage(context, target.packageName)
             val disabledStatus = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
-            if (isDisabledState(disabledStatus.enabledState)) return "治理成功，当前已停用"
+            if (isDisabledState(disabledStatus.enabledState)) return "治理成功，当前已冻结"
         }
 
         val refreshed = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
         if (!refreshed.suspended) {
             val suspendRequested = ShizukuAdControlRepository.suspendPackage(context, target.packageName)
             val suspendStatus = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
-            if (suspendRequested && suspendStatus.suspended) return "停用未生效，已自动回退为暂停"
+            if (suspendRequested && suspendStatus.suspended) return "冻结未生效，已自动回退为暂停"
         }
-        return "治理失败，请确认系统支持停用或暂停"
+        return "治理失败，请确认系统支持冻结或暂停"
     }
 
     fun setNotificationsBlocked(context: Context, target: PromoGovernTarget, blocked: Boolean): String {
@@ -50,7 +50,7 @@ object PromoGovernActionRepository {
             refreshed.enabledState == PackageManager.COMPONENT_ENABLED_STATE_ENABLED ||
                 refreshed.enabledState == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
         }
-        val actionText = if (disabled) "停用" else "恢复"
+        val actionText = if (disabled) "冻结" else "解冻"
         return if (requested && verified) "${actionText}成功" else "${actionText}失败，请确认该项目支持此操作"
     }
 
@@ -80,7 +80,7 @@ object PromoGovernActionRepository {
         } else {
             ShizukuAdControlRepository.enableComponent(context, componentName)
         }
-        val actionText = if (disabled) "组件停用" else "组件恢复"
+        val actionText = if (disabled) "组件冻结" else "组件解冻"
         return if (success) "${actionText}成功" else "${actionText}失败，请确认组件名完整且系统支持该操作"
     }
 

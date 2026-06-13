@@ -5,7 +5,7 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="o_mr1">shortEdges</item>
         <item name="colorPrimary">@color/hf_text_primary</item>
         <item name="colorSurface">@color/hf_surface</item>
         <item name="android:colorButtonNormal">@color/hf_surface</item>
@@ -13,12 +13,28 @@
         <item name="buttonStyle">@style/Widget.HanFeng.Button</item>
         <item name="android:buttonStyle">@style/Widget.HanFeng.Button</item>
         <item name="materialButtonStyle">@style/Widget.HanFeng.MaterialButton</item>
+        <item name="android:alertDialogTheme">@style/ThemeOverlay.HanFeng.AppCompatDialog</item>
+        <item name="alertDialogTheme">@style/ThemeOverlay.HanFeng.AppCompatDialog</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.HanFeng.Dialog</item>
     </style>
 
     <style name="ThemeOverlay.HanFeng.Dialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
         <item name="materialAlertDialogBodyTextStyle">@style/TextAppearance.HanFeng.DialogBody</item>
         <item name="materialAlertDialogTitleTextStyle">@style/TextAppearance.HanFeng.DialogTitle</item>
         <item name="backgroundTint">@color/hf_surface_strong</item>
+        <item name="android:windowBackground">@drawable/bg_dialog_window</item>
+        <item name="shapeAppearanceOverlay">@style/ShapeAppearanceOverlayHanFengDialog</item>
+    </style>
+
+    <style name="ThemeOverlay.HanFeng.AppCompatDialog" parent="ThemeOverlay.AppCompat.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_dialog_window</item>
+        <item name="android:colorBackground">@color/hf_surface_strong</item>
+        <item name="colorAccent">@color/hf_text_primary</item>
+    </style>
+
+    <style name="ShapeAppearanceOverlayHanFengDialog" parent="ShapeAppearance.Material3.Corner.Full">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">24dp</item>
     </style>
 
     <style name="TextAppearance.HanFeng.DialogTitle" parent="TextAppearance.Material3.TitleLarge">

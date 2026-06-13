@@ -2,6 +2,7 @@ package com.HanFeng.shizuku
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.os.Build
 import android.system.OsConstants
 import androidx.annotation.Keep
 import java.net.InetSocketAddress
@@ -16,6 +17,7 @@ class ConnectionOwnerUserService() : IConnectionOwnerService.Stub() {
     }
 
     override fun getConnectionOwnerUid(protocol: Int, localHost: String, localPort: Int, remoteHost: String, remotePort: Int): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return -1
         val context = serviceContext ?: return -1
         val connectivityManager = context.getSystemService(ConnectivityManager::class.java) ?: return -1
         val safeProtocol = if (protocol == OsConstants.IPPROTO_UDP) OsConstants.IPPROTO_UDP else OsConstants.IPPROTO_TCP

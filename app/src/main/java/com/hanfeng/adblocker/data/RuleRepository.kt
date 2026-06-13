@@ -33,6 +33,7 @@ object RuleRepository {
     private const val BYPASS_PROTECTION_VENDOR = "加密 DNS 反绕过 (Encrypted DNS)"
     private const val REGEX_RULE_DOMAIN = "[Regex Rule]"
     private const val COSMETIC_RULE_DOMAIN = "[Cosmetic Rule]"
+    private const val UNSUPPORTED_RULE_DOMAIN = "[Unsupported Rule]"
     private const val SUSPICIOUS_SAMPLE_DEBOUNCE_MILLIS = 10_000L
     private const val SUSPICIOUS_SAMPLE_PERSIST_DEBOUNCE_MILLIS = 30_000L
     private const val SUSPICIOUS_SAMPLE_DECODE_MAX_LENGTH = 2048
@@ -401,18 +402,23 @@ object RuleRepository {
     )
     private val novelAppIdentifiers = listOf(
         "番茄小说", "番茄免费小说", "fanqie", "fqnovel", "dragon.read",
-        "番茄畅听", "tomato.read", "tomatoread", "tomatonovel", "novel.snssdk",
+        "番茄畅听", "tomato.read", "tomatoread", "tomatonovel", "novel.snssdk", "fanqienovel",
         "七猫小说", "七猫免费小说", "qimao", "kmxs", "wtzw",
         "起点读书", "qidian", "qdreader", "yuewen",
         "qq阅读", "qqreader", "qqread", "weread",
         "书旗小说", "shuqi", "aliwx",
         "掌阅", "ireader", "zhangyue",
         "咪咕阅读", "migu", "cmread",
-        "米读小说", "midu", "miduread", "lechuan",
+        "米读小说", "midu", "miduread", "lechuan", "duokan", "readnovel",
         "纵横小说", "zongheng", "zhread",
         "17k", "17k小说", "book17k",
         "长读小说", "changdu",
-        "红果免费短剧", "hongguo", "hongguoapp", "dejian"
+        "红果免费短剧", "红果短剧", "免费短剧", "短剧", "短剧大全", "短剧场", "微短剧", "剧场", "小剧场",
+        "hongguo", "hongguoapp", "dejian", "duanju", "duanvideo", "shortdrama", "short_drama", "minidrama", "mini_drama", "drama", "episode",
+        "漫画", "免费漫画", "漫画大全", "漫剧", "comic", "manga", "manhua", "cartoon", "kuaikan", "buka", "dongman",
+        "听书", "有声书", "追书", "看书", "免费小说", "小说大全", "小说阅读", "阅读器", "书城",
+        "bookcity", "bookstore", "story", "stories", "freebook", "bookreader", "bookread",
+        "novelreader", "readapp", "yuedu", "xiaoshuo", "mianfei", "zhuishu", "kanshu"
     )
     private val novelAppProtectedSuffixes = setOf(
         "wtzw.com",
@@ -465,8 +471,10 @@ object RuleRepository {
     // 社交 APP 核心域名（确保聊天、语音、视频正常）
     private val socialCoreDomains = setOf(
         // 微信 QQ
-        "wx.qq.com", "web.weixin.qq.com", "mp.weixin.qq.com",
+        "qq.com", "weixin.qq.com", "wx.qq.com", "web.weixin.qq.com", "mp.weixin.qq.com",
         "work.weixin.qq.com", "long.weixin.qq.com", "szshort.weixin.qq.com",
+        "weixinbridge.com", "wechat.com", "wechatpay.cn",
+        "mqqurl.com", "qqurl.com", "qq.com.cn", "imqq.com",
         "wecom.qq.com", "wework.com", "weiyun.com", "weiyun.cn",
         "qqmail.com", "mail.qq.com", "exmail.qq.com", "docs.qq.com",
         "meeting.tencent.com", "voovmeeting.com", "tim.qq.com", "ftn.qq.com",
@@ -1713,17 +1721,32 @@ object RuleRepository {
         context: Context,
         sourceId: String,
         inputStream: InputStream,
-        allowWhitelistDomains: Boolean = false
+        allowWhitelistDomains: Boolean = false,
+        onProgress: ((String) -> Unit)? = null
     ): Int {
         val startTime = System.currentTimeMillis()
         val normalizedSourceId = normalizeRemoteSourceId(sourceId)
-        
+        onProgress?.invoke("正在读取现有规则...")
+        val baseStart = System.currentTimeMillis()
         val baseRules = buildRemoteSourceReplacementBaseRules(context, normalizedSourceId)
-        
+        LogRepository.append(context, "replaceRulesForRemoteSourceStreaming [1/4]: base rules=${baseRules.size}, time=${System.currentTimeMillis() - baseStart}ms")
+
+        onProgress?.invoke("正在建立去重索引...")
+        val stateStart = System.currentTimeMillis()
         val importState = buildImportedRuleState(baseRules)
-        
+        LogRepository.append(context, "replaceRulesForRemoteSourceStreaming [2/4]: state keys=${importState.existingRuleKeys.size}, time=${System.currentTimeMillis() - stateStart}ms")
+
         try {
+            onProgress?.invoke("正在解析规则文件...")
+            val parseStart = System.currentTimeMillis()
             val parsed = parseImportLinesStreaming(inputStream.bufferedReader().lineSequence())
+            LogRepository.append(
+                context,
+                "replaceRulesForRemoteSourceStreaming [3/4]: parsed blocked=${parsed.blockedRules.size}, exceptions=${parsed.exceptionRules.size}, badfilters=${parsed.badfilterRules.size}, time=${System.currentTimeMillis() - parseStart}ms"
+            )
+
+            onProgress?.invoke("正在整理规则并去重...")
+            val collectStart = System.currentTimeMillis()
             val added = collectImportedBlockedRules(
                 context = context,
                 blockedRules = parsed.blockedRules,
@@ -1734,7 +1757,12 @@ object RuleRepository {
                 useVendorHints = false,
                 identityRemoteSourceId = normalizedSourceId
             )
+            LogRepository.append(context, "replaceRulesForRemoteSourceStreaming [4/5]: collected added=${added.size}, time=${System.currentTimeMillis() - collectStart}ms")
+
+            onProgress?.invoke("正在保存规则到本地...")
+            val saveStart = System.currentTimeMillis()
             saveImportedRules(context, baseRules + added, parsed.exceptionRules)
+            LogRepository.append(context, "replaceRulesForRemoteSourceStreaming [5/5]: saved final=${baseRules.size + added.size}, time=${System.currentTimeMillis() - saveStart}ms")
 
             val totalTime = System.currentTimeMillis() - startTime
             LogRepository.append(
@@ -1766,7 +1794,13 @@ object RuleRepository {
         return sourceRules.mapNotNull { rule -> explainRemoteSourceNonAdCandidate(context, rule) }
     }
 
-    fun importRules(context: Context, content: String, source: RuleSource = RuleSource.IMPORTED, allowWhitelistDomains: Boolean = false): Int {
+    fun importRules(
+        context: Context,
+        content: String,
+        source: RuleSource = RuleSource.IMPORTED,
+        allowWhitelistDomains: Boolean = false,
+        onProgress: ((String) -> Unit)? = null
+    ): Int {
         val startTime = System.currentTimeMillis()
         
         // 优化：使用 lineSequence 避免一次性加载计数
@@ -1787,14 +1821,17 @@ object RuleRepository {
             LogRepository.append(context, "⚠️ 这些规则会正常导入并拦截，如导致 App 功能异常请将相关域名加入白名单")
         }
         
+        onProgress?.invoke("正在读取现有规则...")
         val step1Start = System.currentTimeMillis()
         val current = getRules(context).toMutableList()
         LogRepository.append(context, "ImportRules [Step1/4]: get existing rules in ${System.currentTimeMillis() - step1Start}ms, count=${current.size}")
         
+        onProgress?.invoke("正在解析规则文件...")
         val step2Start = System.currentTimeMillis()
         val parsed = parseImportLines(content)
         LogRepository.append(context, "ImportRules [Step2/4]: parse in ${System.currentTimeMillis() - step2Start}ms, blocked=${parsed.blockedRules.size}, exceptions=${parsed.exceptionRules.size}, badfilter=${parsed.badfilterRules.size}")
         
+        onProgress?.invoke("正在整理规则并去重...")
         val step3Start = System.currentTimeMillis()
         val finalRules = buildImportedRules(
             context = context,
@@ -1805,6 +1842,7 @@ object RuleRepository {
         )
         LogRepository.append(context, "ImportRules [Step3/4]: build in ${System.currentTimeMillis() - step3Start}ms, finalRules=${finalRules.size}")
         
+        onProgress?.invoke("正在保存规则到本地...")
         val step4Start = System.currentTimeMillis()
         save(context, finalRules)
         val elapsed = System.currentTimeMillis() - startTime
@@ -1818,21 +1856,39 @@ object RuleRepository {
         context: Context,
         inputStream: InputStream,
         source: RuleSource = RuleSource.IMPORTED,
-        allowWhitelistDomains: Boolean = false
+        allowWhitelistDomains: Boolean = false,
+        onProgress: ((String) -> Unit)? = null
     ): Int {
         val startTime = System.currentTimeMillis()
-        
-        val parsed = inputStream.bufferedReader().use { reader ->
-            parseImportLinesStreaming(reader.lineSequence())
-        }
 
-        val parseStart = System.currentTimeMillis()
+        onProgress?.invoke("正在解析规则文件...")
+        val parseOnlyStart = System.currentTimeMillis()
+        val parsed = inputStream.bufferedReader().use { reader ->
+            parseImportLinesStreaming(reader.lineSequence()) { lineCount, ruleCount ->
+                onProgress?.invoke("正在解析规则文件...\n已读取 ${lineCount} 行，识别 ${ruleCount} 条")
+            }
+        }
+        LogRepository.append(
+            context,
+            "ImportRulesStreaming [1/4]: parsed blocked=${parsed.blockedRules.size}, exceptions=${parsed.exceptionRules.size}, badfilter=${parsed.badfilterRules.size}, time=${System.currentTimeMillis() - parseOnlyStart}ms"
+        )
+
+        onProgress?.invoke("正在读取现有规则...")
+        val currentStart = System.currentTimeMillis()
         val current = getRules(context).toMutableList()
+        LogRepository.append(context, "ImportRulesStreaming [2/4]: current=${current.size}, time=${System.currentTimeMillis() - currentStart}ms")
+
+        onProgress?.invoke("正在整理规则并去重...")
+        val buildStart = System.currentTimeMillis()
         val finalRules = buildImportedRules(context, current, parsed, source, allowWhitelistDomains)
+        LogRepository.append(context, "ImportRulesStreaming [3/4]: finalRules=${finalRules.size}, time=${System.currentTimeMillis() - buildStart}ms")
+
+        onProgress?.invoke("正在保存规则到本地...")
+        val saveStart = System.currentTimeMillis()
         save(context, finalRules)
+        LogRepository.append(context, "ImportRulesStreaming [4/4]: save time=${System.currentTimeMillis() - saveStart}ms")
         
         val elapsed = System.currentTimeMillis() - startTime
-        LogRepository.append(context, "ImportRulesStreaming: parsed=${parsed.blockedRules.size}, exceptions=${parsed.exceptionRules.size}, save in ${System.currentTimeMillis() - parseStart}ms")
         LogRepository.append(context, "ImportRulesStreaming completed: finalRules=${finalRules.size} TOTAL time=${elapsed}ms")
         
         return finalRules.size
@@ -2146,12 +2202,27 @@ object RuleRepository {
         currentByDomain: MutableMap<String, BlockRule>,
         exceptionRules: List<ParsedRule>
     ) {
-        exceptionRules.forEach { exceptionRule ->
-            currentByDomain.entries.toList().forEach { (domain, existing) ->
-                if (domain == exceptionRule.domain || domain.endsWith(".${exceptionRule.domain}")) {
-                    updateDomainRuleScope(currentByDomain, domain, existing, exceptionRule.dnsTypes, exceptionRule.excludedDnsTypes)
+        if (exceptionRules.isEmpty() || currentByDomain.isEmpty()) return
+        val exceptionsByDomain = exceptionRules.groupBy { it.domain }
+        currentByDomain.keys.toList().forEach { domain ->
+            currentByDomain[domain] ?: return@forEach
+            forEachDomainSuffix(domain) { suffix ->
+                exceptionsByDomain[suffix]?.forEach { exceptionRule ->
+                    val before = currentByDomain[domain] ?: return@forEachDomainSuffix
+                    updateDomainRuleScope(currentByDomain, domain, before, exceptionRule.dnsTypes, exceptionRule.excludedDnsTypes)
+                    currentByDomain[domain] ?: return@forEachDomainSuffix
                 }
             }
+        }
+    }
+
+    private inline fun forEachDomainSuffix(domain: String, action: (String) -> Unit) {
+        var suffix = domain
+        while (suffix.isNotBlank()) {
+            action(suffix)
+            val dotIndex = suffix.indexOf('.')
+            if (dotIndex < 0 || dotIndex == suffix.lastIndex) break
+            suffix = suffix.substring(dotIndex + 1)
         }
     }
 
@@ -2269,7 +2340,7 @@ object RuleRepository {
             id = UUID.randomUUID().toString(),
             domain = parsedRule.domain,
             vendor = vendor,
-            source = source,
+            source = if (parsedRule.isUnsupported) RuleSource.UNSUPPORTED else source,
             dnsTypes = normalizeDnsTypes(parsedRule.dnsTypes),
             excludedDnsTypes = normalizeDnsTypes(parsedRule.excludedDnsTypes),
             thirdParty = parsedRule.thirdParty,
@@ -2542,10 +2613,12 @@ object RuleRepository {
         sourcePort: Int? = null
     ): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
+        if (isCoreTrafficProtectedDomain(normalized)) return false
         val ruleMap = getRuleMap(context)
         val matchingRules = buildDomainCandidates(normalized)
             .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
             .filter {
+                it.source != RuleSource.UNSUPPORTED &&
                 ruleMatches(it, qType, appName) &&
                     matchesPortScope(it.destinationPorts, destinationPort) &&
                     matchesPortScope(it.sourcePorts, sourcePort)
@@ -2571,10 +2644,11 @@ object RuleRepository {
     // 性能优化：快速拦截检查（跳过关键词规则，仅匹配精确规则和正则规则）
     fun isBlockedFast(context: Context, domain: String, qType: Int? = null): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
+        if (isCoreTrafficProtectedDomain(normalized)) return false
         val ruleMap = getRuleMap(context)
         val matchingRules = buildDomainCandidates(normalized)
             .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
-            .filter { ruleMatches(it, qType, null) && it.destinationPorts.isEmpty() && it.sourcePorts.isEmpty() }
+            .filter { it.source != RuleSource.UNSUPPORTED && ruleMatches(it, qType, null) && it.destinationPorts.isEmpty() && it.sourcePorts.isEmpty() }
             .toList()
         if (matchingRules.any { it.exceptionRule }) return false
         val matched = matchingRules.any { !it.exceptionRule } ||
@@ -2597,11 +2671,13 @@ object RuleRepository {
         sourcePort: Int? = null
     ): Boolean {
         val normalizedHost = sanitizeDomain(host) ?: return false
+        if (isCoreTrafficProtectedDomain(normalizedHost)) return false
         val ruleMap = getRuleMap(context)
         val fullUrl = "$host$path".lowercase()
         val matchingRules = buildDomainCandidates(normalizedHost)
             .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
             .filter { rule ->
+                if (rule.source == RuleSource.UNSUPPORTED) return@filter false
                 if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain)) return@filter false
                 if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@filter false
                 if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@filter false
@@ -2618,6 +2694,7 @@ object RuleRepository {
             }
             .toList()
         val hasExceptionMatch = matchingRules.any { it.exceptionRule } || getRegexRules(context).any { rule ->
+            if (rule.source == RuleSource.UNSUPPORTED) return@any false
             if (!rule.exceptionRule) return@any false
             if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain)) return@any false
             if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
@@ -2626,6 +2703,7 @@ object RuleRepository {
         }
         if (hasExceptionMatch) return false
         val matched = matchingRules.any { !it.exceptionRule } || getRegexRules(context).any { rule ->
+            if (rule.source == RuleSource.UNSUPPORTED) return@any false
             if (rule.exceptionRule) return@any false
             if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain)) return@any false
             if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
@@ -2648,7 +2726,8 @@ object RuleRepository {
         val address = runCatching { InetAddress.getByName(normalizedIp) }.getOrNull() ?: return null
         return (cachedIpCidrRules ?: getRules(context).filter { !it.ipCidr.isNullOrBlank() })
             .firstOrNull { rule ->
-                !rule.exceptionRule &&
+                rule.source != RuleSource.UNSUPPORTED &&
+                    !rule.exceptionRule &&
                     matchesAppPackage(rule.appPackages, appName) &&
                     matchesPortScope(rule.destinationPorts, destinationPort) &&
                     matchesPortScope(rule.sourcePorts, sourcePort) &&
@@ -2665,7 +2744,8 @@ object RuleRepository {
         if (destinationPort == null && sourcePort == null) return null
         return (cachedPortOnlyRules ?: getRules(context).filter { it.domain == "*" && it.ipCidr.isNullOrBlank() })
             .firstOrNull { rule ->
-                !rule.exceptionRule &&
+                rule.source != RuleSource.UNSUPPORTED &&
+                    !rule.exceptionRule &&
                     matchesAppPackage(rule.appPackages, appName) &&
                     matchesPortScope(rule.destinationPorts, destinationPort) &&
                     matchesPortScope(rule.sourcePorts, sourcePort)
@@ -2787,24 +2867,37 @@ object RuleRepository {
         sourcePort: Int? = null
     ): BlockRule? {
         val normalized = sanitizeDomain(domain) ?: return null
+        if (isCoreTrafficProtectedDomain(normalized)) return null
         val ruleMap = getRuleMap(context)
         return buildDomainCandidates(normalized)
             .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
             .filter {
-                ruleMatches(it, qType, appName) &&
+                it.source != RuleSource.UNSUPPORTED &&
+                    ruleMatches(it, qType, appName) &&
                     !it.exceptionRule &&
                     matchesPortScope(it.destinationPorts, destinationPort) &&
                     matchesPortScope(it.sourcePorts, sourcePort)
             }
-            .firstOrNull() ?: getRegexRules(context).firstOrNull { !it.exceptionRule && matchesRegexRule(it, normalized) }
+            .firstOrNull() ?: getRegexRules(context).firstOrNull { it.source != RuleSource.UNSUPPORTED && !it.exceptionRule && matchesRegexRule(it, normalized) }
+    }
+
+    private fun isCoreTrafficProtectedDomain(domain: String): Boolean {
+        return isWhitelistedDomain(domain) ||
+            isSensitiveAuthDomain(domain) ||
+            isGameCoreDomain(domain) ||
+            isSocialCoreDomain(domain) ||
+            shouldProtectMediaTraffic(domain) ||
+            shouldProtectBusinessTraffic(domain) ||
+            isNovelContentDomain(domain) ||
+            isProtectedNovelAppDomain(domain)
     }
 
     fun getRequestRewriteDirectives(context: Context, host: String, path: String, appName: String? = null, requestDomain: String? = null): RequestRewriteDirectives {
         val normalizedHost = sanitizeDomain(host) ?: return RequestRewriteDirectives()
         val matchedRules = buildDomainCandidates(normalizedHost)
             .flatMap { candidate -> getRuleMap(context)[candidate].orEmpty().asSequence() }
-            .filter { ruleMatches(it, null, appName, normalizedHost, requestDomain) }
-        val matchedRegexRules = getRegexRules(context).filter { matchesRegexRule(it, "$normalizedHost$path") || matchesRegexRule(it, normalizedHost) }
+            .filter { it.source != RuleSource.UNSUPPORTED && ruleMatches(it, null, appName, normalizedHost, requestDomain) }
+        val matchedRegexRules = getRegexRules(context).filter { it.source != RuleSource.UNSUPPORTED && (matchesRegexRule(it, "$normalizedHost$path") || matchesRegexRule(it, normalizedHost)) }
         val allRules = (matchedRules + matchedRegexRules).distinctBy { it.id }
         if (allRules.any { it.exceptionRule }) {
             return RequestRewriteDirectives(cosmeticSelectors = getCosmeticSelectors(
@@ -2857,7 +2950,8 @@ object RuleRepository {
         val matchedHostRules = buildDomainCandidates(normalizedHost)
             .flatMap { candidate -> getRuleMap(context)[candidate].orEmpty().asSequence() }
             .filter {
-                ruleMatches(it, null, appName, normalizedHost, requestDomain) &&
+                it.source != RuleSource.UNSUPPORTED &&
+                    ruleMatches(it, null, appName, normalizedHost, requestDomain) &&
                     !it.exceptionRule &&
                     matchesPortScope(it.destinationPorts, destinationPort) &&
                     matchesPortScope(it.sourcePorts, sourcePort)
@@ -2875,7 +2969,7 @@ object RuleRepository {
                     (!rule.keywordPattern.isNullOrBlank() && fullUrl.contains(rule.keywordPattern))
         }
         if (matchedHostRules) return true
-        return getRegexRules(context).any { !it.exceptionRule && matchesRegexRule(it, fullUrl) }
+        return getRegexRules(context).any { it.source != RuleSource.UNSUPPORTED && !it.exceptionRule && matchesRegexRule(it, fullUrl) }
     }
 
     fun getCosmeticSelectors(
@@ -3579,7 +3673,10 @@ object RuleRepository {
         val normalized = text.replace(alphanumericCnRegex, "")
         val identifiers = listOf(
             "小说", "阅读", "读书", "番茄", "七猫", "书旗", "掌阅", "起点", "纵横", "酷安",
-            "资讯", "新闻", "头条", "浏览器", "短视频", "video", "reader", "novel", "comic"
+            "资讯", "新闻", "头条", "浏览器", "短视频", "短剧", "短剧大全", "短剧场", "微短剧", "剧场", "小剧场", "漫画", "漫剧", "听书", "追书", "看书",
+            "免费短剧", "免费漫画", "漫画大全", "免费小说", "小说大全", "小说阅读", "阅读器", "书城", "红果",
+            "video", "reader", "novel", "comic", "manga", "manhua", "cartoon", "freebook", "bookreader",
+            "drama", "duanju", "shortdrama", "short_drama", "minidrama", "mini_drama", "episode", "hongguo", "bookcity", "bookstore", "story", "xiaoshuo", "mianfei", "zhuishu", "kanshu"
         )
         return identifiers.any { identifierMatches(text, normalized, it) }
     }
@@ -3863,13 +3960,17 @@ object RuleRepository {
         return parseImportLines(content.lineSequence())
     }
 
-    private fun parseImportLinesStreaming(lines: Sequence<String>): ParsedRules {
+    private fun parseImportLinesStreaming(
+        lines: Sequence<String>,
+        onProgress: ((lineCount: Int, parsedRuleCount: Int) -> Unit)? = null
+    ): ParsedRules {
         val parsedRules = ParsedRuleBuckets()
         var lineContext = RuleParsingSupport.LineContext()
-        var blockedCount = 0
-        var exceptionCount = 0
-        var badfilterCount = 0
+        var lineCount = 0
+        var parsedRuleCount = 0
+        var lastProgressAt = 0L
         lines.forEach { rawLine ->
+            lineCount += 1
             RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach { fragment ->
                 val trimmed = fragment.trim()
                 if (trimmed.startsWith("#pkg=", ignoreCase = true)) {
@@ -3879,29 +3980,57 @@ object RuleRepository {
                 if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) {
                     return@forEach
                 }
-                parseRuleLine(fragment, lineContext).forEach { parsedRule ->
-                    when {
-                        parsedRule.isBadfilter -> {
-                            mergeParsedRuleInto(parsedRules.badfilters, parsedRule)
-                            badfilterCount = parsedRules.badfilters.size
-                        }
-                        parsedRule.isException -> {
-                            mergeParsedRuleInto(parsedRules.exceptions, parsedRule)
-                            exceptionCount = parsedRules.exceptions.size
-                        }
-                        else -> {
-                            mergeParsedRuleInto(parsedRules.blocked, parsedRule)
-                            blockedCount = parsedRules.blocked.size
-                        }
+                val parsedLineRules = parseRuleLine(fragment, lineContext)
+                parsedLineRules.forEach { parsedRule ->
+                    mergeParsedImportRule(parsedRules, parsedRule)
+                    parsedRuleCount += 1
+                }
+                if (parsedLineRules.isEmpty()) {
+                    parseUnsupportedImportRule(fragment, lineContext)?.let { parsedRule ->
+                        mergeParsedImportRule(parsedRules, parsedRule)
+                        parsedRuleCount += 1
                     }
                 }
             }
+            val now = System.currentTimeMillis()
+            if (onProgress != null && (lineCount % 2000 == 0 || now - lastProgressAt >= 750L)) {
+                lastProgressAt = now
+                onProgress.invoke(lineCount, parsedRuleCount)
+            }
         }
+        onProgress?.invoke(lineCount, parsedRuleCount)
         return ParsedRules(
             blockedRules = parsedRules.blocked.values.toList(),
             exceptionRules = parsedRules.exceptions.values.toList(),
             badfilterRules = parsedRules.badfilters.values.toList()
         )
+    }
+
+    private fun parseUnsupportedImportRule(rawLine: String, lineContext: RuleParsingSupport.LineContext): ParsedRule? {
+        val line = RuleParsingSupport.stripInlineRuleComment(normalizeMessyRuleLine(rawLine)).trim()
+        if (line.isBlank() || line.startsWith("#") || line.startsWith("!")) return null
+        val normalizedLine = RuleParsingSupport.stripYamlListPrefix(RuleParsingSupport.unwrapRuleWrapper(line)).trim()
+        if (normalizedLine.isBlank()) return null
+        val isException = normalizedLine.startsWith("@@")
+        val working = if (isException) normalizedLine.removePrefix("@@") else normalizedLine
+        val domain = extractDomainCandidate(working)
+            ?.first
+            ?.let(::parseDomainsFromPattern)
+            ?.firstOrNull()
+            ?: extractLooseDomainForUnsupportedRule(working)
+            ?: UNSUPPORTED_RULE_DOMAIN
+        return ParsedRule(
+            domain = domain,
+            isException = isException,
+            cosmeticSelector = normalizedLine.take(500),
+            isUnsupported = true,
+            vendorHints = lineContext.vendorHints + "暂不支持规则"
+        )
+    }
+
+    private fun extractLooseDomainForUnsupportedRule(line: String): String? {
+        val match = Regex("""([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+)""").find(line) ?: return null
+        return sanitizeDomain(match.value)
     }
 
     // P0.4 新增：支持 Sequence 流式解析（避免大文件一次性加载）
@@ -4128,7 +4257,28 @@ object RuleRepository {
     )
 
     private fun mergeParsedRuleInto(target: MutableMap<String, ParsedRule>, parsedRule: ParsedRule) {
-        target[parsedRule.domain] = mergeParsedRule(target[parsedRule.domain], parsedRule)
+        val key = parsedRuleBucketKey(parsedRule)
+        target[key] = mergeParsedRule(target[key], parsedRule)
+    }
+
+    private fun parsedRuleBucketKey(parsedRule: ParsedRule): String {
+        if (parsedRule.isUnsupported ||
+            parsedRule.regexPattern != null ||
+            parsedRule.cosmeticSelector != null ||
+            parsedRule.keywordPattern != null ||
+            parsedRule.pathPattern != null ||
+            parsedRule.ipCidr != null ||
+            parsedRule.removeParams.isNotEmpty() ||
+            parsedRule.removeParamRegexes.isNotEmpty() ||
+            parsedRule.removeRequestHeaders.isNotEmpty() ||
+            parsedRule.setRequestHeaders.isNotEmpty() ||
+            parsedRule.replaceRules.isNotEmpty() ||
+            parsedRule.cspValue != null ||
+            parsedRule.redirectResource != null
+        ) {
+            return buildParsedRuleIdentity(parsedRule)
+        }
+        return parsedRule.domain
     }
 
     private fun parseCompositeRule(line: String, lineContext: RuleParsingSupport.LineContext): List<ParsedRule>? {
@@ -5532,9 +5682,9 @@ object RuleRepository {
             }
         }
         if (rule.domainConstraints?.isNotEmpty() == true) {
-            if (normalizedRequestDomain == null) return false
+            val contextDomain = normalizedRequestDomain ?: normalizedHost ?: return false
             val allowed = rule.domainConstraints.any { allowedDomain ->
-                normalizedRequestDomain == allowedDomain || normalizedRequestDomain.endsWith(".$allowedDomain")
+                contextDomain == allowedDomain || contextDomain.endsWith(".$allowedDomain")
             }
             if (!allowed) return false
         }
@@ -6136,7 +6286,8 @@ object RuleRepository {
         val replaceRules: Set<String> = emptySet(),
         val cspValue: String? = null,
         val redirectResource: String? = null,
-        val vendorHints: Set<String> = emptySet()
+        val vendorHints: Set<String> = emptySet(),
+        val isUnsupported: Boolean = false
     )
 
 }

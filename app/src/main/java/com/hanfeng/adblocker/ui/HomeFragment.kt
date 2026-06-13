@@ -144,7 +144,6 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         val certificateInstalled = HttpsMitmRepository.isCertificateInstalled(ctx)
         val shizukuEnabled = com.HanFeng.data.AppSettingsRepository.isShizukuEnabled(ctx)
         val shizukuUiState = resolveShizukuUiState(ctx, shizukuEnabled)
-        val shizukuReady = shizukuUiState.ready
         val shizukuMode = shizukuUiState.mode
         val workStatus = when {
             vpnRunning -> "运行中"

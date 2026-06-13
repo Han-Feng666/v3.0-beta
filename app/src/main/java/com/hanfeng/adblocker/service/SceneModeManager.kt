@@ -33,7 +33,10 @@ object SceneModeManager {
     // 小说类 App 包名特征
     private val novelAppKeywords = setOf(
         "novel", "book", "reader", "reading", "qidian", "jinjiang",
-        "zongheng", "17k", "qimao", "fanqie", "migu", "reading"
+        "zongheng", "17k", "qimao", "fanqie", "migu", "reading",
+        "comic", "manga", "manhua", "cartoon", "drama", "duanju", "shortdrama", "short_drama",
+        "minidrama", "mini_drama", "episode", "hongguo", "story", "bookcity", "bookstore", "changdu", "shuqi", "ireader",
+        "listen", "audio", "tingshu", "dongman"
     )
     
     // 视频类 App 包名特征

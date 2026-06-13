@@ -2,6 +2,8 @@ package com.HanFeng.data
 
 import org.junit.Test
 import org.junit.Assert.*
+import com.HanFeng.model.BlockRule
+import com.HanFeng.model.RuleSource
 
 /**
  * P2.2 单元测试：规则解析功能
@@ -89,6 +91,26 @@ class RuleParserTest {
         // ad.qq.com 也会匹配 qq.com，所以应该被保护
         assertTrue("ad.qq.com should be protected (matches qq.com)", isProtectedDomain("ad.qq.com", protectedDomains))
         assertFalse("example.com should not be protected", isProtectedDomain("example.com", protectedDomains))
+    }
+
+    @Test
+    fun `domain modifier falls back to host when request domain is absent`() {
+        val rule = BlockRule(
+            id = "test",
+            domain = "example.com",
+            vendor = "test",
+            source = RuleSource.IMPORTED,
+            domainConstraints = setOf("example.com")
+        )
+        val method = RuleRepository::class.java.getDeclaredMethod(
+            "matchesRequestContext",
+            BlockRule::class.java,
+            String::class.java,
+            String::class.java
+        ).apply { isAccessible = true }
+
+        assertTrue(method.invoke(RuleRepository, rule, "api.example.com", null) as Boolean)
+        assertFalse(method.invoke(RuleRepository, rule, "api.other.com", null) as Boolean)
     }
     
     // Helper functions

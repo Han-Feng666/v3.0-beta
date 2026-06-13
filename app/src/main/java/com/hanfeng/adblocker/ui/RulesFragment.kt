@@ -1,11 +1,14 @@
 package com.HanFeng.ui
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
@@ -53,6 +56,10 @@ import java.util.Locale
 import java.util.UUID
 
 class RulesFragment : Fragment(R.layout.fragment_rules) {
+    private companion object {
+        const val LARGE_RULE_FILE_THRESHOLD_BYTES = 2L * 1024L * 1024L
+    }
+
     private var mainActivity: MainActivity? = null
     private var _binding: FragmentRulesBinding? = null
     private val binding get() = _binding!!
@@ -123,7 +130,10 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 val total = progress.totalBytes?.let { " / ${formatBytes(it)}" }.orEmpty()
                 "$prefix\n正在下载：${formatBytes(progress.bytesRead)}$total"
             }
-            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.IMPORTING -> "$prefix\n下载完成，正在导入规则..."
+            RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.IMPORTING -> {
+                val detail = progress.detail?.takeIf { it.isNotBlank() } ?: "正在导入规则..."
+                "$prefix\n下载完成，$detail"
+            }
             RemoteRuleSourceRepository.RemoteRuleSyncProgress.Stage.COMPLETED -> "$prefix\n导入完成：${progress.addedCount ?: 0} 条规则"
         }
     }
@@ -140,6 +150,14 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) importRuleFile(uri)
+    }
+
+    private val ruleExportPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            exportRulesToDownloads()
+        } else {
+            showShortToast("需要存储权限以导出规则")
+        }
     }
 
     private val suspiciousDomainsLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -1198,18 +1216,21 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun exportRulesToDownloads() {
         val ctx = context ?: return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            ruleExportPermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            return
+        }
         val allRules = RuleRepository.getRules(ctx)
         if (allRules.isEmpty()) {
             Toast.makeText(ctx, "当前没有规则可导出", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val exportDir = android.os.Environment.getExternalStoragePublicDirectory(
-            android.os.Environment.DIRECTORY_DOWNLOADS
-        )
         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.CHINA)
             .format(java.util.Date())
-        val outputFile = java.io.File(exportDir, "hanfeng_rules_$timestamp.txt")
+        val fileName = "hanfeng_rules_$timestamp.txt"
 
         lifecycleScope.launch {
             val progressDialog = android.app.ProgressDialog(ctx).apply {
@@ -1220,24 +1241,30 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 show()
             }
             try {
-                val exportedCount = withContext(Dispatchers.IO) {
-                    com.HanFeng.data.RuleRepositoryExport.exportRulesToTxt(
+                val exported = withContext(Dispatchers.IO) {
+                    com.HanFeng.data.RuleRepositoryExport.buildRulesText(
                         context = ctx,
-                        outputFile = outputFile,
                         includeWhitelist = true,
                         includeSmartScored = true
                     )
                 }
+                val exportPath = withContext(Dispatchers.IO) {
+                    com.HanFeng.security.CertificateAuthorityManager.exportTextFileToDownloads(
+                        context = ctx,
+                        fileName = fileName,
+                        content = exported.content
+                    )
+                }
                 progressDialog.dismiss()
-                if (exportedCount > 0) {
+                if (exported.count > 0 && exportPath != null) {
                     Toast.makeText(
                         ctx,
-                        "导出成功：$exportedCount 条规则\n文件位置：${outputFile.absolutePath}",
+                        "导出成功：${exported.count} 条规则\n文件位置：$exportPath",
                         Toast.LENGTH_LONG
                     ).show()
                     LogRepository.append(
                         ctx,
-                        "规则导出成功：文件=$outputFile, 规则数=$exportedCount"
+                        "规则导出成功：文件=$exportPath, 规则数=${exported.count}"
                     )
                 } else {
                     Toast.makeText(ctx, "导出失败：未写入任何规则", Toast.LENGTH_SHORT).show()
@@ -1449,6 +1476,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             runCatching {
                 updateProgressDialog(progress, "正在打开规则文件...")
                 delay(80)
+                val fileSize = queryRuleFileSize(appContext, uri)
+                if (fileSize != null && fileSize > LARGE_RULE_FILE_THRESHOLD_BYTES) {
+                    LogRepository.append(appContext, "Import rule file using streaming path: size=$fileSize uri=$uri")
+                    importLargeRuleFileStreaming(sourceLabel = uri.toString(), sourceUri = uri, progress = progress)
+                    return@launch
+                }
                 updateProgressDialog(progress, "正在读取规则文件...\n大文件可能需要等待几秒")
                 val content = readRuleContent(appContext, uri)
                 if (content == null) {
@@ -1470,6 +1503,57 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     }
                 }
             }
+        }
+    }
+
+    private suspend fun queryRuleFileSize(context: android.content.Context, uri: Uri): Long? {
+        return withContext(Dispatchers.IO) {
+            val querySize = runCatching {
+                context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (index >= 0 && !cursor.isNull(index)) cursor.getLong(index) else null
+                    } else {
+                        null
+                    }
+                }
+            }.getOrNull()
+            querySize ?: runCatching {
+                context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
+                    descriptor.length.takeIf { it > 0L }
+                }
+            }.getOrNull()
+        }
+    }
+
+    private suspend fun importLargeRuleFileStreaming(
+        sourceLabel: String,
+        sourceUri: Uri,
+        progress: ProgressDialogHandle?
+    ) {
+        val appContext = context?.applicationContext ?: return
+        updateProgressDialog(progress, "正在以大文件模式导入规则...\n2MB 以上文件会跳过导入前分析")
+        val imported = withContext(Dispatchers.Default) {
+            val stream = appContext.contentResolver.openInputStream(sourceUri)
+                ?: throw IllegalStateException("无法打开规则文件")
+            RuleRepository.importRulesStreaming(appContext, stream, allowWhitelistDomains = true) { detail ->
+                viewLifecycleOwner.lifecycleScope.launch {
+                    updateProgressDialog(progress, detail)
+                }
+            }
+        }
+        updateProgressDialog(progress, "正在刷新规则列表...")
+        val inventory = withContext(Dispatchers.Default) {
+            RuleRepository.getRuleInventory(appContext)
+        }
+        if (!isAdded || _binding == null) return
+        LogRepository.append(appContext, "Large rule file imported from $sourceLabel, importedResult=$imported, totalRules=${inventory.totalSupportedCount}")
+        invalidateRuleListCache()
+        refreshListSoon()
+        reloadVpnIfRunning(true)
+        dismissProgressDialog(progress)
+        context?.let {
+            Toast.makeText(it, "大文件规则已导入，当前可拦截 ${inventory.totalSupportedCount} 条", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1566,7 +1650,11 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     viewLifecycleOwner.lifecycleScope.launch {
                         val importProgress = showProgressDialog("导入规则", "正在导入规则...\n识别到 ${report.safeRuleCount} 条可处理规则")
                         withContext(Dispatchers.Default) {
-                            RuleRepository.importRules(appContext, content, allowWhitelistDomains = true)
+                            RuleRepository.importRules(appContext, content, allowWhitelistDomains = true) { detail ->
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    updateProgressDialog(importProgress, detail)
+                                }
+                            }
                         }
                         updateProgressDialog(importProgress, "正在刷新规则列表...")
                         val inventory = withContext(Dispatchers.Default) {
@@ -1592,7 +1680,11 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         }
                         updateProgressDialog(importProgress, "正在导入剩余规则...")
                         withContext(Dispatchers.Default) {
-                            RuleRepository.importRules(appContext, sanitizedContent)
+                            RuleRepository.importRules(appContext, sanitizedContent) { detail ->
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    updateProgressDialog(importProgress, detail)
+                                }
+                            }
                         }
                         updateProgressDialog(importProgress, "正在刷新规则列表...")
                         val inventory = withContext(Dispatchers.Default) {
@@ -1621,7 +1713,11 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         LogRepository.append(appContext, "Starting rule import: safeRules=${report.safeRuleCount}")
         updateProgressDialog(progress, "正在导入规则...\n识别到 ${report.safeRuleCount} 条可处理规则")
         withContext(Dispatchers.Default) {
-            RuleRepository.importRules(appContext, content)
+            RuleRepository.importRules(appContext, content) { detail ->
+                viewLifecycleOwner.lifecycleScope.launch {
+                    updateProgressDialog(progress, detail)
+                }
+            }
         }
         LogRepository.append(appContext, "Rule import complete")
         

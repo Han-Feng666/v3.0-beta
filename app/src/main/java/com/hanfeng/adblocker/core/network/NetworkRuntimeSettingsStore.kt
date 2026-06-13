@@ -9,16 +9,23 @@ import com.HanFeng.data.ShizukuAdControlRepository
 import com.HanFeng.data.ShizukuConnectionOwnerRepository
 import com.HanFeng.data.ShizukuRepository
 import com.HanFeng.data.WhitelistRepository
+import com.HanFeng.security.CertificateAuthorityManager
 
 object NetworkRuntimeSettingsStore {
     fun load(context: Context): NetworkFeatureFlags {
         val httpDecryptEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(context)
+        val mitmCertificateInstalled = if (httpDecryptEnabled) {
+            HttpsMitmRepository.isCertificateInstalled(context) ||
+                CertificateAuthorityManager.syncInstalledState(context)
+        } else {
+            HttpsMitmRepository.isCertificateInstalled(context)
+        }
         val localProxyConfig = WhitelistRepository.getLocalProxyCoexistConfig(context)
         val shizukuConnectionOwnerReady = loadShizukuConnectionOwnerReady(context)
         val shizukuAdControlReady = loadShizukuAdControlReady(context)
         return NetworkFeatureFlags(
             httpDecryptEnabled = httpDecryptEnabled,
-            mitmCertificateInstalled = HttpsMitmRepository.isCertificateInstalled(context),
+            mitmCertificateInstalled = mitmCertificateInstalled,
             shizukuConnectionOwnerReady = shizukuConnectionOwnerReady,
             shizukuAdControlReady = shizukuAdControlReady,
             shizukuStrictAppAdBlockEnabled = shizukuAdControlReady &&

@@ -86,6 +86,17 @@ object ShizukuAdControlRepository {
         }.getOrDefault(false)
     }
 
+    fun ensureBoundAndWait(context: Context): Boolean {
+        if (hasLiveService()) return true
+        ensureBound(context)
+        val deadline = SystemClock.elapsedRealtime() + BIND_WAIT_TIMEOUT_MILLIS
+        while (binding && SystemClock.elapsedRealtime() < deadline) {
+            if (hasLiveService()) return true
+            SystemClock.sleep(BIND_WAIT_STEP_MILLIS)
+        }
+        return hasLiveService() || checkServiceHealth(context)
+    }
+
     fun invalidateService() {
         service = null
         binding = false
@@ -102,7 +113,7 @@ object ShizukuAdControlRepository {
     fun isServiceAlive(): Boolean = liveService() != null
 
     fun getLastOperationSummary(context: Context): String {
-        return runCatching { getService(context)?.getLastOperationSummary().orEmpty() }
+        return runCatching { localizeOperationSummary(getService(context)?.getLastOperationSummary().orEmpty()) }
             .getOrDefault("")
     }
 
@@ -282,6 +293,10 @@ object ShizukuAdControlRepository {
             invalidateService()
             serviceMarkedDead = true
         }
+        val packageManagerInstalled = runCatching {
+            context.packageManager.getPackageInfo(normalized, packageQueryFlags())
+            true
+        }.getOrDefault(false)
         val installed = runCatching { remote?.isPackageInstalled(normalized) }
             .onFailure {
                 invalidateService()
@@ -289,10 +304,8 @@ object ShizukuAdControlRepository {
                 LogRepository.append(context, "[PromoGovern] service query failed for $normalized: ${it.message}")
             }
             .getOrNull()
-            ?: runCatching {
-                context.packageManager.getPackageInfo(normalized, 0)
-                true
-            }.getOrDefault(false)
+            ?.let { remoteInstalled -> remoteInstalled || packageManagerInstalled }
+            ?: packageManagerInstalled
         val enabledState = runCatching { remote?.getPackageEnabledState(normalized) }
             .onFailure {
                 invalidateService()
@@ -309,7 +322,7 @@ object ShizukuAdControlRepository {
             }
             .getOrNull()
             ?: runCatching {
-                val info = context.packageManager.getPackageInfo(normalized, 0)
+                val info = context.packageManager.getPackageInfo(normalized, packageQueryFlags())
                 (info.applicationInfo?.flags ?: 0 and android.content.pm.ApplicationInfo.FLAG_SUSPENDED) != 0
             }.getOrDefault(false)
         return PackageControlStatus(
@@ -349,12 +362,41 @@ object ShizukuAdControlRepository {
 
     private fun enabledStateLabel(state: Int): String {
         return when (state) {
-            PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> "enabled"
-            PackageManager.COMPONENT_ENABLED_STATE_DISABLED -> "disabled"
-            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER -> "disabled_user"
-            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED -> "disabled_until_used"
-            else -> "default"
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> "已启用"
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED -> "已冻结"
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER -> "已冻结"
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED -> "已冻结"
+            else -> "默认"
         }
+    }
+
+    private fun packageQueryFlags(): Int {
+        return PackageManager.MATCH_DISABLED_COMPONENTS or
+            PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
+    }
+
+    private fun localizeOperationSummary(raw: String): String {
+        if (raw.isBlank() || raw == "idle") return raw
+        return raw
+            .replace("try", "第")
+            .replace(Regex("第(\\d+):"), "第$1次：")
+            .replace("success", "执行成功")
+            .replace("failed", "执行失败")
+            .replace("unsupported", "系统不支持")
+            .replace("permission", "权限不足")
+            .replace("security", "系统安全限制")
+            .replace("package-missing", "未找到目标应用")
+            .replace("exception", "执行异常")
+            .replace("command=", "命令=")
+            .replace(" exit=", "，退出码=")
+            .replace(" output=", "，输出=")
+            .replace(" error=", "，错误=")
+            .replace("POST_NOTIFICATION", "通知权限")
+            .replace("RUN_ANY_IN_BACKGROUND", "后台运行权限")
+            .replace("RUN_IN_BACKGROUND", "后台活动权限")
+            .replace("WAKE_LOCK", "唤醒锁权限")
+            .replace("INTERNET", "联网权限")
+            .replace("no-success", "未成功")
     }
 
     private fun logBindEvent(name: ComponentName?, binder: IBinder?, state: String) {

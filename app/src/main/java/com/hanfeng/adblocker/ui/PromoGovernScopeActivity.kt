@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -42,6 +44,8 @@ class PromoGovernScopeActivity : BaseActivity() {
     private lateinit var adapter: PromoGovernTargetAdapter
     private var currentScope = PromoGovernScope.ALL
     private var allTargets: List<PromoGovernTarget> = emptyList()
+    private var visibleTargets: List<PromoGovernTarget> = emptyList()
+    private var searchQuery: String = ""
 
     private val SYSTEM_CRITICAL_APPS = setOf(
         "android",
@@ -75,6 +79,15 @@ class PromoGovernScopeActivity : BaseActivity() {
         binding.btnScopeAll.setOnClickListener { applyScope(PromoGovernScope.ALL) }
         binding.btnScopeSystem.visibility = View.GONE
         binding.btnScopeThirdParty.setOnClickListener { applyScope(PromoGovernScope.THIRD_PARTY_ONLY) }
+        binding.btnGovernVisible.setOnClickListener { showBatchGovernDialog() }
+        binding.searchInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                searchQuery = s?.toString().orEmpty().trim().lowercase()
+                applyScope(currentScope)
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
         loadTargets()
     }
 
@@ -87,9 +100,17 @@ class PromoGovernScopeActivity : BaseActivity() {
         lifecycleScope.launch {
             LogRepository.append(this@PromoGovernScopeActivity, "loadTargets started")
             showShortToast("正在加载可治理 App 列表")
-            if (!ensureShizukuReady()) {
-                LogRepository.append(this@PromoGovernScopeActivity, "loadTargets failed: Shizuku not ready")
+            if (!AppSettingsRepository.isShizukuEnabled(this@PromoGovernScopeActivity)) {
+                StableDialog.builder(this@PromoGovernScopeActivity)
+                    .setTitle("Shizuku 未启用")
+                    .setMessage("请先开启设置中的 Shizuku 增强。")
+                    .setPositiveButton("我知道了", null)
+                    .showSafely(this@PromoGovernScopeActivity, "Show shizuku disabled dialog failed")
+                LogRepository.append(this@PromoGovernScopeActivity, "loadTargets failed: Shizuku disabled")
                 return@launch
+            }
+            withContext(Dispatchers.IO) {
+                runCatching { ShizukuAdControlRepository.ensureBoundAndWait(this@PromoGovernScopeActivity) }
             }
             val discovery = withContext(Dispatchers.Default) {
                 PromoGovernTargetRepository.discover(this@PromoGovernScopeActivity)
@@ -169,27 +190,118 @@ class PromoGovernScopeActivity : BaseActivity() {
                 PromoGovernScope.SYSTEM_ONLY -> target.systemApp
                 PromoGovernScope.THIRD_PARTY_ONLY -> !target.systemApp
             }
-        }
+        }.filter(::matchesSearchQuery)
+        this.visibleTargets = visibleTargets
         adapter.submitList(visibleTargets)
         binding.emptyText.visibility = if (visibleTargets.isEmpty()) View.VISIBLE else View.GONE
+        binding.btnGovernVisible.isEnabled = visibleTargets.isNotEmpty()
+        binding.btnGovernVisible.alpha = if (visibleTargets.isNotEmpty()) 1f else 0.5f
         binding.summaryText.text = buildSummaryText(visibleTargets)
         updateScopeButtons()
     }
 
+    private fun matchesSearchQuery(target: PromoGovernTarget): Boolean {
+        val query = searchQuery
+        if (query.isBlank()) return true
+        return target.title.lowercase().contains(query) ||
+            target.packageName.lowercase().contains(query) ||
+            target.category.lowercase().contains(query) ||
+            target.sourceLabel.lowercase().contains(query) ||
+            target.detectionTags.any { it.lowercase().contains(query) }
+    }
+
     private fun buildSummaryText(targets: List<PromoGovernTarget>): String {
+        val serviceState = if (ShizukuAdControlRepository.isServiceAlive()) "Shizuku 治理服务：已连接" else "Shizuku 治理服务：等待连接，执行动作时会再次检查"
         if (targets.isEmpty()) {
             return buildString {
-                append("当前范围下没有识别到可治理的第三方 App。\n\n")
+                append(serviceState)
+                append("\n\n当前范围或搜索条件下没有可治理 App。\n\n")
                 append("说明：\n")
                 append("推广治理覆盖系统预装的淘宝、美团、京东、今日头条等常见第三方 App，纯系统组件不参与治理。\n\n")
                 append("可能原因：\n")
-                append("1. 未安装疑似推广类第三方 App\n")
-                append("2. 已安装的第三方 App 未命中识别规则\n\n")
+                append("1. 搜索词过窄\n")
+                append("2. 当前范围没有匹配目标\n\n")
                 append("识别规则：\n")
                 append("知名第三方包名（淘宝/美团/京东/头条/抖音/快手等）或含「应用商店」「浏览器」「小说」「视频」「活动」「福利」等关键词")
             }
         }
-        return "已扫描第三方 App（含系统预装），共识别 ${targets.size} 个可治理推广 App。纯系统组件不参与治理。"
+        return "$serviceState\n已显示 ${targets.size} 个可治理 App。可按 App 名、包名、分类继续搜索；手动确认项执行冻结或暂停前会提示风险。"
+    }
+
+    private fun showBatchGovernDialog() {
+        val targets = visibleTargets
+        if (targets.isEmpty()) {
+            showOperationResult("当前列表下没有可治理 App")
+            return
+        }
+        StableDialog.builder(this)
+            .setTitle("治理当前显示 App")
+            .setMessage("将对当前筛选出的 ${targets.size} 个 App 执行智能治理。智能治理会优先关闭推送广告，必要时再尝试冻结或暂停。")
+            .setPositiveButton("开始治理") { _, _ -> runBatchSmartGovern(targets) }
+            .setNegativeButton("取消", null)
+            .showSafely(this, "Show batch govern dialog failed")
+    }
+
+    private fun runBatchSmartGovern(targets: List<PromoGovernTarget>) {
+        lifecycleScope.launch {
+            if (!ensureShizukuReady()) return@launch
+            val message = withContext(Dispatchers.IO) {
+                warmShizukuServicesBlocking()
+                val operated = mutableListOf<String>()
+                val skipped = mutableListOf<String>()
+                val failed = mutableListOf<String>()
+                targets.forEach { target ->
+                    if (ShizukuAdControlCatalog.shouldSkipBatchDisable(target.packageName)) {
+                        skipped += target.title
+                        return@forEach
+                    }
+                    val result = runCatching {
+                        PromoGovernActionRepository.smartGovern(this@PromoGovernScopeActivity, target)
+                    }.getOrElse { e ->
+                        LogRepository.append(this@PromoGovernScopeActivity, "Batch govern failed for ${target.packageName}: ${e.message ?: e.javaClass.simpleName}")
+                        failed += target.title
+                        return@forEach
+                    }
+                    if (result.contains("成功") || result.contains("已自动回退")) {
+                        operated += target.title
+                    } else {
+                        failed += "${target.title}（$result）"
+                    }
+                }
+                buildBatchGovernResult(operated, skipped, failed)
+            }
+            if (isFinishing || isDestroyed) return@launch
+            refreshTargetsSilently()
+            showOperationResult(message)
+        }
+    }
+
+    private fun buildBatchGovernResult(
+        operated: List<String>,
+        skipped: List<String>,
+        failed: List<String>
+    ): String {
+        return buildString {
+            append("批量智能治理完成")
+            append("\n成功：${operated.size} 个")
+            append("\n跳过：${skipped.size} 个")
+            append("\n失败：${failed.size} 个")
+            if (operated.isNotEmpty()) {
+                append("\n\n已治理：")
+                append(operated.take(12).joinToString("、"))
+                if (operated.size > 12) append(" 等 ${operated.size} 个")
+            }
+            if (skipped.isNotEmpty()) {
+                append("\n\n已跳过：")
+                append(skipped.take(8).joinToString("、"))
+                if (skipped.size > 8) append(" 等 ${skipped.size} 个")
+            }
+            if (failed.isNotEmpty()) {
+                append("\n\n失败项：")
+                append(failed.take(8).joinToString("、"))
+                if (failed.size > 8) append(" 等 ${failed.size} 个")
+            }
+        }
     }
 
     private fun updateScopeButtons() {
@@ -232,11 +344,12 @@ class PromoGovernScopeActivity : BaseActivity() {
 
     private fun showPromoTargetActionDialog(target: PromoGovernTarget) {
         val status = ShizukuAdControlRepository.queryPackageStatus(this, target.packageName)
+        val installed = isPackageInstalledLocally(target.packageName) || status.installed || target.packageStatus.installed
         val relatedPresets = target.relatedPresets
-        val canDisable = status.installed && !PromoGovernActionRepository.isDisabledState(status.enabledState)
-        val canEnable = status.installed && PromoGovernActionRepository.isDisabledState(status.enabledState)
-        val canSuspend = status.installed && !status.suspended
-        val canUnsuspend = status.installed && status.suspended
+        val canDisable = installed && !PromoGovernActionRepository.isDisabledState(status.enabledState)
+        val canEnable = installed && PromoGovernActionRepository.isDisabledState(status.enabledState)
+        val canSuspend = installed && !status.suspended
+        val canUnsuspend = installed && status.suspended
         val message = buildString {
             append(target.description)
             if (relatedPresets.size > 1) {
@@ -247,7 +360,7 @@ class PromoGovernScopeActivity : BaseActivity() {
                 append("\n\n批量保护：")
                 append("该项目属于")
                 append(reason)
-                append("，批量停用和智能治理会默认跳过，建议仅在确认风险后手动处理。")
+                append("，批量冻结和智能治理会默认跳过，建议仅在确认风险后手动处理。")
             }
             append("\n\n来源：")
             append(target.sourceLabel)
@@ -258,7 +371,7 @@ class PromoGovernScopeActivity : BaseActivity() {
             append("\n应用类型：")
             append(if (target.systemApp) "系统 App" else "第三方 App")
             append("\n已安装：")
-            append(if (status.installed) "是" else "否")
+            append(if (installed) "是" else "否")
             append("\n当前状态：")
             append(status.enabledLabel)
             append("\n暂停状态：")
@@ -278,14 +391,14 @@ class PromoGovernScopeActivity : BaseActivity() {
                 }
             }
         }
-        if (status.installed && (canDisable || canSuspend)) {
+        if (installed && (canDisable || canSuspend)) {
             actions += "智能治理" to {
                 executeGovernAction {
                     PromoGovernActionRepository.smartGovern(this@PromoGovernScopeActivity, target)
                 }
             }
         }
-        if (status.installed) {
+        if (installed) {
             actions += "关闭推送广告" to {
                 executePackageActionWithRisk(target, "关闭推送广告") {
                     PromoGovernActionRepository.setNotificationsBlocked(this@PromoGovernScopeActivity, target, blocked = true)
@@ -298,15 +411,15 @@ class PromoGovernScopeActivity : BaseActivity() {
             }
         }
         if (canDisable) {
-            actions += "停用" to {
-                executePackageActionWithRisk(target, "停用") {
+            actions += "冻结" to {
+                executePackageActionWithRisk(target, "冻结") {
                     PromoGovernActionRepository.setPackageDisabled(this@PromoGovernScopeActivity, target, disabled = true)
                 }
             }
         }
         if (canEnable) {
-            actions += "恢复" to {
-                executePackageActionWithRisk(target, "恢复") {
+            actions += "解冻" to {
+                executePackageActionWithRisk(target, "解冻") {
                     PromoGovernActionRepository.setPackageDisabled(this@PromoGovernScopeActivity, target, disabled = false)
                 }
             }
@@ -319,9 +432,12 @@ class PromoGovernScopeActivity : BaseActivity() {
                 }
             }
         }
-        if (status.installed) {
+        if (installed) {
             actions += "组件治理" to {
-                showComponentGovernDialog(target)
+                launchActivitySafely(
+                    PromoComponentGovernActivity.createIntent(this, target.packageName, target.title),
+                    "打开组件治理页面失败"
+                )
             }
         }
         if (actions.isEmpty()) {
@@ -329,76 +445,137 @@ class PromoGovernScopeActivity : BaseActivity() {
             return
         }
         StableDialog.builder(this)
-            .setTitle(target.title)
-            .setMessage(message)
+            .setTitle("选择治理方式：${target.title}")
             .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
                 actions.getOrNull(which)?.second?.invoke()
+            }
+            .setNeutralButton("详情") { _, _ ->
+                showGovernTargetDetails(target.title, message)
             }
             .setNegativeButton("关闭", null)
             .showSafely(this, "Show govern target actions dialog failed")
     }
 
+    private fun showGovernTargetDetails(title: String, message: String) {
+        StableDialog.builder(this)
+            .setTitle("治理详情：$title")
+            .setMessage(message)
+            .setPositiveButton("确定", null)
+            .showSafely(this, "Show govern target details dialog failed")
+    }
+
     private fun showComponentGovernDialog(target: PromoGovernTarget) {
         lifecycleScope.launch {
-            val candidates = withContext(Dispatchers.Default) {
-                PromoGovernComponentRepository.discoverCandidates(this@PromoGovernScopeActivity, target.packageName)
+            val (candidates, activities) = withContext(Dispatchers.Default) {
+                PromoGovernComponentRepository.discoverCandidates(this@PromoGovernScopeActivity, target.packageName) to
+                    PromoGovernComponentRepository.discoverActivities(this@PromoGovernScopeActivity, target.packageName)
             }
             if (isFinishing || isDestroyed) return@launch
-            if (candidates.isNotEmpty()) {
-                StableDialog.builder(this@PromoGovernScopeActivity)
-                    .setTitle("组件治理")
-                    .setMessage("已识别 ${candidates.size} 个高相关组件，可直接选择治理，也可以进入手动输入。")
-                    .setItems(candidates.map { candidate ->
-                        val state = if (candidate.enabled) "启用中" else "已停用"
-                        "[${candidate.groupLabel}/${candidate.riskLabel}/$state] ${candidate.shortName}"
-                    }.toTypedArray()) { _, which ->
-                        showComponentActionDialog(target, candidates[which])
+            if (candidates.isNotEmpty() || activities.isNotEmpty()) {
+                val selectableComponents = (candidates + activities)
+                    .distinctBy { it.componentName }
+                    .sortedWith(compareByDescending<PromoComponentCandidate> { it.score }.thenBy { it.typeLabel }.thenBy { it.shortName })
+                val checked = BooleanArray(selectableComponents.size) { index ->
+                    selectableComponents[index].enabled && selectableComponents[index].score > 0
+                }
+                val labels = selectableComponents.map { candidate ->
+                    buildComponentChoiceLabel(
+                        groupLabel = candidate.groupLabel,
+                        riskLabel = candidate.riskLabel,
+                        enabled = candidate.enabled,
+                        shortName = candidate.shortName,
+                        componentName = candidate.componentName,
+                        recommendation = candidate.recommendation
+                    )
+                }.toTypedArray()
+                val dialog = StableDialog.builder(this@PromoGovernScopeActivity)
+                    .setTitle("勾选要冻结的组件（${selectableComponents.size} 个）")
+                    .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
+                        checked[which] = isChecked
                     }
-                    .setNeutralButton("手动输入") { _, _ ->
-                        showManualComponentGovernDialog(target, candidates.firstOrNull()?.componentName.orEmpty())
+                    .setPositiveButton("冻结选中", null)
+                    .setNeutralButton("全部 Activity", null)
+                    .setNegativeButton("更多", null)
+                    .create()
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val selected = selectableComponents.filterIndexed { index, _ -> checked[index] }
+                        if (selected.isEmpty()) {
+                            showShortToast("请先选择组件")
+                            return@setOnClickListener
+                        }
+                        dialog.dismiss()
+                        executeComponentBatchAction(target, selected, disable = true)
                     }
-                    .setNegativeButton("取消", null)
-                    .showSafely(this@PromoGovernScopeActivity, "Show component candidates dialog failed")
+                    dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                        if (activities.isEmpty()) {
+                            showShortToast("未识别到 Activity")
+                            return@setOnClickListener
+                        }
+                        showAllActivityGovernDialog(target, activities)
+                    }
+                    dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+                        val selected = selectableComponents.filterIndexed { index, _ -> checked[index] }
+                        showComponentMoreDialog(target, selected, selectableComponents.firstOrNull()?.componentName.orEmpty())
+                    }
+                }
+                dialog.showSafely(this@PromoGovernScopeActivity, "Show component candidates dialog failed")
                 return@launch
             }
             showManualComponentGovernDialog(target, "${target.packageName}/")
         }
     }
 
-    private fun showComponentActionDialog(target: PromoGovernTarget, candidate: PromoComponentCandidate) {
+    private fun showComponentMoreDialog(
+        target: PromoGovernTarget,
+        selected: List<PromoComponentCandidate>,
+        initialValue: String
+    ) {
+        val actions = arrayOf("解冻选中组件", "高级手动输入")
         StableDialog.builder(this)
-            .setTitle("组件治理")
-            .setMessage(buildString {
-                append(candidate.componentName)
-                append("\n\n类型：")
-                append(candidate.groupLabel)
-                append("\n风险：")
-                append(candidate.riskLabel)
-                append("\n建议：")
-                append(candidate.recommendation)
-            })
-            .setPositiveButton("停用组件") { _, _ ->
-                executeComponentToggleAction(
-                    packageName = target.packageName,
-                    title = target.title,
-                    componentWasEnabled = candidate.enabled,
-                    componentName = candidate.componentName,
-                    disable = true
-                )
+            .setTitle("更多组件操作")
+            .setItems(actions) { _, which ->
+                when (which) {
+                    0 -> {
+                        if (selected.isEmpty()) {
+                            showShortToast("请先选择组件")
+                        } else {
+                            executeComponentBatchAction(target, selected, disable = false)
+                        }
+                    }
+                    1 -> showManualComponentGovernDialog(target, initialValue)
+                }
             }
-            .setNeutralButton("恢复组件") { _, _ ->
-                executeComponentToggleAction(
-                    packageName = target.packageName,
-                    title = target.title,
-                    componentWasEnabled = candidate.enabled,
-                    componentName = candidate.componentName,
-                    disable = false
-                )
+            .setNegativeButton("取消", null)
+            .showSafely(this, "Show component more actions dialog failed")
+    }
+
+    private fun buildComponentChoiceLabel(
+        groupLabel: String,
+        riskLabel: String,
+        enabled: Boolean,
+        shortName: String,
+        componentName: String,
+        recommendation: String
+    ): String {
+        val state = if (enabled) "启用中" else "已冻结"
+        return "[$groupLabel / $riskLabel / $state] $shortName\n$componentName\n建议：$recommendation"
+    }
+
+    private fun showAllActivityGovernDialog(target: PromoGovernTarget, activities: List<PromoComponentCandidate>) {
+        StableDialog.builder(this)
+            .setTitle("全部 Activity 治理")
+            .setMessage(
+                "将处理 ${activities.size} 个 Activity。冻结全部 Activity 后，桌面图标可能消失，应用页面通常无法打开，效果接近冰箱冻结。解冻全部 Activity 可撤销该组件级处理。"
+            )
+            .setPositiveButton("冻结全部 Activity") { _, _ ->
+                executeComponentBatchAction(target, activities, disable = true)
             }
-            .setNegativeButton("手动输入") { _, _ ->
-                showManualComponentGovernDialog(target, candidate.componentName)
+            .setNeutralButton("解冻全部 Activity") { _, _ ->
+                executeComponentBatchAction(target, activities, disable = false)
             }
-            .showSafely(this, "Show component actions dialog failed")
+            .setNegativeButton("取消", null)
+            .showSafely(this, "Show all activity govern dialog failed")
     }
 
     private fun showManualComponentGovernDialog(target: PromoGovernTarget, initialValue: String) {
@@ -411,8 +588,8 @@ class PromoGovernScopeActivity : BaseActivity() {
             .setTitle("组件治理")
             .setMessage("适合处理启动页 Activity、推荐页 Activity、广告 Service、推送 Receiver 等单个组件。请输入完整组件名后选择动作。")
             .setView(input)
-            .setPositiveButton("停用组件", null)
-            .setNeutralButton("恢复组件", null)
+            .setPositiveButton("冻结组件", null)
+            .setNeutralButton("解冻组件", null)
             .setNegativeButton("取消", null)
             .create()
         dialog.setOnShowListener {
@@ -475,6 +652,44 @@ class PromoGovernScopeActivity : BaseActivity() {
         }
     }
 
+    private fun executeComponentBatchAction(
+        target: PromoGovernTarget,
+        candidates: List<PromoComponentCandidate>,
+        disable: Boolean
+    ) {
+        executeGovernAction {
+            var successCount = 0
+            val failed = mutableListOf<String>()
+            candidates.forEach { candidate ->
+                val result = PromoGovernActionRepository.setComponentDisabled(
+                    context = this@PromoGovernScopeActivity,
+                    packageName = target.packageName,
+                    title = target.title,
+                    componentName = candidate.componentName,
+                    disabled = disable,
+                    componentWasEnabled = candidate.enabled
+                )
+                if (result.contains("成功")) {
+                    successCount += 1
+                } else {
+                    failed += candidate.shortName
+                }
+            }
+            val actionText = if (disable) "冻结" else "解冻"
+            buildString {
+                append("组件${actionText}完成：成功 ")
+                append(successCount)
+                append(" 个，失败 ")
+                append(failed.size)
+                append(" 个")
+                if (failed.isNotEmpty()) {
+                    append("\n失败组件：")
+                    append(failed.joinToString("、"))
+                }
+            }
+        }
+    }
+
     private fun executeGovernAction(block: () -> String) {
         lifecycleScope.launch {
             if (!ensureShizukuReady()) return@launch
@@ -498,12 +713,20 @@ class PromoGovernScopeActivity : BaseActivity() {
         }
     }
 
+    private fun isPackageInstalledLocally(packageName: String): Boolean {
+        return runCatching {
+            packageManager.getPackageInfo(packageName, 0)
+            true
+        }.getOrDefault(false)
+    }
+
     private fun assessRiskLevel(target: PromoGovernTarget, action: String): RiskLevel {
         return when {
             target.packageName in SYSTEM_CRITICAL_APPS -> RiskLevel.HIGH
-            target.systemApp && (action.contains("停用") || action.contains("卸载")) -> RiskLevel.HIGH
+            target.systemApp && (action.contains("冻结") || action.contains("停用") || action.contains("卸载")) -> RiskLevel.HIGH
             target.systemApp && action.contains("暂停") -> RiskLevel.MEDIUM
             action.contains("卸载") -> RiskLevel.HIGH
+            target.detectionTags.contains("manual-confirm") && (action.contains("冻结") || action.contains("停用") || action.contains("暂停")) -> RiskLevel.MEDIUM
             target.systemApp -> RiskLevel.MEDIUM
             else -> RiskLevel.LOW
         }
@@ -526,7 +749,7 @@ class PromoGovernScopeActivity : BaseActivity() {
                 } else if (action.contains("卸载")) {
                     append("警告：卸载将删除用户数据且不可恢复。\n\n")
                 } else {
-                    append("警告：停用系统应用可能导致部分功能不可用。\n\n")
+                    append("警告：冻结系统应用可能导致部分功能不可用。\n\n")
                 }
                 append("建议：操作前请确认已了解风险，必要时请先备份数据。\n\n")
                 append("确认继续？")
@@ -540,12 +763,12 @@ class PromoGovernScopeActivity : BaseActivity() {
             RiskLevel.LOW -> "确定要对「${target.title}」执行 ${action} 吗？"
         }
 
-        androidx.appcompat.app.AlertDialog.Builder(this)
+        StableDialog.builder(this)
             .setTitle("操作确认")
             .setMessage(message)
             .setPositiveButton("确认") { _, _ -> onConfirm() }
             .setNegativeButton("取消", null)
-            .show()
+            .showSafely(this, "Show govern risk confirmation dialog failed")
     }
 
     private fun showOperationResult(message: String) {
@@ -583,28 +806,18 @@ class PromoGovernScopeActivity : BaseActivity() {
                 binding.metaText.text = listOf(item.category, item.sourceLabel, item.packageName).joinToString(" | ")
                 binding.descText.text = item.description
                 binding.stateText.text = buildStateText(item)
+                val openActions = View.OnClickListener { onClick(item) }
                 binding.root.isClickable = true
                 binding.root.isFocusable = false
-                binding.root.setOnClickListener { 
-                    showShortToast("点击条目：${item.title}")
-                    onClick(item) 
-                }
-                val status = item.packageStatus
-                if (status.installed) {
-                    binding.btnGovern.isEnabled = true
-                    binding.btnGovern.isClickable = true
-                    binding.btnGovern.alpha = 1f
-                    binding.btnGovern.setOnClickListener { v ->
-                        v.isPressed = true
-                        showShortToast("点击治理：${item.title}")
-                        showPromoTargetActionDialog(item)
-                    }
-                } else {
-                    binding.btnGovern.isEnabled = false
-                    binding.btnGovern.isClickable = false
-                    binding.btnGovern.alpha = 0.5f
-                    binding.btnGovern.setOnClickListener(null)
-                }
+                binding.root.setOnClickListener(openActions)
+                binding.titleText.setOnClickListener(openActions)
+                binding.metaText.setOnClickListener(openActions)
+                binding.descText.setOnClickListener(openActions)
+                binding.stateText.setOnClickListener(openActions)
+                binding.btnGovern.isEnabled = true
+                binding.btnGovern.isClickable = true
+                binding.btnGovern.alpha = 1f
+                binding.btnGovern.setOnClickListener(openActions)
             }
         }
     }
@@ -612,7 +825,7 @@ class PromoGovernScopeActivity : BaseActivity() {
     private fun buildStateText(target: PromoGovernTarget): String {
         return when {
             target.packageStatus.suspended -> "已暂停"
-            PromoGovernActionRepository.isDisabledState(target.packageStatus.enabledState) -> "已停用"
+            PromoGovernActionRepository.isDisabledState(target.packageStatus.enabledState) -> "已冻结"
             else -> if (target.systemApp) "系统" else "第三方"
         }
     }
