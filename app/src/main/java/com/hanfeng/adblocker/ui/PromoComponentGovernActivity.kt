@@ -54,6 +54,8 @@ class PromoComponentGovernActivity : BaseActivity() {
         binding.btnRecommended.setOnClickListener {
             showAllActivities = false
             applyFilter()
+            adapter.selectRecommendedVisible()
+            showShortToast("已勾选推荐组件")
         }
         binding.btnAllActivities.setOnClickListener {
             showAllActivities = true
@@ -85,6 +87,7 @@ class PromoComponentGovernActivity : BaseActivity() {
             allActivities = loaded.second
             binding.summaryText.text = "推荐组件 ${recommendedComponents.size} 个，全部 Activity ${allActivities.size} 个。默认只显示疑似推广组件，避免误冻结主入口、登录、支付等组件。"
             applyFilter()
+            adapter.selectRecommendedVisible()
         }
     }
 
@@ -129,7 +132,7 @@ class PromoComponentGovernActivity : BaseActivity() {
         } else {
             "没有推荐组件。可搜索组件名，或切换到全部 Activity。"
         }
-        binding.btnRecommended.isEnabled = showAllActivities
+        binding.btnRecommended.isEnabled = true
         binding.btnAllActivities.isEnabled = !showAllActivities
         updateActionButtons()
     }
@@ -258,6 +261,13 @@ class PromoComponentGovernActivity : BaseActivity() {
 
         fun clearSelection() {
             selected.clear()
+            notifyDataSetChanged()
+            onSelectionChanged()
+        }
+
+        fun selectRecommendedVisible() {
+            selected.clear()
+            items.filter { it.enabled && it.score > 0 }.forEach { selected += it.componentName }
             notifyDataSetChanged()
             onSelectionChanged()
         }
