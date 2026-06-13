@@ -3,6 +3,7 @@ package com.HanFeng.core.network
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.io.InputStream
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -18,6 +19,8 @@ object BridgeSocketSupport {
         socket.tcpNoDelay = true
         if (!protect(socket)) {
             onProtectFailed()
+            runCatching { socket.close() }
+            throw IOException("Protect bridge socket failed")
         }
         socket.connect(InetSocketAddress(host, port), timeoutMillis)
         return socket

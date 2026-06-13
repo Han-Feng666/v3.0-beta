@@ -67,6 +67,8 @@ object LocalProxyBridgeConnectSupport {
         fallbackSocket.soTimeout = timeoutMillis
         if (!protect(fallbackSocket)) {
             onFallbackProtectFailed()
+            runCatching { fallbackSocket.close() }
+            throw IOException("Protect local proxy fallback socket failed")
         }
         fallbackSocket.connect(InetSocketAddress(host, port), timeoutMillis)
         runCatching {

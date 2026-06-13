@@ -3592,15 +3592,16 @@ object RuleRepository {
         if (ShizukuAdControlCatalog.isManagedPromoAppHint(appName)) return true
         if (isWhitelistedDomain(normalized)) return false
         if (isSensitiveAuthDomain(normalized)) return false
-        if (isSocialCoreDomain(normalized)) return false
         if (shouldProtectMediaTraffic(normalized)) return false
         if (shouldProtectBusinessTraffic(normalized)) return false
         if (isProtectedNovelAppDomain(normalized) && !looksLikeAdDomain(normalized)) return false
         val normalizedVendor = normalizeVendorName(vendor)
-        if (isBypassProtectionDomain(normalized)) return true
-        if (looksLikeAdDomain(normalized)) return true
-        if (looksLikeAdSdkInfraDomain(normalized, normalizedVendor)) return true
-        if (looksLikePushRecommendationAdDomain(normalized)) return true
+        val explicitAdTraffic = isBypassProtectionDomain(normalized) ||
+            looksLikeAdDomain(normalized) ||
+            looksLikeAdSdkInfraDomain(normalized, normalizedVendor) ||
+            looksLikePushRecommendationAdDomain(normalized)
+        if (isSocialCoreDomain(normalized) && !explicitAdTraffic) return false
+        if (explicitAdTraffic) return true
         if (shouldForcePushRecommendInspection(normalized, appName, normalizedVendor)) return true
         return suspiciousDomainConfidenceScore(
             domain = normalized,

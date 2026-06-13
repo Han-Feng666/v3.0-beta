@@ -19,6 +19,7 @@ import android.system.OsConstants
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import com.HanFeng.R
+import com.HanFeng.core.network.FullCaptureRoutingSupport
 import com.HanFeng.core.network.HttpsHandshakeEngine
 import com.HanFeng.core.network.HttpsBridgeFailureSupport
 import com.HanFeng.core.network.HttpsPipeline
@@ -194,6 +195,7 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var localProxyTargetPackages: Set<String> = emptySet()
     @Volatile private var localProxyReachable: Boolean? = null
     @Volatile private var lightweightPassThroughMode = false
+    @Volatile private var activeFullCaptureMode = FullCaptureRoutingSupport.Mode.NONE
     private val passthroughHealthLock = Any()
     @Volatile private var mitmFullCaptureDisabledUntil = 0L
     private var passthroughHealthWindowStartedAt = 0L
@@ -724,8 +726,10 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun buildInterfaceInternal(stableMode: Boolean): ParcelFileDescriptor? {
-        val localProxyFullCapture = shouldCaptureFullTrafficForLocalProxy()
-        val mitmFullCapture = shouldCaptureFullTrafficForMitm(stableMode)
+        val fullCaptureMode = resolveFullCaptureRouteMode(stableMode)
+        activeFullCaptureMode = fullCaptureMode
+        val localProxyFullCapture = fullCaptureMode == FullCaptureRoutingSupport.Mode.LOCAL_PROXY
+        val mitmFullCapture = fullCaptureMode == FullCaptureRoutingSupport.Mode.MITM
         val builder = Builder()
             .setSession(getString(R.string.app_name))
             .setMtu(1500)
@@ -791,24 +795,7 @@ class AdBlockVpnService : VpnService() {
             builder.setBlocking(true)
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            runCatching { builder.addDisallowedApplication(packageName) }
-                .onFailure {
-                    LogRepository.append(this, "Skip self disallowed app $packageName: ${it.message ?: it.javaClass.simpleName}")
-                }
-            val disallowedPackages = WhitelistRepository.getDisallowedPackages(this)
-            disallowedPackages.forEach { packageName ->
-                runCatching { builder.addDisallowedApplication(packageName) }
-                    .onFailure {
-                        LogRepository.append(this, "Skip disallowed app $packageName: ${it.message ?: it.javaClass.simpleName}")
-                    }
-            }
-            logDecisionOnce(
-                key = "vpn-disallowed-apps:${if (stableMode) "stable" else "full"}",
-                message = "Applied disallowed apps count=${disallowedPackages.size} mode=${if (stableMode) "stable" else "full"}",
-                minIntervalMillis = 15_000L
-            )
-        }
+        applyVpnApplicationScope(builder, localProxyFullCapture, stableMode)
 
         if (localProxyFullCapture) {
             LogRepository.append(this, "VPN established with local proxy full-capture routes")
@@ -820,6 +807,52 @@ class AdBlockVpnService : VpnService() {
             LogRepository.append(this, "VPN established with targeted routes only")
         }
         return builder.establish()
+    }
+
+    private fun applyVpnApplicationScope(
+        builder: Builder,
+        localProxyFullCapture: Boolean,
+        stableMode: Boolean
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
+        if (localProxyFullCapture) {
+            val targetPackages = localProxyTargetPackages.sorted()
+            var appliedCount = 0
+            targetPackages.forEach { packageName ->
+                runCatching {
+                    builder.addAllowedApplication(packageName)
+                    appliedCount++
+                }.onFailure {
+                    LogRepository.append(this, "Skip local proxy allowed app $packageName: ${it.message ?: it.javaClass.simpleName}")
+                }
+            }
+            if (appliedCount == 0) {
+                throw IllegalStateException("No local proxy target apps could be applied")
+            }
+            logDecisionOnce(
+                key = "vpn-allowed-local-proxy-apps:$appliedCount",
+                message = "Applied local proxy allowed apps count=$appliedCount targetCount=${targetPackages.size}",
+                minIntervalMillis = 15_000L
+            )
+            return
+        }
+
+        runCatching { builder.addDisallowedApplication(packageName) }
+            .onFailure {
+                LogRepository.append(this, "Skip self disallowed app $packageName: ${it.message ?: it.javaClass.simpleName}")
+            }
+        val disallowedPackages = WhitelistRepository.getDisallowedPackages(this)
+        disallowedPackages.forEach { packageName ->
+            runCatching { builder.addDisallowedApplication(packageName) }
+                .onFailure {
+                    LogRepository.append(this, "Skip disallowed app $packageName: ${it.message ?: it.javaClass.simpleName}")
+                }
+        }
+        logDecisionOnce(
+            key = "vpn-disallowed-apps:${if (stableMode) "stable" else "full"}",
+            message = "Applied disallowed apps count=${disallowedPackages.size} mode=${if (stableMode) "stable" else "full"}",
+            minIntervalMillis = 15_000L
+        )
     }
 
     private fun currentUnderlyingNetworks(): Array<Network>? {
@@ -1205,7 +1238,8 @@ class AdBlockVpnService : VpnService() {
         
         val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
         val addresses = DnsMessageParser.extractAnswerAddresses(upstreamResponse, question)
-        val protectedQuestion = isProtectedTrafficDomain(question.domain) ||
+        val protectedQuestion = (isProtectedTrafficDomain(question.domain) &&
+            !RuleRepository.shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)) ||
             RuleRepository.isWhitelistedDomain(question.domain) ||
             RuleRepository.isSensitiveAuthDomain(question.domain)
         
@@ -1479,6 +1513,8 @@ class AdBlockVpnService : VpnService() {
                 if (!protect(this)) {
                     LogRepository.append(this@AdBlockVpnService, "Protect passthrough UDP socket failed target=$targetIp:${info.destinationPort}")
                     recordPassthroughFailure("udp-protect", "target=$targetIp:${info.destinationPort}")
+                    close()
+                    throw java.io.IOException("Protect passthrough UDP socket failed")
                 }
                 connect(InetAddress.getByAddress(info.destinationAddress), info.destinationPort)
             }
@@ -6197,6 +6233,7 @@ class AdBlockVpnService : VpnService() {
 
     private fun recordPassthroughFailure(stage: String, detail: String) {
         val now = System.currentTimeMillis()
+        if (!isMitmFullCaptureRoutingActive()) return
         if (isMitmFullCaptureCircuitOpen(now)) return
         val shouldTrip = synchronized(passthroughHealthLock) {
             refreshPassthroughHealthWindowLocked(now)
@@ -6788,8 +6825,10 @@ class AdBlockVpnService : VpnService() {
         )
         val vendor = matchedRule?.vendor ?: classifyVendorCached(domain, appName)
         
-        // 即使没有规则匹配，也执行智能域名评分（兜底识别）
-        val smartRule = matchedRule ?: smartDomainScoreAndCreateRule(domain, appName, vendor)
+        // 即使没有规则匹配，也执行智能域名评分和广告基础设施兜底识别。
+        val smartRule = matchedRule
+            ?: smartDomainScoreAndCreateRule(domain, appName, vendor)
+            ?: generalAdTrafficRule(domain, appName, vendor)
         
         return DomainDecisionContext(
             appName = appName,
@@ -6902,6 +6941,19 @@ class AdBlockVpnService : VpnService() {
         }
     }
 
+    private fun generalAdTrafficRule(domain: String, appName: String, vendor: String): BlockRule? {
+        val normalizedDomain = domain.trim().lowercase()
+        if (normalizedDomain.isBlank()) return null
+        if (!RuleRepository.shouldTreatAsGeneralAdTraffic(normalizedDomain, vendor, appName)) return null
+        return BlockRule(
+            id = "general-ad-$normalizedDomain",
+            domain = normalizedDomain,
+            vendor = vendor,
+            source = RuleSource.REFERENCE,
+            keywordPattern = "general-ad-traffic"
+        )
+    }
+
     private fun resolveAliasDecisionContext(
         aliasContexts: MutableMap<String, DomainDecisionContext>,
         aliasTarget: String,
@@ -6998,7 +7050,12 @@ class AdBlockVpnService : VpnService() {
             server = server,
             createSocket = {
                 runCatching {
-                    DatagramSocket().also { protect(it) }
+                    DatagramSocket().also { socket ->
+                        if (!protect(socket)) {
+                            runCatching { socket.close() }
+                            throw java.io.IOException("Protect upstream DNS socket failed")
+                        }
+                    }
                 }.getOrNull()
             }
         )
@@ -7243,7 +7300,11 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun isFullCaptureRoutingActive(): Boolean {
-        return shouldCaptureFullTrafficForLocalProxy() || shouldCaptureFullTrafficForMitm(stableMode = false)
+        return activeFullCaptureMode != FullCaptureRoutingSupport.Mode.NONE
+    }
+
+    private fun isMitmFullCaptureRoutingActive(): Boolean {
+        return activeFullCaptureMode == FullCaptureRoutingSupport.Mode.MITM
     }
 
     private fun loadBlockedIpNetworks(): List<BlockedIpNetwork> {
@@ -7404,7 +7465,9 @@ class AdBlockVpnService : VpnService() {
             sourcePort = sourcePort
         )
         val vendor = knownVendor?.takeIf { it.isNotBlank() } ?: matchedRule?.vendor ?: classifyVendorCached(domain, appName)
-        val smartRule = matchedRule ?: smartDomainScoreAndCreateRule(domain, appName, vendor)
+        val smartRule = matchedRule
+            ?: smartDomainScoreAndCreateRule(domain, appName, vendor)
+            ?: generalAdTrafficRule(domain, appName, vendor)
         return DomainDecisionContext(
             appName = appName,
             matchedRule = smartRule,
@@ -7906,6 +7969,7 @@ class AdBlockVpnService : VpnService() {
                     socket.soTimeout = LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS
                     if (!protect(socket)) {
                         LogRepository.append(this@AdBlockVpnService, "Protect local proxy coexist socket failed host=${config.host} port=$port")
+                        throw java.io.IOException("Protect local proxy coexist socket failed")
                     }
                     socket.connect(InetSocketAddress(config.host, port), LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS)
                     true
@@ -7940,6 +8004,7 @@ class AdBlockVpnService : VpnService() {
                         socket.soTimeout = LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS
                         if (!protect(socket)) {
                             LogRepository.append(this@AdBlockVpnService, "Protect local proxy retry probe socket failed host=$host port=$port")
+                            throw java.io.IOException("Protect local proxy retry probe socket failed")
                         }
                         socket.connect(InetSocketAddress(host, port), LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS)
                         true
@@ -7965,22 +8030,46 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
-    private fun shouldCaptureFullTrafficForMitm(stableMode: Boolean): Boolean {
-        if (stableMode || !httpDecryptEnabled || !mitmCertificateInstalled) return false
-        if (AppSettingsRepository.isMitmFullCaptureExperimentEnabled(this)) {
-            logDecisionOnce(
-                key = "mitm-full-capture-experiment-enabled",
-                message = "Enabled MITM full-capture routes by experiment setting",
-                minIntervalMillis = 60_000L
+    private fun resolveFullCaptureRouteMode(stableMode: Boolean): FullCaptureRoutingSupport.Mode {
+        val localProxyFullCapture = shouldCaptureFullTrafficForLocalProxy()
+        val mitmExperimentEnabled = AppSettingsRepository.isMitmFullCaptureExperimentEnabled(this)
+        val mitmCircuitOpen = isMitmFullCaptureCircuitOpen()
+        val mode = FullCaptureRoutingSupport.resolve(
+            FullCaptureRoutingSupport.Input(
+                stableMode = stableMode,
+                localProxyFullCapture = localProxyFullCapture,
+                httpDecryptEnabled = httpDecryptEnabled,
+                mitmCertificateInstalled = mitmCertificateInstalled,
+                mitmExperimentEnabled = mitmExperimentEnabled,
+                mitmCircuitOpen = mitmCircuitOpen
             )
-            return true
-        }
-        logDecisionOnce(
-            key = "mitm-full-capture-disabled-stable-routing",
-            message = "Skipped MITM full-capture routes; using stable dynamic routes to preserve normal network connectivity",
-            minIntervalMillis = 60_000L
         )
-        return false
+        when {
+            mode == FullCaptureRoutingSupport.Mode.MITM -> {
+                logDecisionOnce(
+                    key = "mitm-full-capture-experiment-enabled",
+                    message = "Enabled MITM full-capture routes by experiment setting",
+                    minIntervalMillis = 60_000L
+                )
+            }
+            mode == FullCaptureRoutingSupport.Mode.NONE && stableMode -> Unit
+            mode == FullCaptureRoutingSupport.Mode.NONE && mitmExperimentEnabled && mitmCircuitOpen -> {
+                val remainingMillis = (mitmFullCaptureDisabledUntil - System.currentTimeMillis()).coerceAtLeast(0L)
+                logDecisionOnce(
+                    key = "mitm-full-capture-circuit-open",
+                    message = "Skipped MITM full-capture routes because passthrough circuit is open remaining=${remainingMillis}ms",
+                    minIntervalMillis = 15_000L
+                )
+            }
+            mode == FullCaptureRoutingSupport.Mode.NONE && httpDecryptEnabled && mitmCertificateInstalled && !mitmExperimentEnabled -> {
+                logDecisionOnce(
+                    key = "mitm-full-capture-disabled-stable-routing",
+                    message = "Skipped MITM full-capture routes; using stable dynamic routes to preserve normal network connectivity",
+                    minIntervalMillis = 60_000L
+                )
+            }
+        }
+        return mode
     }
 
     companion object {

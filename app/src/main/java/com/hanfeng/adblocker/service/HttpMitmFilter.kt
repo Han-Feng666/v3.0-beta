@@ -100,6 +100,9 @@ object HttpMitmFilter {
         "feed_detail_ad", "article_ad", "article_ads", "news_ad", "news_ads", "content_ad", "content_ads",
         "media_ad", "media_ads", "image_ad", "image_ads", "pic_ad", "pic_ads", "gallery_ad",
         "timeline_sponsor", "timeline_commercial", "stream_sponsor", "stream_commercial", "feed_sponsor", "feed_commercial"
+        , "is_ad", "ad_type", "ad_source", "ad_scene", "ad_style", "ad_position", "ad_label",
+        "reader_bottom_card", "reader_insert_card", "page_ad_card", "chapter_ad_card", "turn_page_card",
+        "comment_ad_card", "reply_ad_card", "feed_ad_card", "sponsor_feed", "commercial_feed"
     )
     private val strongResponseAdKeywords = listOf(
         "advertisement",
@@ -218,6 +221,9 @@ object HttpMitmFilter {
         "preload_ad", "preloadad", "prefetch_ad", "prefetchad", "cache_ad", "cachead", "cached_ad", "cachedad",
         "ad_inventory", "adinventory", "inventory_id", "inventoryid", "fill_rate", "fillrate", "fill_ratio", "fillratio",
         "parallel_load", "parallelload", "load_strategy", "loadstrategy", "request_scene", "requestscene",
+        "is_ad", "ad_type", "ad_source", "ad_scene", "ad_style", "ad_position", "ad_label",
+        "entity_type", "entitytemplate", "entity_template", "extra_data", "extra_json",
+        "reader_bottom_card", "reader_insert_card", "page_ad_card", "chapter_ad_card", "turn_page_card",
         // 字节/穿山甲广告
         "jjye", "groovy", "gromore", "ttad", "bytedance", "bytead", "douyin_ad", "douyinad",
         "tiktok_ads", "tiktokads", "pangle_ad", "panglead", "tiktok_pangle",
@@ -519,7 +525,11 @@ object HttpMitmFilter {
         "\"ad_markup\"", "\"ad_html\"", "\"ad_template\"", "\"ad_unit_config\"",
         "\"rewarded_ad\"", "\"rewarded_ads\"", "\"rewarded_video_ad\"", "\"inspire_video_ad\"", "\"incentive_ad\"",
         "\"offerwall_ad\"", "\"draw_video_ad\"", "\"short_drama_ad\"", "\"comic_insert_ad\"", "\"manga_insert_ad\"",
-        "\"adn\"", "\"adn_name\"", "\"network_name\"", "\"bidfloor\"", "\"bid_floor\"", "\"auction_token\""
+        "\"adn\"", "\"adn_name\"", "\"network_name\"", "\"bidfloor\"", "\"bid_floor\"", "\"auction_token\"",
+        "\"is_ad\"", "\"isAd\"", "\"ad_type\"", "\"adType\"", "\"ad_source\"", "\"adSource\"", "\"ad_scene\"", "\"adScene\"",
+        "\"ad_position\"", "\"adPosition\"", "\"ad_label\"", "\"adLabel\"", "\"entity_type\"", "\"entityType\"",
+        "\"reader_bottom_card\"", "\"reader_insert_card\"", "\"page_ad_card\"", "\"chapter_ad_card\"", "\"turn_page_card\"",
+        "\"comment_ad_card\"", "\"reply_ad_card\"", "\"feed_ad_card\"", "\"sponsor_feed\"", "\"commercial_feed\""
     )
     private val novelAdFieldTokens = listOf(
         "\"book_id\"", "\"book_name\"", "\"chapter_id\"", "\"chapter_name\"", "\"reader_type\"",
@@ -580,7 +590,11 @@ object HttpMitmFilter {
         "\"ad_payload\"", "\"ad_meta\"", "\"ad_event\"", "\"event_trackers\"",
         "\"bid_request\"", "\"bid_response\"", "\"win_notice_url\"", "\"loss_notice_url\"",
         "\"adn\"", "\"adn_name\"", "\"network_name\"", "\"bidfloor\"", "\"auction_token\"",
-        "\"rewarded_ad\"", "\"rewarded_ads\"", "\"offerwall_ad\"", "\"short_drama_ad\"", "\"comic_insert_ad\""
+        "\"rewarded_ad\"", "\"rewarded_ads\"", "\"offerwall_ad\"", "\"short_drama_ad\"", "\"comic_insert_ad\"",
+        "\"is_ad\"", "\"isAd\"", "\"ad_type\"", "\"adType\"", "\"ad_source\"", "\"adSource\"", "\"ad_scene\"", "\"adScene\"",
+        "\"ad_position\"", "\"adPosition\"", "\"ad_label\"", "\"adLabel\"", "\"entity_type\"", "\"entityType\"",
+        "\"reader_bottom_card\"", "\"reader_insert_card\"", "\"page_ad_card\"", "\"chapter_ad_card\"", "\"turn_page_card\"",
+        "\"comment_ad_card\"", "\"reply_ad_card\"", "\"feed_ad_card\"", "\"sponsor_feed\"", "\"commercial_feed\""
     )
     private val jsonNovelFieldTokens = listOf(
         "\"reward_amount\"", "\"coin_reward\"", "\"reading_bonus\"", "\"task_reward\"",
@@ -601,7 +615,9 @@ object HttpMitmFilter {
         "\"listen_reward_ad\"", "\"audio_reward_ad\"", "\"comic_unlock_ad\"", "\"manga_unlock_ad\"",
         "\"short_drama_unlock_ad\"", "\"shortdrama_unlock_ad\"", "\"drama_reward_ad\"", "\"episode_unlock_ad\"",
         "\"episode_reward_ad\"", "\"episode_preload_ad\"", "\"drama_interstitial_ad\"", "\"drama_feed_ad\"",
-        "\"comic_reward_ad\"", "\"comic_page_ad\"", "\"manga_page_ad\"", "\"listen_unlock_ad\"", "\"audio_unlock_ad\""
+        "\"comic_reward_ad\"", "\"comic_page_ad\"", "\"manga_page_ad\"", "\"listen_unlock_ad\"", "\"audio_unlock_ad\"",
+        "\"reader_bottom_card\"", "\"reader_insert_card\"", "\"page_ad_card\"", "\"chapter_ad_card\"", "\"turn_page_card\"",
+        "\"ad_position\"", "\"adPosition\"", "\"ad_scene\"", "\"adScene\"", "\"ad_style\"", "\"adStyle\""
     )
     private val htmlNovelMarkerTokens = listOf(
         "welfare-page", "welfare_page", "task-center", "task_center", "coin-reward", "coin_reward",
@@ -1141,9 +1157,11 @@ object HttpMitmFilter {
         )
         val decoded = decodeAscii(combinedSample) ?: return null
         val lowerBody = decoded.lowercase()
+        val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
+        val isCommunityApp = RuleRepository.isCommunityAppHint(session.appName)
         if (RuleRepository.shouldProtectMediaTraffic(headerInspection.authority)) return null
         if (RuleRepository.shouldProtectBusinessTraffic(headerInspection.authority)) return null
-        if (shouldProtectNormalNovelHttpTraffic(context, headerInspection.authority, headerInspection.path, session.appName)) return null
+        if (shouldProtectNormalNovelHttpTraffic(context, headerInspection.authority, headerInspection.path, session.appName) && !isNovelApp) return null
         val vendor = headerInspection.vendor.ifBlank {
             RuleRepository.classifyVendorFromHints(context, headerInspection.authority, session.appName)
         }
@@ -1160,14 +1178,18 @@ object HttpMitmFilter {
         val jsonAdFieldMatched = jsonAdFieldHitCount > 0
         val jsonAdArrayMatched = contentType.contains("json") && lowerBody.trim().startsWith("[") && jsonAdFieldHitCount >= 2
         if (bodySignals.reasons.isEmpty() && !jsonAdFieldMatched && !jsonAdArrayMatched) return null
-        val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         var suspiciousScore = bodySignals.score + if (targetedContentType) 1 else 0
+        if (isCommunityApp && inspectCommentAdBodySignals(lowerBody).hasAnyStrongCommentAdSignal) suspiciousScore += 2
         if (isKnownAdVendor(vendor)) suspiciousScore += 2
         if (aggressiveNovelTarget) suspiciousScore += 3
         if (jsonAdFieldMatched) suspiciousScore += 3
         if (jsonAdArrayMatched) suspiciousScore += 2
         // 降低拦截阈值：小说 APP 1 分拦截，普通应用 2 分拦截
-        val threshold = if (isNovelApp) HTTP2_NOVEL_RESPONSE_BLOCK_SCORE else HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE
+        val threshold = when {
+            isNovelApp -> HTTP2_NOVEL_RESPONSE_BLOCK_SCORE
+            isCommunityApp -> 1
+            else -> HTTP2_RESPONSE_BLOCK_CANDIDATE_SCORE
+        }
         if (suspiciousScore < threshold) return null
         val preview = decoded.replace('\r', ' ').replace('\n', ' ').take(160)
         val reasons = bodySignals.reasons.toMutableList()
@@ -1589,7 +1611,7 @@ object HttpMitmFilter {
     }
 
     private fun inspectPathRiskHttp1HeaderBranch(environment: Http1HeaderEnvironment): String? {
-        if (shouldProtectNormalNovelHttpTraffic(environment.context, environment.host, environment.lowerPath, environment.appName)) return null
+        if (shouldProtectNormalNovelHttpTraffic(environment.context, environment.host, environment.lowerPath, environment.appName) && !environment.isNovelApp) return null
         if (environment.pathInspection.strongSuspicious) return "neutralized-strong-suspicious-path"
         if (environment.isNovelApp && looksLikeNovelAdPath(environment.lowerPath)) return "neutralized-novel-ad-path"
         if (environment.aggressiveAdApp && environment.pathInspection.rewardUnlock) return "neutralized-reward-unlock-path"
@@ -1604,7 +1626,7 @@ object HttpMitmFilter {
     }
 
     private fun inspectGeneralHttp1HeaderBranch(environment: Http1HeaderEnvironment): String? {
-        if (shouldProtectNormalNovelHttpTraffic(environment.context, environment.host, environment.lowerPath, environment.appName)) return null
+        if (shouldProtectNormalNovelHttpTraffic(environment.context, environment.host, environment.lowerPath, environment.appName) && !environment.isNovelApp) return null
         if (environment.aggressiveAdApp && environment.headerTrackingHits >= 1 &&
             (environment.locationRecommendCardHit || environment.headerMaterialHit || environment.strongHeaderOrKeywordHit)) {
             return "neutralized-aggressive-app-tracking-header"
@@ -1649,6 +1671,7 @@ object HttpMitmFilter {
     ): Int {
         return when {
             environment.isNovelApp -> HTTP1_NOVEL_RESPONSE_BLOCK_SCORE
+            environment.isCommunityApp -> 1
             mitmAggressive && clusterSignals.domesticSdkHits >= 1 -> HTTP1_MITM_AGGRESSIVE_RESPONSE_BLOCK_SCORE
             else -> HTTP1_RESPONSE_BLOCK_SCORE
         }
@@ -1708,7 +1731,8 @@ object HttpMitmFilter {
             protectedNovelTarget = environment.protectedNovelTarget,
             aggressiveNovelTarget = environment.aggressiveNovelTarget,
             vendor = environment.vendor,
-            generalAdTarget = environment.generalAdTarget
+            generalAdTarget = environment.generalAdTarget,
+            isCommunityApp = environment.isCommunityApp
         )
     }
 
@@ -1718,12 +1742,14 @@ object HttpMitmFilter {
     ): Http1BodyEnvironment? {
         val context = TlsMitmSessionManager.getContextOrNull() ?: return null
         val host = normalizeAuthority(requestInspection?.host ?: session.host)
-        if (RuleRepository.isSocialCoreDomain(host)) return null
+        val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
+        val isCommunityApp = RuleRepository.isCommunityAppHint(session.appName)
+        if (RuleRepository.isSocialCoreDomain(host) && !isCommunityApp) return null
         if (RuleRepository.isWhitelistedDomain(host)) return null
         if (RuleRepository.isSensitiveAuthDomain(host)) return null
         if (RuleRepository.shouldProtectMediaTraffic(host)) return null
         if (RuleRepository.shouldProtectBusinessTraffic(host)) return null
-        if (shouldProtectNormalNovelHttpTraffic(context, host, requestInspection?.path, session.appName)) return null
+        if (shouldProtectNormalNovelHttpTraffic(context, host, requestInspection?.path, session.appName) && !isNovelApp) return null
         val vendor = RuleRepository.classifyVendorFromHints(context, host, session.appName)
         return Http1BodyEnvironment(
             context = context,
@@ -1732,7 +1758,8 @@ object HttpMitmFilter {
             generalAdTarget = RuleRepository.shouldTreatAsGeneralAdTraffic(host, vendor, session.appName),
             aggressiveNovelTarget = RuleRepository.shouldAggressivelyBlockForNovelApp(context, host, session.appName, vendor),
             protectedNovelTarget = RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(context, host, requestInspection?.path, session.appName),
-            isNovelApp = RuleRepository.isNovelAppHint(session.appName)
+            isNovelApp = isNovelApp,
+            isCommunityApp = isCommunityApp
         )
     }
 
@@ -1784,7 +1811,8 @@ object HttpMitmFilter {
         if (novelSignals.hasMediaFieldCluster && bodySignalScore >= 1) {
             return "neutralized-body-media-field-cluster"
         }
-        if (novelSignals.hasNovelFieldCluster) {
+        if (novelSignals.hasNovelFieldCluster &&
+            (novelSignals.rewardUnlockHits >= 1 || novelSignals.jsonNovelFieldHits >= 2 || bodySignalScore >= 4)) {
             return "neutralized-body-novel-field-cluster"
         }
         if (novelSignals.hasNovelTaskReward && (protectedNovelTarget || aggressiveNovelTarget)) {
@@ -1830,6 +1858,10 @@ object HttpMitmFilter {
         if ((bodyReasons.contains("comment-ad-extended") || bodyReasons.contains("comment-ad-flow-extended")) &&
             (decisionContext.bodySignalScore >= 2 || commentSignals.commentAdMaterialHit || commentSignals.commentRecommendCardHit)) {
             return reportHttp1BodySignal(decisionContext.reportContext, "neutralized-body-comment-ad", 2)
+        }
+        if (decisionContext.isCommunityApp && commentSignals.hasAnyStrongCommentAdSignal &&
+            (bodyReasons.any { it.startsWith("comment-") } || decisionContext.bodySignalScore >= 2)) {
+            return reportHttp1BodySignal(decisionContext.reportContext, "neutralized-body-community-comment-ad", 2)
         }
         if ((bodyReasons.contains("comment-commerce-ad-extended") || bodyReasons.contains("comment-gdt-commerce-ad-extended")) &&
             (commentSignals.commentCommerceSignalHit >= 2 || commentSignals.commentCommerceCardHit ||
@@ -1969,9 +2001,9 @@ object HttpMitmFilter {
         if (readerScene && adPlacement) return true
         return containsAny(
             path,
-            "reader_banner", "reader_bottom", "reader_float", "reader_popup", "reader_reward", "reader_task",
+            "reader_banner", "reader_bottom", "reader_bottom_card", "reader_insert_card", "reader_float", "reader_popup", "reader_reward", "reader_task",
             "chapter_ad", "chapter_reward_ad", "chapter_unlock_ad", "chapter_offerwall", "chapter_popup_ad",
-            "page_turn_ad", "turn_page_ad", "flip_page_ad", "page_insert_ad", "page_footer_ad", "page_tail_ad",
+            "chapter_ad_card", "page_ad_card", "page_turn_ad", "turn_page_ad", "turn_page_card", "flip_page_ad", "page_insert_ad", "page_footer_ad", "page_tail_ad",
             "book_bonus", "book_task", "novel_reward", "novel_task", "novel_welfare", "watch_ad_unlock", "unlock_by_ad",
             "episode_reward_ad", "episode_unlock_ad", "episode_ad", "episode_ad_material", "drama_reward_ad", "drama_unlock_ad", "drama_ad",
             "shortdrama_reward_ad", "shortdrama_unlock_ad", "short_drama_reward_ad", "short_drama_unlock_ad",
@@ -2300,11 +2332,11 @@ object HttpMitmFilter {
         // 游戏和社交 APP 核心服务跳过深度检查（提升性能，降低延迟）
         val lowerHost = normalizedHost.lowercase()
         if (RuleRepository.isGameCoreDomain(lowerHost)) return cacheDeepInspectionDecision(cacheKey, false)
-        if (RuleRepository.isSocialCoreDomain(lowerHost)) return cacheDeepInspectionDecision(cacheKey, false)
+        if (RuleRepository.isSocialCoreDomain(lowerHost) && !RuleRepository.isCommunityAppHint(appName)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.isWhitelistedDomain(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.shouldProtectMediaTraffic(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.shouldProtectBusinessTraffic(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, false)
-        if (shouldProtectNormalNovelHttpTraffic(context, normalizedHost, lowerPath, appName)) return cacheDeepInspectionDecision(cacheKey, false)
+        if (shouldProtectNormalNovelHttpTraffic(context, normalizedHost, lowerPath, appName) && !RuleRepository.isNovelAppHint(appName)) return cacheDeepInspectionDecision(cacheKey, false)
         if (RuleRepository.isBypassProtectionDomain(normalizedHost)) return cacheDeepInspectionDecision(cacheKey, true)
         val vendor = vendorHint?.trim()?.takeIf { it.isNotBlank() }
             ?: RuleRepository.classifyVendorFromHints(context, normalizedHost, appName)
@@ -3617,7 +3649,7 @@ object HttpMitmFilter {
         val blockedHost = RuleRepository.isBlocked(context, environment.lowerAuthority, appName = session.appName, destinationPort = destinationPort)
         val blockedUrl = RuleRepository.isUrlBlocked(context, environment.lowerAuthority, environment.lowerPath, session.appName, requestDomain, destinationPort = destinationPort)
         // 白名单域名允许普通流量直通，但显式命中的拦截规则仍然优先执行
-        if (shouldSkipProtectedHttp2Traffic(environment.lowerAuthority, blockedHost, blockedUrl)) return null
+        if (shouldSkipProtectedHttp2Traffic(environment.lowerAuthority, blockedHost, blockedUrl, session.appName)) return null
         val suspicion = Http2SuspicionAccumulator()
         if (blockedHost) suspicion.add(3, "blocked-host")
         if (blockedUrl) suspicion.add(3, "blocked-url")
@@ -4000,13 +4032,19 @@ object HttpMitmFilter {
     private fun shouldSkipProtectedHttp2Traffic(
         lowerAuthority: String,
         blockedHost: Boolean,
-        blockedUrl: Boolean
+        blockedUrl: Boolean,
+        appName: String?
     ): Boolean {
         if (blockedHost || blockedUrl) return false
         if (RuleRepository.isWhitelistedDomain(lowerAuthority)) return true
         if (RuleRepository.shouldProtectMediaTraffic(lowerAuthority)) return true
         if (RuleRepository.shouldProtectBusinessTraffic(lowerAuthority)) return true
-        return RuleRepository.isNovelContentDomain(lowerAuthority) || RuleRepository.isProtectedNovelAppDomain(lowerAuthority)
+        val isNovelApp = RuleRepository.isNovelAppHint(appName)
+        val isCommunityApp = RuleRepository.isCommunityAppHint(appName)
+        if ((RuleRepository.isNovelContentDomain(lowerAuthority) || RuleRepository.isProtectedNovelAppDomain(lowerAuthority)) && !isNovelApp) {
+            return true
+        }
+        return RuleRepository.isSocialCoreDomain(lowerAuthority) && !isCommunityApp
     }
 
     private fun buildHttp2HeaderInspection(
@@ -4047,7 +4085,7 @@ object HttpMitmFilter {
         isNovelApp: Boolean,
         pathInspection: PathInspection
     ) {
-        if (shouldProtectNormalNovelHttpTraffic(context, lowerAuthority, lowerPath, appName)) return
+        if (shouldProtectNormalNovelHttpTraffic(context, lowerAuthority, lowerPath, appName) && !isNovelApp) return
         accumulator.addIf(
             RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(context, lowerAuthority, lowerPath, appName),
             4,
@@ -4434,7 +4472,8 @@ object HttpMitmFilter {
         val protectedNovelTarget: Boolean,
         val aggressiveNovelTarget: Boolean,
         val vendor: String,
-        val generalAdTarget: Boolean
+        val generalAdTarget: Boolean,
+        val isCommunityApp: Boolean
     )
 
     private data class Http1BodyEnvironment(
@@ -4444,7 +4483,8 @@ object HttpMitmFilter {
         val generalAdTarget: Boolean,
         val aggressiveNovelTarget: Boolean,
         val protectedNovelTarget: Boolean,
-        val isNovelApp: Boolean
+        val isNovelApp: Boolean,
+        val isCommunityApp: Boolean
     )
 
     private data class CommentAdBodySignals(
@@ -4453,7 +4493,14 @@ object HttpMitmFilter {
         val commentCommerceSignalHit: Int,
         val commentCommerceCardHit: Boolean,
         val commentCommerceGdtHit: Boolean
-    )
+    ) {
+        val hasAnyStrongCommentAdSignal: Boolean
+            get() = commentAdMaterialHit ||
+                commentRecommendCardHit ||
+                commentCommerceSignalHit >= 2 ||
+                commentCommerceCardHit ||
+                commentCommerceGdtHit
+    }
 
     private data class NovelBodySignals(
         val rewardUnlockHits: Int,

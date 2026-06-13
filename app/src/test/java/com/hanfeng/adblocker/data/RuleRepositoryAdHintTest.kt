@@ -30,4 +30,36 @@ class RuleRepositoryAdHintTest {
     fun `ordinary utility app is not treated as aggressive ad context`() {
         assertFalse(RuleRepository.isAggressiveAdAppHint("com.example.notes"))
     }
+
+    @Test
+    fun `general ad traffic detects known ad sdk infrastructure`() {
+        assertTrue(
+            RuleRepository.shouldTreatAsGeneralAdTraffic(
+                domain = "pangolin.snssdk.com",
+                vendor = "穿山甲/Pangle"
+            )
+        )
+        assertTrue(
+            RuleRepository.shouldTreatAsGeneralAdTraffic(
+                domain = "gdt.qq.com",
+                vendor = "优量汇/GDT"
+            )
+        )
+    }
+
+    @Test
+    fun `general ad traffic keeps normal core domains protected`() {
+        assertFalse(
+            RuleRepository.shouldTreatAsGeneralAdTraffic(
+                domain = "api.weixin.qq.com",
+                vendor = "优量汇/GDT"
+            )
+        )
+        assertFalse(
+            RuleRepository.shouldTreatAsGeneralAdTraffic(
+                domain = "api.example.com",
+                vendor = "其它 (Other)"
+            )
+        )
+    }
 }
