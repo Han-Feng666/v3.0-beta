@@ -17,8 +17,10 @@ object RuleModifierSupport {
         val domainScoped: Boolean = false,
         val thirdParty: Boolean = false,
         val firstParty: Boolean = false,
+        val important: Boolean = false,
         val redirect: Boolean = false,
         val domainConstraints: Set<String> = emptySet(),
+        val excludedDomainConstraints: Set<String> = emptySet(),
         val denyallow: Set<String> = emptySet(),
         val urlblock: Boolean = false,
         val fromScoped: Boolean = false,
@@ -95,8 +97,10 @@ object RuleModifierSupport {
         var domainScoped = false
         var thirdParty = false
         var firstParty = false
+        var important = false
         var redirect = false
         val domainConstraints = mutableSetOf<String>()
+        val excludedDomainConstraints = mutableSetOf<String>()
         val denyallow = mutableSetOf<String>()
         var urlblock = false
         var fromScoped = false
@@ -142,7 +146,8 @@ object RuleModifierSupport {
                 val value = modifier.substringAfter('=', missingDelimiterValue = "").trim()
                 when (name) {
                     in ignorableAdGuardModifiers -> Unit
-                    "important", "match-case" -> Unit
+                    "important" -> important = true
+                    "match-case" -> Unit
                     "badfilter" -> badfilter = true
                     "app" -> {
                         if (inverted || value.isBlank()) return ModifierInfo(invalid = true)
@@ -162,9 +167,16 @@ object RuleModifierSupport {
                     "domain" -> {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
                         domainScoped = true
-                        domainConstraints.addAll(
-                            value.split('|').map { it.trim().lowercase().removePrefix("~") }.filter { it.isNotBlank() }
-                        )
+                        value.split('|')
+                            .map { it.trim().lowercase() }
+                            .filter { it.isNotBlank() }
+                            .forEach { token ->
+                                if (token.startsWith("~")) {
+                                    token.removePrefix("~").takeIf { it.isNotBlank() }?.let(excludedDomainConstraints::add)
+                                } else {
+                                    domainConstraints.add(token)
+                                }
+                            }
                     }
                     "dnstype" -> {
                         if (inverted || value.isBlank()) return ModifierInfo(invalid = true)
@@ -259,9 +271,9 @@ object RuleModifierSupport {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
                         jsinject = value
                     }
-                    "script", "stylesheet", "image", "media", "font", "xmlhttprequest", "subdocument", "object", "object-subrequest", "ping", "websocket", "webrtc", "other", "popup" -> {
+                    "script", "stylesheet", "css", "image", "media", "font", "xmlhttprequest", "xhr", "subdocument", "sub_frame", "document", "main_frame", "object", "object-subrequest", "ping", "websocket", "webrtc", "other", "popup" -> {
                         requestTypeScoped = true
-                        requestTypes += name
+                        requestTypes += normalizeRequestTypeModifier(name)
                     }
                     // 新增修饰符支持
                     "ctag" -> {
@@ -346,8 +358,10 @@ object RuleModifierSupport {
             domainScoped = domainScoped,
             thirdParty = thirdParty,
             firstParty = firstParty,
+            important = important,
             redirect = redirect,
             domainConstraints = domainConstraints.toSet(),
+            excludedDomainConstraints = excludedDomainConstraints.toSet(),
             denyallow = denyallow.toSet(),
             urlblock = urlblock,
             fromScoped = fromScoped,
@@ -455,6 +469,16 @@ object RuleModifierSupport {
     private fun isValidHeaderName(value: String): Boolean {
         return value.isNotBlank() && value.all { ch ->
             ch.isLetterOrDigit() || ch == '-'
+        }
+    }
+
+    private fun normalizeRequestTypeModifier(name: String): String {
+        return when (name) {
+            "css" -> "stylesheet"
+            "xhr" -> "xmlhttprequest"
+            "sub_frame" -> "subdocument"
+            "main_frame" -> "document"
+            else -> name
         }
     }
 

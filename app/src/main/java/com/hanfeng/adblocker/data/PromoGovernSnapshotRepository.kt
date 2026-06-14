@@ -13,6 +13,7 @@ object PromoGovernSnapshotRepository {
     private const val KEY_COMPONENT = "component"
     private const val KEY_COMPONENT_WAS_ENABLED = "component_was_enabled"
     private const val KEY_CREATED_AT = "created_at"
+    private const val KEY_GOVERNED_PACKAGES = "governed_packages"
 
     data class Snapshot(
         val packageName: String,
@@ -75,6 +76,44 @@ object PromoGovernSnapshotRepository {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
     }
 
+    fun markPackageGoverned(context: Context, packageName: String) {
+        val normalized = normalizePackageName(packageName) ?: return
+        val updated = getGovernedPackages(context).toMutableSet()
+        updated += normalized
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet(KEY_GOVERNED_PACKAGES, updated)
+            .apply()
+    }
+
+    fun unmarkPackageGoverned(context: Context, packageName: String) {
+        val normalized = normalizePackageName(packageName) ?: return
+        val updated = getGovernedPackages(context).toMutableSet()
+        updated -= normalized
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet(KEY_GOVERNED_PACKAGES, updated)
+            .apply()
+    }
+
+    fun getGovernedPackages(context: Context): Set<String> {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getStringSet(KEY_GOVERNED_PACKAGES, emptySet())
+            ?.mapNotNull(::normalizePackageName)
+            ?.toSet()
+            ?: emptySet()
+    }
+
+    fun isGovernedAppHint(context: Context, appName: String?): Boolean {
+        val normalizedApp = appName?.trim()?.lowercase().orEmpty()
+        if (normalizedApp.isBlank()) return false
+        return getGovernedPackages(context).any { packageName ->
+            normalizedApp == packageName ||
+                normalizedApp.contains(packageName) ||
+                normalizedApp.contains("($packageName)")
+        }
+    }
+
     private fun saveSnapshot(
         context: Context,
         packageName: String,
@@ -94,5 +133,14 @@ object PromoGovernSnapshotRepository {
             .putBoolean(KEY_COMPONENT_WAS_ENABLED, componentWasEnabled)
             .putLong(KEY_CREATED_AT, System.currentTimeMillis())
             .apply()
+        markPackageGoverned(context, packageName)
+    }
+
+    private fun normalizePackageName(packageName: String?): String? {
+        val normalized = packageName?.trim()?.lowercase().orEmpty()
+        if (normalized.isBlank()) return null
+        return normalized.takeIf { value ->
+            value.all { ch -> ch.isLetterOrDigit() || ch == '_' || ch == '.' }
+        }
     }
 }

@@ -118,8 +118,16 @@ object RuleRepositoryExport {
         if (rule.thirdParty) parts += "\$third-party"
         if (rule.firstParty) parts += "\$first-party"
         
-        rule.domainConstraints?.let { constraints ->
-            if (constraints.isNotEmpty()) parts += "\$domain=${constraints.joinToString("|")}"
+        val domainScope = buildList {
+            rule.domainConstraints?.let { constraints -> addAll(constraints) }
+            addAll(rule.excludedDomainConstraints.map { "~$it" })
+        }
+        if (domainScope.isNotEmpty()) {
+            parts += "\$domain=${domainScope.joinToString("|")}"
+        }
+
+        rule.requestTypes.sorted().forEach { requestType ->
+            parts += "\$$requestType"
         }
         
         if (rule.denyallow.isNotEmpty()) parts += "\$denyallow=${rule.denyallow.joinToString("|")}"

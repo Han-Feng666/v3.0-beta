@@ -101,6 +101,22 @@ object ShizukuConnectionOwnerRepository {
         }
     }
 
+    fun getConnectionOwnerUidIfBound(
+        protocol: Int,
+        localHost: String,
+        localPort: Int,
+        remoteHost: String,
+        remotePort: Int
+    ): Int {
+        val connectedService = liveService() ?: return -1
+        return runCatching {
+            connectedService.getConnectionOwnerUid(protocol, localHost, localPort, remoteHost, remotePort)
+        }.getOrElse {
+            invalidateService()
+            -1
+        }
+    }
+
     private fun getService(context: Context): IConnectionOwnerService? {
         liveService()?.let { return it }
         ensureBound(context)

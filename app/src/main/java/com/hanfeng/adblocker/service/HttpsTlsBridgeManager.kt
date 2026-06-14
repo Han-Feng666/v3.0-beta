@@ -1,6 +1,8 @@
 package com.HanFeng.service
 
 import android.content.Context
+import com.HanFeng.core.network.MitmLearningEngine
+import com.HanFeng.core.network.ThermalThrottleManager
 import com.HanFeng.data.LogRepository
 import com.HanFeng.data.RuleRepository
 import com.HanFeng.data.StatsRepository
@@ -15,6 +17,7 @@ import javax.net.ssl.SSLHandshakeException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLParameters
@@ -29,7 +32,6 @@ object HttpsTlsBridgeManager {
     private const val HTTP2_SUMMARY_FRAME_INTERVAL = 100
     private const val HTTP2_HEADER_BLOCK_LARGE_THRESHOLD = 16 * 1024
     private const val HTTP2_DATA_DEEP_INSPECTION_SCORE_THRESHOLD = 2
-    private const val HTTP2_DATA_SAMPLE_MAX_BYTES = 4 * 1024
     private const val BRIDGE_EXECUTOR_CORE_THREADS = 2
     private const val BRIDGE_EXECUTOR_MAX_THREADS = 8
     private const val BRIDGE_EXECUTOR_QUEUE_CAPACITY = 64
@@ -42,7 +44,7 @@ object HttpsTlsBridgeManager {
         30L,
         TimeUnit.SECONDS,
         LinkedBlockingQueue(BRIDGE_EXECUTOR_QUEUE_CAPACITY),
-        ThreadPoolExecutor.CallerRunsPolicy()
+        ThreadPoolExecutor.AbortPolicy()
     ).apply {
         allowCoreThreadTimeOut(true)
     }
@@ -72,8 +74,12 @@ object HttpsTlsBridgeManager {
         )
         val previous = bridges.put(session.flowKey, running)
         previous?.close()
-        executor.execute {
+        if (!executeBridgeTask(context, session, running, "accept-loop") {
             acceptLoop(context, session, running, protectSocket)
+        }) {
+            bridges.remove(session.flowKey, running)
+            running.close()
+            throw IOException("HTTPS TLS bridge executor saturated")
         }
         LogRepository.append(
             context,
@@ -120,7 +126,7 @@ object HttpsTlsBridgeManager {
             while (!running.serverSocket.isClosed) {
                 try {
                     val client = running.serverSocket.accept() as? SSLSocket ?: continue
-                    executor.execute {
+                    executeBridgeTask(context, session, client, "client") {
                         handleBridgeConnection(context, session, running, client, protectSocket)
                     }
                 } catch (_: SocketTimeoutException) {
@@ -139,6 +145,27 @@ object HttpsTlsBridgeManager {
             http2FlowControls.remove(session.flowKey)
             bridges.remove(session.flowKey, running)
             running.close()
+        }
+    }
+
+    private fun executeBridgeTask(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        closeOnReject: AutoCloseable,
+        stage: String,
+        task: () -> Unit
+    ): Boolean {
+        return try {
+            executor.execute(task)
+            true
+        } catch (_: RejectedExecutionException) {
+            TlsMitmSessionManager.markMitmBypass(context, session.flowKey, "bridge-executor-saturated:$stage")
+            LogRepository.append(
+                context,
+                "HTTPS TLS bridge overloaded stage=$stage host=${session.host} flow=${session.flowKey} active=${executor.activeCount} queue=${executor.queue.size}"
+            )
+            closeOnReject.close()
+            false
         }
     }
 
@@ -167,6 +194,7 @@ object HttpsTlsBridgeManager {
             }
         } catch (error: SSLHandshakeException) {
             TlsMitmSessionManager.markMitmBypass(context, session.flowKey, classifySslHandshakeBypassReason(error))
+            MitmLearningEngine.markCertPinningFailure(session.host)
             LogRepository.append(context, "HTTPS MITM handshake bypass host=${session.host} flow=${session.flowKey}: ${error.message ?: error.javaClass.simpleName}")
         } catch (error: IOException) {
             TlsMitmSessionManager.markMitmBypass(context, session.flowKey, "io-bridge:${error.message ?: error.javaClass.simpleName}")
@@ -215,13 +243,15 @@ object HttpsTlsBridgeManager {
     ) {
         val requestRef = java.util.concurrent.atomic.AtomicReference<HttpMitmFilter.RequestInspection?>()
         val latch = CountDownLatch(2)
-        executor.execute {
+        if (!executeBridgeTask(context, session, RunningBridgeHandle(localTls), "pipe-client") {
             try {
                 pipeClientToServer(context, session, localTls.inputStream, remoteTls.outputStream, requestRef, negotiatedAlpn)
             } finally {
                 latch.countDown()
                 runCatching { remoteTls.shutdownOutput() }
             }
+        }) {
+            return
         }
         try {
             pipeServerToClient(context, session, remoteTls.inputStream, localTls.outputStream, requestRef, negotiatedAlpn)
@@ -867,7 +897,8 @@ object HttpsTlsBridgeManager {
                             val shouldInspectData = headerInspection != null &&
                                 !streamState.blockedByAction &&
                                 headerInspection.responseLike &&
-                                headerInspection.suspiciousScore >= HTTP2_DATA_DEEP_INSPECTION_SCORE_THRESHOLD
+                                (headerInspection.suspiciousScore >= HTTP2_DATA_DEEP_INSPECTION_SCORE_THRESHOLD ||
+                                    (event.endStream && headerInspection.hasBodyRewriteDirectives && streamState.dataBytes <= ThermalThrottleManager.responseBodyLimitBytes()))
                             if (!shouldInspectData) {
                                 streamState.lastDataSample = trimHttp2DataSample(streamState.lastDataSample, event.dataFragment)
                                 return@forEachIndexed
@@ -876,7 +907,8 @@ object HttpsTlsBridgeManager {
                                 session = session,
                                 headerInspection = headerInspection,
                                 currentSample = streamState.lastDataSample,
-                                incomingFragment = event.dataFragment
+                                incomingFragment = event.dataFragment,
+                                completeResponse = event.endStream && streamState.dataBytes <= ThermalThrottleManager.responseBodyLimitBytes()
                             )
                             streamState.lastDataSample = dataInspection?.combinedSample
                                 ?: trimHttp2DataSample(streamState.lastDataSample, event.dataFragment)
@@ -884,7 +916,10 @@ object HttpsTlsBridgeManager {
                                 streamState.lastDataInspection = dataInspection
                                 logHttp2DataInspection(context, session, direction, event.streamId, dataInspection)
                                 if (!streamState.blockedByAction) {
-                                    val syntheticResponse = HttpMitmFilter.buildRedirectHttp2SyntheticResponse(
+                                    val syntheticResponse = HttpMitmFilter.buildHttp2BodyRewriteSyntheticResponse(
+                                        streamId = event.streamId,
+                                        rewrite = dataInspection
+                                    ) ?: HttpMitmFilter.buildRedirectHttp2SyntheticResponse(
                                         streamId = event.streamId,
                                         contentType = dataInspection.contentType,
                                         redirectResource = dataInspection.redirectResource,
@@ -895,14 +930,14 @@ object HttpsTlsBridgeManager {
                                     )
                                     streamState.blockedByAction = true
                                     streamState.lastActionDecision = HttpMitmFilter.Http2ActionDecision(
-                                        action = if (dataInspection.redirectResource.isNullOrBlank()) "response-data-candidate" else "response-data-redirect",
+                                        action = dataInspection.rewriteReason ?: if (dataInspection.redirectResource.isNullOrBlank()) "response-data-candidate" else "response-data-redirect",
                                         confidence = dataInspection.confidence,
                                         shouldBlockCandidate = true,
                                         shouldSyntheticRespond = true
                                     )
                                     directives += Http2StreamDirective(
                                         streamId = event.streamId,
-                                        action = if (dataInspection.redirectResource.isNullOrBlank()) "response-data-candidate" else "response-data-redirect",
+                                        action = dataInspection.rewriteReason ?: if (dataInspection.redirectResource.isNullOrBlank()) "response-data-candidate" else "response-data-redirect",
                                         confidence = dataInspection.confidence,
                                         sendRst = false,
                                         syntheticResponse = syntheticResponse
@@ -1542,7 +1577,7 @@ object HttpsTlsBridgeManager {
     }
 
     private fun trimHttp2DataSample(existing: ByteArray, incoming: ByteArray): ByteArray {
-        val maxBytes = HTTP2_DATA_SAMPLE_MAX_BYTES
+        val maxBytes = ThermalThrottleManager.responseBodyLimitBytes()
         if (existing.size >= maxBytes) return existing.copyOf(maxBytes)
         val remaining = maxBytes - existing.size
         val addition = if (incoming.size <= remaining) incoming else incoming.copyOf(remaining)
@@ -1571,9 +1606,15 @@ object HttpsTlsBridgeManager {
         val host: String,
         val port: Int,
         val serverSocket: SSLServerSocket
-    ) {
-        fun close() {
+    ) : AutoCloseable {
+        override fun close() {
             runCatching { serverSocket.close() }
+        }
+    }
+
+    private class RunningBridgeHandle(private val socket: SSLSocket) : AutoCloseable {
+        override fun close() {
+            runCatching { socket.close() }
         }
     }
 

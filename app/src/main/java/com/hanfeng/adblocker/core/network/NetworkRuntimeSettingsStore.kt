@@ -32,9 +32,7 @@ object NetworkRuntimeSettingsStore {
                 AppSettingsRepository.isShizukuStrictAppAdBlockEnabled(context),
             localProxyConfig = localProxyConfig,
             localProxyTargetPackages = WhitelistRepository.getLocalProxyTargetPackages(context),
-            lightweightPassThroughMode = RuleRepository.getRuleCount(context) == 0 &&
-                !httpDecryptEnabled &&
-                !localProxyConfig.enabled
+            lightweightPassThroughMode = false
         )
     }
 

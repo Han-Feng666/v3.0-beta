@@ -8,7 +8,6 @@ object AppSettingsRepository {
     private const val KEY_HIDE_BACKGROUND = "hide_background"
     private const val KEY_HIDE_BACKGROUND_CONFIGURED = "hide_background_configured"
     private const val KEY_SHIZUKU_STRICT_APP_AD_BLOCK = "shizuku_strict_app_ad_block"
-    private const val KEY_MITM_FULL_CAPTURE_EXPERIMENT = "mitm_full_capture_experiment"
 
     fun isShizukuEnabled(context: Context): Boolean {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -59,18 +58,6 @@ object AppSettingsRepository {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_SHIZUKU_STRICT_APP_AD_BLOCK, enabled)
-            .apply()
-    }
-
-    fun isMitmFullCaptureExperimentEnabled(context: Context): Boolean {
-        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_MITM_FULL_CAPTURE_EXPERIMENT, false)
-    }
-
-    fun setMitmFullCaptureExperimentEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_MITM_FULL_CAPTURE_EXPERIMENT, enabled)
             .apply()
     }
 }

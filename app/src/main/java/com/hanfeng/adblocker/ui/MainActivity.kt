@@ -97,7 +97,20 @@ class MainActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         syncMitmCertificateStateIfNeeded()
+        ensureVpnServiceMatchesUserIntent()
         refreshHomeStatus()
+    }
+
+    private fun ensureVpnServiceMatchesUserIntent() {
+        if (!FeatureSettingsRepository.isAdBlockEnabled(this)) return
+        if (NetworkKernel.isRunning()) return
+        val prepareIntent = runCatching { VpnService.prepare(this) }.getOrNull()
+        if (prepareIntent == null) {
+            FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, false)
+            NetworkKernel.start(this, userInitiated = false)
+        } else {
+            FeatureSettingsRepository.setVpnRevokedByOtherVpn(this, true)
+        }
     }
 
     override fun onDestroy() {

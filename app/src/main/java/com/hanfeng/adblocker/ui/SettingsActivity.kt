@@ -42,7 +42,6 @@ class SettingsActivity : BaseActivity() {
 
     private lateinit var switchShizuku: Switch
     private lateinit var switchHideBackground: Switch
-    private lateinit var switchMitmFullCaptureExperiment: Switch
     private lateinit var textShizukuStatus: TextView
     private lateinit var btnShizukuAdControl: Button
     private lateinit var btnCoexistSettings: Button
@@ -97,7 +96,6 @@ class SettingsActivity : BaseActivity() {
         settingsRoot = findViewById(R.id.settingsRoot)
         switchShizuku = findViewById(R.id.switchUseShizuku)
         switchHideBackground = findViewById(R.id.switchHideBackground)
-        switchMitmFullCaptureExperiment = findViewById(R.id.switchMitmFullCaptureExperiment)
         textShizukuStatus = findViewById(R.id.textShizukuStatus)
         btnShizukuAdControl = findViewById(R.id.btnShizukuAdControl)
         btnCoexistSettings = findViewById(R.id.btnCoexistSettings)
@@ -124,7 +122,6 @@ class SettingsActivity : BaseActivity() {
 
         switchShizuku.isChecked = AppSettingsRepository.isShizukuEnabled(this)
         switchHideBackground.isChecked = AppSettingsRepository.isHideBackgroundEnabled(this)
-        switchMitmFullCaptureExperiment.isChecked = AppSettingsRepository.isMitmFullCaptureExperimentEnabled(this)
         updateShizukuActionState()
 
         switchShizuku.setOnCheckedChangeListener { _, isChecked ->
@@ -139,9 +136,6 @@ class SettingsActivity : BaseActivity() {
             AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
             applyHideBackgroundPolicy(isChecked)
             btnResetHideBackground.visibility = View.VISIBLE
-        }
-        switchMitmFullCaptureExperiment.setOnCheckedChangeListener { _, isChecked ->
-            handleMitmFullCaptureExperimentChanged(isChecked)
         }
         btnResetHideBackground.setOnClickListener {
             AppSettingsRepository.resetHideBackground(this)
@@ -257,35 +251,6 @@ class SettingsActivity : BaseActivity() {
             }
             updateShizukuActionState()
         }
-    }
-
-    private fun handleMitmFullCaptureExperimentChanged(enabled: Boolean) {
-        if (!enabled) {
-            AppSettingsRepository.setMitmFullCaptureExperimentEnabled(this, false)
-            NetworkKernel.reloadIfRunning(this)
-            showShortToast("已关闭强力 MITM 试验模式")
-            return
-        }
-        switchMitmFullCaptureExperiment.setOnCheckedChangeListener(null)
-        switchMitmFullCaptureExperiment.isChecked = false
-        switchMitmFullCaptureExperiment.setOnCheckedChangeListener { _, isChecked ->
-            handleMitmFullCaptureExperimentChanged(isChecked)
-        }
-        StableDialog.builder(this)
-            .setTitle("开启强力 MITM 试验模式")
-            .setMessage("该模式会启用全量承接以提高深度拦截覆盖率，可能导致部分 App 断网、连接重置或网速下降。出现异常时请回到这里关闭。")
-            .setPositiveButton("开启") { _, _ ->
-                AppSettingsRepository.setMitmFullCaptureExperimentEnabled(this, true)
-                switchMitmFullCaptureExperiment.setOnCheckedChangeListener(null)
-                switchMitmFullCaptureExperiment.isChecked = true
-                switchMitmFullCaptureExperiment.setOnCheckedChangeListener { _, isChecked ->
-                    handleMitmFullCaptureExperimentChanged(isChecked)
-                }
-                NetworkKernel.reloadIfRunning(this)
-                showShortToast("已开启强力 MITM 试验模式")
-            }
-            .setNegativeButton("取消", null)
-            .showSafely(this, "Show MITM full-capture experiment dialog failed")
     }
 
     private fun handleShizukuEnableRequested(fromUser: Boolean) {

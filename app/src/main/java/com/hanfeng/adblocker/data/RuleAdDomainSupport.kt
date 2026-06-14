@@ -46,7 +46,17 @@ object RuleAdDomainSupport {
         val normalizedTokens = lower.replace(Regex("[^a-z0-9]"), "")
         val pushSignals = listOf("push", "pushad", "adpush", "notify", "notification", "message", "msg", "inbox")
         val recommendationSignals = listOf("recommend", "recommendation", "feed", "stream", "timeline", "discover")
-        val adSignals = listOf("ad", "ads", "promo", "promotion", "banner", "material", "creative", "offer", "offerwall")
+        val adSignals = listOf(
+            "ad", "ads", "promo", "promotion", "banner", "material", "creative", "offer", "offerwall",
+            "campaign", "commercial", "sponsor", "market", "install", "download", "deeplink", "landing",
+            "task", "mission", "welfare", "benefit", "coin", "reward", "game", "live", "search",
+            "hotword", "recommend", "experiment", "abtest", "miniapp", "mini-program",
+            "clipboard", "share", "serviceworker", "widget", "shortcut", "badge", "lockscreen",
+            "comment", "reply", "danmaku", "profile", "follow", "inbox", "message",
+            "template", "cloud", "asset", "resource", "bundle", "patch", "coupon", "redpacket",
+            "commerce", "affiliate", "commission", "local", "nearby", "survey", "leadgen", "calendar",
+            "browser", "startpage", "newtab", "appstore", "oem", "rom", "security", "tv", "wear", "car"
+        )
         val hasPushOrRecommend = pushSignals.any { keywordMatches(lower, normalizedTokens, it) } ||
             recommendationSignals.any { keywordMatches(lower, normalizedTokens, it) }
         if (!hasPushOrRecommend) return false
@@ -78,7 +88,58 @@ object RuleAdDomainSupport {
             "adx", "rtb", "exchange", "offerwall", "rewardvideo", "interstitial", "fullscreenad",
             "nativead", "feedad", "splashad", "startupad", "launchad", "open_screen", "material",
             "creative", "slotid", "placement", "templateid", "showurl", "clickurl", "monitorurl",
-            "impression", "playable", "endcard", "tracking", "analytics", "stat", "report", "monetize"
+            "impression", "playable", "endcard", "tracking", "analytics", "stat", "report", "monetize",
+            "adapi", "adsapi", "adgateway", "adloader", "adload", "adrequest", "adrequester",
+            "adlog", "adslog", "adreport", "admetric", "admetrics", "adtracking", "eventtrack",
+            "eventtracker", "imptrack", "imptracker", "clicktrack", "clicktracker", "viewtrack",
+            "adcreative", "admaterial", "adcache", "adpreload", "adconfig", "sdkconfig",
+            "creativeapi", "materialapi", "trackers", "trackingevent", "conversion", "attribution",
+            "adsrvr", "adtag", "adtagging", "adrequestapi", "adresponse", "adresponseapi",
+            "adrelay", "adrouter", "adsrouter", "adbridge", "adsbridge", "adtrace", "adtraceapi",
+            "bidapi", "bidswitch", "bidrequest", "bidresponse", "auctionapi", "winnotice",
+            "lossnotice", "eventtrackers", "impressiontrack", "conversiontrack", "skadnetwork", "skadn",
+            "httpdns", "dnsresolve", "dnsresolver", "adresolve", "adresolver", "adhttpdns",
+            "websocket", "wsad", "adws", "ssead", "adeventstream", "adstream", "pushstream",
+            "grpcad", "adgrpc", "protobufad", "adprotobuf", "adproto", "adpb",
+            "dynamicad", "addynamic", "adplugin", "adsplugin", "adsdkplugin", "admodule",
+            "dexad", "addex", "adbundle", "adwasm", "encryptedad", "adcrypto", "adcipher",
+            "privatead", "adgateway", "adsgateway", "adquic", "adtcp", "adudp", "binaryad",
+            "marketad", "installad", "downloadad", "deeplinkad", "shakead", "sensorad",
+            "fakealert", "systemad", "cleanerad", "boostad", "notifyad", "pushad",
+            "taskad", "missionad", "welfaread", "benefitad", "coinad", "offerwallad",
+            "gamead", "gameinterstitial", "revivead", "revivalad", "livead", "liveroomad",
+            "searchad", "hotwordad", "keywordad", "recommendad", "suggestionad",
+            "experimentad", "abtestad", "grayad", "greyad", "remoteadconfig",
+            "miniappad", "miniprogramad", "landingad", "h5ad",
+            "fakebuttonad", "fakeclosead", "misclickad", "clicktrapad",
+            "clipboardad", "sharead", "servicworkerad", "serviceworkerad", "precachead",
+            "widgetad", "shortcutad", "badgead", "lockscreenad", "wallpaperad", "systemsurfacead",
+            "commentad", "replyad", "danmakuad", "bulletad", "profilead", "followad",
+            "inboxad", "messagead", "chatad", "topicad", "communityad", "socialad",
+            "templatead", "tplad", "cloudad", "cloudcontrolad", "cloudconfigad", "layoutad",
+            "assetpackad", "resourcepackad", "materialpackad", "creativepackad", "bundlead",
+            "patchad", "hotpatchad", "couponad", "redpacketad", "cashad", "cashbackad",
+            "subsidyad", "allowancead", "lotteryad", "bonusad",
+            "productad", "shopad", "mallad", "goodsad", "itemad", "commercead", "shoppingad",
+            "affiliatead", "cpsad", "commissionad", "rebatead", "taokead", "unionad",
+            "locallifead", "nearbyad", "poiad", "mapad", "weatherad", "toolad", "cleanerad",
+            "batteryad", "wifiad", "filemanagerad", "takeawayad", "hotelad", "travelad", "ridead",
+            "leadgenad", "leadformad", "formad", "surveyad", "questionnairead", "trialad",
+            "signupad", "reservationad", "calendarreminderad", "calendarsubscribead", "reminderad", "alarmad",
+            "browserad", "startpagead", "homepagead", "newtabad", "speeddialad", "bookmarkad",
+            "searchboxad", "hotsrchad", "hotsearchad", "trendingad", "sitenavad", "navcardad",
+            "appstoread", "appinstallad", "appupdatead", "promotedappad", "preinstallad",
+            "gamecenterad", "apkrankad", "apkad", "oemad", "romad", "systemmanagerad",
+            "securityad", "boostad", "virusscanad", "storagecleanad", "negativescreenad",
+            "tvad", "ottad", "castad", "screencastad", "wearad", "watchad", "carad",
+            "carplayad", "iotad", "speakerad", "tabletad", "padad",
+            "cnamead", "adalias", "aliasad", "cnamecloakad", "cloakedad", "adcloak",
+            "dohad", "doqad", "dotad", "dnsqueryad", "encrypteddnsad", "httpdnsad",
+            "alihttpdnsad", "tencenthttpdnsad", "baiduhttpdnsad", "adquic443", "quicad443"
+            , "wasmad", "adwasm", "wasmloaderad", "jsloaderad", "obfuscatedad", "packedad",
+            "encryptedjsad", "adfingerprint", "phashad", "imagehashad", "mediahashad",
+            "watermarkad", "videofingerprintad", "endcardhashad", "framehashad",
+            "http3ad", "h3ad", "udp443ad", "adudp443", "quicgatewayad", "http3gatewayad"
         )
         if (sdkInfraSignals.any { keywordMatches(lower, normalizedTokens, it) }) return true
         val sdkVendorSignals = listOf(
@@ -87,7 +148,11 @@ object RuleAdDomainSupport {
             "unityads", "unity3d", "vungle", "liftoff", "chartboost", "inmobi", "aerserv", "topon",
             "anythink", "tradplus", "tpbid", "beizi", "bzadx", "adscope", "aiclk", "youmi", "adwo",
             "vpon", "pubmatic", "openx", "taboola", "outbrain", "adcolony", "ogury", "fyber",
-            "inneractive", "digitalturbine", "colossusssp", "smaato", "tapjoy", "audiencenetwork"
+            "inneractive", "digitalturbine", "colossusssp", "smaato", "tapjoy", "audiencenetwork",
+            "moloco", "bidmachine", "adtiming", "adjoe", "startapp", "criteo", "mytarget",
+            "maio", "nend", "tapdaq", "yeahmobi", "adtelligent", "pubnative", "hyprmx",
+            "bidswitch", "loopme", "verve", "vervegroup", "smadex", "sonobi", "gumgum",
+            "sharethrough", "triplelift", "yieldmo", "indexexchange", "rubicon", "magnite"
         )
         return sdkVendorSignals.any { keywordMatches(lower, normalizedTokens, it) }
     }
@@ -153,7 +218,43 @@ object RuleAdDomainSupport {
         val strongAdLabels = setOf(
             "ad", "ads", "adx", "ssp", "dsp", "rtb", "adn", "adnet", "adservice", "adserver",
             "adtrack", "adtracker", "adsdk", "banner", "promo", "promotion", "offerwall", "splash",
-            "preroll", "midroll", "postroll", "interstitial", "reward", "rewarded", "monetize", "monetization"
+            "preroll", "midroll", "postroll", "interstitial", "reward", "rewarded", "monetize", "monetization",
+            "adapi", "adlog", "adslog", "adreport", "adloader", "adrequest", "adgateway", "adcache", "adconfig",
+            "adrelay", "adrouter", "adbridge", "adtrace", "adsrvr", "adtag", "skadn",
+            "httpdns", "adresolver", "adstream", "wsad", "ssead", "grpcad", "protobufad",
+            "adplugin", "admodule", "dynamicad", "adgateway", "adquic", "adtcp", "adudp",
+            "marketad", "installad", "downloadad", "deeplinkad", "shakead", "notifyad", "pushad",
+            "taskad", "missionad", "welfaread", "benefitad", "coinad", "offerwallad",
+            "gamead", "revivead", "livead", "liveroomad", "searchad", "hotwordad",
+            "recommendad", "experimentad", "abtestad", "miniappad", "miniprogramad", "landingad",
+            "fakebuttonad", "fakeclosead", "clipboardad", "sharead", "serviceworkerad",
+            "precachead", "widgetad", "shortcutad", "badgead", "lockscreenad", "wallpaperad",
+            "commentad", "replyad", "danmakuad", "bulletad", "profilead", "followad",
+            "inboxad", "messagead", "chatad", "topicad", "communityad", "socialad",
+            "templatead", "tplad", "cloudad", "cloudcontrolad", "cloudconfigad", "layoutad",
+            "assetpackad", "resourcepackad", "materialpackad", "creativepackad", "bundlead",
+            "patchad", "hotpatchad", "couponad", "redpacketad", "cashad", "cashbackad",
+            "subsidyad", "allowancead", "lotteryad", "bonusad",
+            "productad", "shopad", "mallad", "goodsad", "itemad", "commercead", "shoppingad",
+            "affiliatead", "cpsad", "commissionad", "rebatead", "taokead", "unionad",
+            "locallifead", "nearbyad", "poiad", "mapad", "weatherad", "toolad", "cleanerad",
+            "batteryad", "wifiad", "filemanagerad", "takeawayad", "hotelad", "travelad", "ridead",
+            "leadgenad", "leadformad", "formad", "surveyad", "questionnairead", "trialad",
+            "signupad", "reservationad", "calendarreminderad", "calendarsubscribead", "reminderad", "alarmad",
+            "browserad", "startpagead", "homepagead", "newtabad", "speeddialad", "bookmarkad",
+            "searchboxad", "hotsrchad", "hotsearchad", "trendingad", "sitenavad", "navcardad",
+            "appstoread", "appinstallad", "appupdatead", "promotedappad", "preinstallad",
+            "gamecenterad", "apkrankad", "apkad", "oemad", "romad", "systemmanagerad",
+            "securityad", "boostad", "virusscanad", "storagecleanad", "negativescreenad",
+            "tvad", "ottad", "castad", "screencastad", "wearad", "watchad", "carad",
+            "carplayad", "iotad", "speakerad", "tabletad", "padad",
+            "cnamead", "adalias", "aliasad", "cnamecloakad", "cloakedad", "adcloak",
+            "dohad", "doqad", "dotad", "dnsqueryad", "encrypteddnsad", "httpdnsad",
+            "alihttpdnsad", "tencenthttpdnsad", "baiduhttpdnsad", "adquic443", "quicad443"
+            , "wasmad", "adwasm", "wasmloaderad", "jsloaderad", "obfuscatedad", "packedad",
+            "encryptedjsad", "adfingerprint", "phashad", "imagehashad", "mediahashad",
+            "watermarkad", "videofingerprintad", "endcardhashad", "framehashad",
+            "http3ad", "h3ad", "udp443ad", "adudp443", "quicgatewayad", "http3gatewayad"
         )
         if (labels.any(strongAdLabels::contains)) return true
 
@@ -179,7 +280,44 @@ object RuleAdDomainSupport {
             "admaterial", "materialurl", "creative", "creativeid", "landingurl", "clickurl", "showurl",
             "monitorurl", "impression", "playable", "endcard", "waterfall", "mediation", "bidding",
             "auction", "placement", "slotid", "templateid", "rewardvideo", "open_screen", "startup_preload",
-            "launch_preload", "commentflowad", "replyflowad", "feedinsertad", "timelineinsertad"
+            "launch_preload", "commentflowad", "replyflowad", "feedinsertad", "timelineinsertad",
+            "adapi", "adsapi", "adgateway", "adloader", "adrequest", "adlog", "adreport",
+            "admetrics", "imptrack", "clicktrack", "viewtrack", "adcache", "adconfig", "sdkconfig",
+            "adrouter", "adrelay", "adbridge", "adtrace", "bidrequest", "bidresponse", "skadnetwork", "skadn",
+            "httpdns", "adresolver", "adstream", "wsad", "ssead", "grpcad", "protobufad",
+            "adplugin", "admodule", "dynamicad", "adquic", "adtcp", "adudp", "binaryad",
+            "marketad", "installad", "downloadad", "deeplinkad", "shakead", "notifyad", "pushad",
+            "taskad", "missionad", "welfaread", "benefitad", "coinad", "offerwallad",
+            "gamead", "revivead", "livead", "liveroomad", "searchad", "hotwordad",
+            "recommendad", "experimentad", "abtestad", "miniappad", "miniprogramad", "landingad",
+            "fakebuttonad", "fakeclosead", "clipboardad", "sharead", "serviceworkerad",
+            "precachead", "widgetad", "shortcutad", "badgead", "lockscreenad", "wallpaperad",
+            "commentad", "replyad", "danmakuad", "bulletad", "profilead", "followad",
+            "inboxad", "messagead", "chatad", "topicad", "communityad", "socialad",
+            "templatead", "tplad", "cloudad", "cloudcontrolad", "cloudconfigad", "layoutad",
+            "assetpackad", "resourcepackad", "materialpackad", "creativepackad", "bundlead",
+            "patchad", "hotpatchad", "couponad", "redpacketad", "cashad", "cashbackad",
+            "subsidyad", "allowancead", "lotteryad", "bonusad",
+            "productad", "shopad", "mallad", "goodsad", "itemad", "commercead", "shoppingad",
+            "affiliatead", "cpsad", "commissionad", "rebatead", "taokead", "unionad",
+            "locallifead", "nearbyad", "poiad", "mapad", "weatherad", "toolad", "cleanerad",
+            "batteryad", "wifiad", "filemanagerad", "takeawayad", "hotelad", "travelad", "ridead",
+            "leadgenad", "leadformad", "formad", "surveyad", "questionnairead", "trialad",
+            "signupad", "reservationad", "calendarreminderad", "calendarsubscribead", "reminderad", "alarmad",
+            "browserad", "startpagead", "homepagead", "newtabad", "speeddialad", "bookmarkad",
+            "searchboxad", "hotsrchad", "hotsearchad", "trendingad", "sitenavad", "navcardad",
+            "appstoread", "appinstallad", "appupdatead", "promotedappad", "preinstallad",
+            "gamecenterad", "apkrankad", "apkad", "oemad", "romad", "systemmanagerad",
+            "securityad", "boostad", "virusscanad", "storagecleanad", "negativescreenad",
+            "tvad", "ottad", "castad", "screencastad", "wearad", "watchad", "carad",
+            "carplayad", "iotad", "speakerad", "tabletad", "padad",
+            "cnamead", "adalias", "aliasad", "cnamecloakad", "cloakedad", "adcloak",
+            "dohad", "doqad", "dotad", "dnsqueryad", "encrypteddnsad", "httpdnsad",
+            "alihttpdnsad", "tencenthttpdnsad", "baiduhttpdnsad", "adquic443", "quicad443"
+            , "wasmad", "adwasm", "wasmloaderad", "jsloaderad", "obfuscatedad", "packedad",
+            "encryptedjsad", "adfingerprint", "phashad", "imagehashad", "mediahashad",
+            "watermarkad", "videofingerprintad", "endcardhashad", "framehashad",
+            "http3ad", "h3ad", "udp443ad", "adudp443", "quicgatewayad", "http3gatewayad"
         )
         if (novelAdInfraPatterns.any { pattern -> lower.contains(pattern) }) return true
         if (looksLikePushRecommendationAdDomain(lower)) return true

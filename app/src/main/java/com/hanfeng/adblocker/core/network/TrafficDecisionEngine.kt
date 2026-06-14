@@ -15,7 +15,8 @@ object TrafficDecisionEngine {
         val matchedRule: Any?,
         val bypassReason: String?,
         val httpDecryptEnabled: Boolean,
-        val hasHttpsTarget: Boolean
+        val hasHttpsTarget: Boolean,
+        val globalMitmFullCapture: Boolean = false
     )
 
     data class HttpDecryptBlockInput(
@@ -74,15 +75,25 @@ object TrafficDecisionEngine {
             return QuicDecision(blocked = true, reason = "local-proxy-force-tcp")
         }
         val domain = input.domain?.trim().orEmpty()
-        if (domain.isBlank()) return QuicDecision(blocked = false, reason = null)
+        val appName = input.appName.orEmpty()
+        val vendor = input.vendor.orEmpty()
+        if (domain.isBlank()) {
+            if (input.globalMitmFullCapture && input.bypassReason == null) {
+                if (RuleRepository.isAggressiveAdAppHint(appName) || RuleRepository.isCommunityAppHint(appName)) {
+                    return QuicDecision(blocked = true, reason = "global-mitm-force-tcp")
+                }
+            }
+            return QuicDecision(blocked = false, reason = null)
+        }
         if (RuleRepository.isWhitelistedDomain(domain)) return QuicDecision(blocked = false, reason = null)
         if (RuleRepository.isSensitiveAuthDomain(domain)) return QuicDecision(blocked = false, reason = null)
         if (RuleRepository.shouldProtectMediaTraffic(domain) || RuleRepository.shouldProtectBusinessTraffic(domain)) {
             return QuicDecision(blocked = false, reason = null)
         }
-        val appName = input.appName.orEmpty()
-        val vendor = input.vendor.orEmpty()
-        if (RuleRepository.isGameCoreDomain(domain) || RuleRepository.isCommunityAppHint(appName) || RuleRepository.isSocialCoreDomain(domain)) {
+        if (RuleRepository.isBypassProtectionDomain(domain)) {
+            return QuicDecision(blocked = true, reason = "encrypted-dns-force-tcp")
+        }
+        if (RuleRepository.isGameCoreDomain(domain) || RuleRepository.isSocialCoreDomain(domain)) {
             return QuicDecision(blocked = false, reason = null)
         }
         if (RuleRepository.shouldForceNovelQuicBlock(domain, appName, vendor)) {
@@ -90,6 +101,11 @@ object TrafficDecisionEngine {
         }
         if (RuleRepository.shouldTreatAsGeneralAdTraffic(domain, vendor, appName)) {
             return QuicDecision(blocked = true, reason = "general-ad-traffic")
+        }
+        if (input.globalMitmFullCapture && input.hasHttpsTarget && input.bypassReason == null) {
+            if (RuleRepository.isAggressiveAdAppHint(appName) || RuleRepository.isCommunityAppHint(appName)) {
+                return QuicDecision(blocked = true, reason = "global-mitm-force-tcp")
+            }
         }
         val shouldForceTcpFallback = input.httpDecryptEnabled && input.hasHttpsTarget && input.matchedRule != null && input.bypassReason == null
         if (input.matchedRule == null && !shouldForceTcpFallback) {

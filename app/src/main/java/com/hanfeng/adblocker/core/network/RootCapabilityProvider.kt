@@ -12,7 +12,7 @@ data class RootCapabilityState(
     val details: String? = null
 )
 
-object NoOpRootCapabilityProvider : RootCapabilityProvider {
+object RootShellCapabilityProvider : RootCapabilityProvider {
     override val name: String = "root"
 
     override fun isAvailable(context: Context): Boolean = false
@@ -20,7 +20,10 @@ object NoOpRootCapabilityProvider : RootCapabilityProvider {
     override fun detect(context: Context): RootCapabilityState {
         return RootCapabilityState(
             available = false,
-            details = "Root capability is reserved for a future engine"
+            manager = null,
+            details = "Root features disabled"
         )
     }
 }
+
+object NoOpRootCapabilityProvider : RootCapabilityProvider by RootShellCapabilityProvider

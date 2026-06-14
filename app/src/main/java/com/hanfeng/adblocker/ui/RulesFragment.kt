@@ -148,8 +148,16 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun String.lineCount(): Int = this.lineSequence().count()
 
-    private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri != null) importRuleFile(uri)
+    private val importLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val uri = result.data?.data
+        safeContext()?.applicationContext?.let { ctx ->
+            LogRepository.append(ctx, "Rule import picker result: resultCode=${result.resultCode}, uri=$uri")
+        }
+        when {
+            result.resultCode == Activity.RESULT_OK && uri != null -> importRuleFile(uri)
+            result.resultCode == Activity.RESULT_OK -> showShortToast("文件选择器未返回文件路径，请换一个文件管理器重试")
+            else -> showShortToast("未选择规则文件")
+        }
     }
 
     private val ruleExportPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -500,11 +508,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private fun launchImportRulePicker() {
         if (!isAdded) return
         try {
-            importLauncher.launch(arrayOf("text/*", "application/octet-stream", "application/x-yaml", "application/yaml"))
+            LogRepository.append(safeContext()?.applicationContext ?: return, "Launching rule import picker")
+            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            importLauncher.launch(intent)
         } catch (e: Exception) {
             val ctx = safeContext() ?: return
             LogRepository.append(ctx, "Launch import picker failed: ${e.message ?: e.javaClass.simpleName}")
-            showShortToast("无法打开文件选择器")
+            showShortToast("无法打开文件选择器，请确认系统文件管理器可用")
         }
     }
 

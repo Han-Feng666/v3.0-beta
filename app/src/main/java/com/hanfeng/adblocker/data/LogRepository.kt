@@ -1,6 +1,7 @@
 package com.HanFeng.data
 
 import android.content.Context
+import android.util.Log
 import androidx.core.content.FileProvider
 import com.HanFeng.security.CertificateAuthorityManager
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +35,8 @@ object LogRepository {
     private var snapshotExportJob: Job? = null
     private val droppedLogCount = AtomicInteger(0)
     @Volatile private var currentLogSessionId: String? = null
+    @Volatile private var lastWriterFlushAt = 0L
+    private const val WRITER_FLUSH_INTERVAL_MILLIS = 2_000L
     private val noisyLogPrefixes = listOf(
         "HTTP/2 frame ",
         "HTTP/2 headers decoded ",
@@ -83,21 +86,33 @@ object LogRepository {
         synchronized(this) {
             if (writerJob?.isActive == true) return
             writerJob = scope.launch {
-                val ctx = currentContext ?: return@launch
-                val file = logFile(ctx)
-                file.parentFile?.mkdirs()
-                val fos = FileOutputStream(file, true)
-                val bos = BufferedOutputStream(fos, 8192)
+                var fos: FileOutputStream? = null
+                var bos: BufferedOutputStream? = null
                 try {
+                    val ctx = currentContext ?: return@launch
+                    val file = logFile(ctx)
+                    file.parentFile?.mkdirs()
+                    fos = FileOutputStream(file, true)
+                    bos = BufferedOutputStream(fos, 8192)
                     while (isActive) {
                         val msg = logChannel.receive()
                         bos.write(msg.toByteArray())
+                        val now = System.currentTimeMillis()
+                        if (now - lastWriterFlushAt >= WRITER_FLUSH_INTERVAL_MILLIS) {
+                            bos.flush()
+                            lastWriterFlushAt = now
+                        }
                     }
-                } catch (_: Exception) {
-                    // Silent exit on channel close or error
+                } catch (error: Throwable) {
+                    if (isActive) {
+                        Log.e("HanFengLogRepository", "Log writer stopped: ${error.message ?: error.javaClass.simpleName}", error)
+                    }
                 } finally {
-                    runCatching { bos.flush() }
-                    runCatching { fos.close() }
+                    runCatching { bos?.flush() }
+                    runCatching { fos?.close() }
+                    synchronized(this@LogRepository) {
+                        writerJob = null
+                    }
                 }
             }
         }

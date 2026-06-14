@@ -32,10 +32,10 @@ object HttpsHandshakeEngine {
     )
 
     fun decide(input: Input): Decision {
-        if (input.protocol != 6 || input.destinationPort != 443) {
+        if (input.protocol != 6 || (input.destinationPort != 443 && input.destinationPort != input.bridgePort)) {
             return Decision(false, Event.NONE)
         }
-        if (!input.hasFlow || input.bridgePort == null) {
+        if (!input.hasFlow) {
             return Decision(false, Event.NONE)
         }
         if (input.syn && !input.ack) {
@@ -44,7 +44,11 @@ object HttpsHandshakeEngine {
         if (input.state == "syn_ack_sent" && input.ack && input.payloadLength == 0L) {
             return Decision(true, Event.ACK_ESTABLISH)
         }
-        if ((input.state == "established" || input.state == "payload_acknowledged") && (input.payloadLength > 0 || input.psh)) {
+        val bridgeReady = input.bridgePort != null
+        if (bridgeReady &&
+            (input.state == "established" || input.state == "bridge_bound" || input.state == "payload_acknowledged") &&
+            (input.payloadLength > 0 || input.psh)
+        ) {
             return Decision(true, Event.CLIENT_PAYLOAD)
         }
         if ((input.state == "server_payload_sent" || input.state == "payload_acknowledged") && input.ack && input.payloadLength == 0L) {

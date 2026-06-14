@@ -4,6 +4,7 @@ import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.stream.JsonWriter
 import com.google.gson.reflect.TypeToken
+import com.HanFeng.core.network.TrainingSampleExporter
 import com.HanFeng.model.BlockRule
 import com.HanFeng.model.RemoteRuleSourceConfig
 import com.HanFeng.model.RuleSource
@@ -39,6 +40,7 @@ object RuleRepository {
     private const val SUSPICIOUS_SAMPLE_DECODE_MAX_LENGTH = 2048
     private const val SUSPICIOUS_SAMPLE_MAX_DECODE_ROUNDS = 2
     private const val RULES_FILE_NAME = "rules.json"
+    private const val BUILTIN_AD_SEED_SOURCE_ID = "builtin-ad-seed"
     // 白名单域名 - 这些域名被拦截会导致 APP 断网
     // 策略：只保护基础服务，不保护纯广告域名
     // 2026-06-06 优化：移除过度保护的泛域名，改为精确子域名保护
@@ -618,6 +620,7 @@ object RuleRepository {
     )
     private val bypassProtectionDomains = setOf(
         "dns.alidns.com",
+        "httpdns.aliyun.com",
         "httpdns.alicdn.com",
         "httpdns-sc.aliyuncs.com",
         "httpdns-cn.aliyuncs.com",
@@ -683,6 +686,10 @@ object RuleRepository {
         "dns.srv.baidu.com",
         "dns.weixin.qq.com",
         "dns.weixin.qq.com.cn",
+        "httpdns.weixin.qq.com",
+        "httpdns.qq.com",
+        "httpdns.tencentyun.com",
+        "httpdns.tencent-cloud.com",
         "resolver-a.privatelink.apple-dns.net",
         "mask.icloud.com",
         "mask-h2.icloud.com",
@@ -1592,8 +1599,9 @@ object RuleRepository {
 
     fun addRules(context: Context, domains: Collection<String>, source: RuleSource, allowWhitelistDomains: Boolean = false): List<BlockRule> {
         if (domains.isEmpty()) return emptyList()
+        val userOwnedSource = source == RuleSource.MANUAL || source == RuleSource.IMPORTED
         val normalizedDomains = domains.mapNotNull(::sanitizeDomain)
-            .filter { allowWhitelistDomains || !isWhitelistedDomain(it) }
+            .filter { userOwnedSource || allowWhitelistDomains || !isWhitelistedDomain(it) }
             .distinct()
         return addNormalizedRules(context, normalizedDomains, source, allowWhitelistDomains = true)
     }
@@ -2058,8 +2066,9 @@ object RuleRepository {
         if (domains.isEmpty()) return emptyList()
         val addState = buildManualAddState(context)
         val added = mutableListOf<BlockRule>()
+        val userOwnedSource = source == RuleSource.MANUAL || source == RuleSource.IMPORTED
         domains.forEach { domain ->
-            if (!allowWhitelistDomains && isWhitelistedDomain(domain)) return@forEach
+            if (!userOwnedSource && !allowWhitelistDomains && isWhitelistedDomain(domain)) return@forEach
             if (addState.existingDomains.add(domain)) {
                 added += buildNormalizedBlockRule(context, domain, source)
             }
@@ -2345,10 +2354,13 @@ object RuleRepository {
             excludedDnsTypes = normalizeDnsTypes(parsedRule.excludedDnsTypes),
             thirdParty = parsedRule.thirdParty,
             firstParty = parsedRule.firstParty,
+            important = parsedRule.important,
             redirect = parsedRule.redirect,
             domainConstraints = parsedRule.domainConstraints,
+            excludedDomainConstraints = parsedRule.excludedDomainConstraints,
             denyallow = parsedRule.denyallow,
             urlblock = parsedRule.urlblock,
+            requestTypes = parsedRule.requestTypes,
             appPackages = parsedRule.appPackages,
             destinationPorts = parsedRule.destinationPorts,
             sourcePorts = parsedRule.sourcePorts,
@@ -2366,6 +2378,7 @@ object RuleRepository {
             replaceRules = parsedRule.replaceRules,
             cspValue = parsedRule.cspValue,
             redirectResource = parsedRule.redirectResource,
+            jsInjectRules = parsedRule.jsInjectRules,
             remoteSourceId = remoteSourceId
         )
     }
@@ -2375,11 +2388,8 @@ object RuleRepository {
         parsedRule: ParsedRule,
         useVendorHints: Boolean
     ): String {
-        return if (useVendorHints) {
-            classifyVendorFromHints(context, parsedRule.domain, *parsedRule.vendorHints.toTypedArray())
-        } else {
-            classifyVendor(context, parsedRule.domain)
-        }
+        val hints = if (useVendorHints) parsedRule.vendorHints.toTypedArray() else emptyArray()
+        return classifyVendorSimple(context, parsedRule.domain, *hints) ?: DEFAULT_VENDOR
     }
 
     private fun incrementVendorCount(vendorCount: MutableMap<String, Int>, vendor: String) {
@@ -2532,6 +2542,7 @@ object RuleRepository {
             excludedDnsTypes = parsedRule.excludedDnsTypes,
             badfilter = parsedRule.isBadfilter,
             firstParty = parsedRule.firstParty,
+            important = parsedRule.important,
             pathPattern = parsedRule.pathPattern,
             ipCidr = parsedRule.ipCidr,
             regexPattern = parsedRule.regexPattern,
@@ -2539,11 +2550,15 @@ object RuleRepository {
             removeParams = parsedRule.removeParams,
             removeParamRegexes = parsedRule.removeParamRegexes,
             removeRequestHeaders = parsedRule.removeRequestHeaders,
+            setRequestHeaders = parsedRule.setRequestHeaders,
             replaceRules = parsedRule.replaceRules,
             cspValue = parsedRule.cspValue,
+            jsInjectRules = parsedRule.jsInjectRules,
             keywordPattern = parsedRule.keywordPattern,
             domainConstraints = parsedRule.domainConstraints,
+            excludedDomainConstraints = parsedRule.excludedDomainConstraints,
             appPackages = parsedRule.appPackages,
+            requestTypes = parsedRule.requestTypes,
             destinationPorts = parsedRule.destinationPorts,
             sourcePorts = parsedRule.sourcePorts,
             denyallow = parsedRule.denyallow,
@@ -2613,7 +2628,6 @@ object RuleRepository {
         sourcePort: Int? = null
     ): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
-        if (isCoreTrafficProtectedDomain(normalized)) return false
         val ruleMap = getRuleMap(context)
         val matchingRules = buildDomainCandidates(normalized)
             .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
@@ -2624,8 +2638,29 @@ object RuleRepository {
                     matchesPortScope(it.sourcePorts, sourcePort)
             }
             .toList()
-        if (matchingRules.any { it.exceptionRule }) return false
         val lowerDomain = normalized.lowercase()
+        val hasImportantBlock = matchingRules.any(::isImportantBlockingRule) ||
+            getRegexRules(context).any { rule ->
+                isImportantBlockingRule(rule) && matchesRegexRule(rule, normalized)
+            } ||
+            getKeywordRules(context).any { rule ->
+                if (!isImportantBlockingRule(rule)) return@any false
+                val keyword = rule.keywordPattern?.lowercase() ?: return@any false
+                lowerDomain.contains(keyword)
+            }
+        if (hasImportantBlock) return true
+        val hasUserOwnedBlock = matchingRules.any(::isUserOwnedBlockingRule) ||
+            getRegexRules(context).any { rule ->
+                isUserOwnedBlockingRule(rule) && matchesRegexRule(rule, normalized)
+            } ||
+            getKeywordRules(context).any { rule ->
+                if (!isUserOwnedBlockingRule(rule)) return@any false
+                val keyword = rule.keywordPattern?.lowercase() ?: return@any false
+                lowerDomain.contains(keyword)
+            }
+        if (isCoreTrafficProtectedDomain(normalized) && !hasUserOwnedBlock) return false
+        if (!hasUserOwnedBlock && matchingRules.any { it.exceptionRule }) return false
+        if (hasUserOwnedBlock) return true
         val matched = matchingRules.any { !it.exceptionRule } ||
             getRegexRules(context).any { rule ->
                 if (rule.exceptionRule) return@any false
@@ -2644,13 +2679,23 @@ object RuleRepository {
     // 性能优化：快速拦截检查（跳过关键词规则，仅匹配精确规则和正则规则）
     fun isBlockedFast(context: Context, domain: String, qType: Int? = null): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
-        if (isCoreTrafficProtectedDomain(normalized)) return false
         val ruleMap = getRuleMap(context)
         val matchingRules = buildDomainCandidates(normalized)
             .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
             .filter { it.source != RuleSource.UNSUPPORTED && ruleMatches(it, qType, null) && it.destinationPorts.isEmpty() && it.sourcePorts.isEmpty() }
             .toList()
-        if (matchingRules.any { it.exceptionRule }) return false
+        val hasUserOwnedBlock = matchingRules.any(::isUserOwnedBlockingRule) ||
+            getRegexRules(context).any { rule ->
+                isUserOwnedBlockingRule(rule) && matchesRegexRule(rule, normalized)
+            }
+        val hasImportantBlock = matchingRules.any(::isImportantBlockingRule) ||
+            getRegexRules(context).any { rule ->
+                isImportantBlockingRule(rule) && matchesRegexRule(rule, normalized)
+            }
+        if (hasImportantBlock) return true
+        if (isCoreTrafficProtectedDomain(normalized) && !hasUserOwnedBlock) return false
+        if (!hasUserOwnedBlock && matchingRules.any { it.exceptionRule }) return false
+        if (hasUserOwnedBlock) return true
         val matched = matchingRules.any { !it.exceptionRule } ||
             getRegexRules(context).any { rule ->
                 if (rule.exceptionRule) return@any false
@@ -2668,17 +2713,19 @@ object RuleRepository {
         appName: String? = null,
         requestDomain: String? = null,
         destinationPort: Int? = null,
-        sourcePort: Int? = null
+        sourcePort: Int? = null,
+        requestType: String? = null
     ): Boolean {
         val normalizedHost = sanitizeDomain(host) ?: return false
-        if (isCoreTrafficProtectedDomain(normalizedHost)) return false
         val ruleMap = getRuleMap(context)
         val fullUrl = "$host$path".lowercase()
+        val effectiveRequestType = requestType?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
+            ?: inferRequestTypeFromPath(path)
         val matchingRules = buildDomainCandidates(normalizedHost)
             .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
             .filter { rule ->
                 if (rule.source == RuleSource.UNSUPPORTED) return@filter false
-                if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain)) return@filter false
+                if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@filter false
                 if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@filter false
                 if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@filter false
                 if (rule.keywordPattern != null) {
@@ -2693,19 +2740,36 @@ object RuleRepository {
                 rule.appPackages.isEmpty() || matchesAppPackage(rule.appPackages, appName)
             }
             .toList()
-        val hasExceptionMatch = matchingRules.any { it.exceptionRule } || getRegexRules(context).any { rule ->
-            if (rule.source == RuleSource.UNSUPPORTED) return@any false
-            if (!rule.exceptionRule) return@any false
-            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain)) return@any false
+        val hasUserOwnedBlock = matchingRules.any(::isUserOwnedBlockingRule) || getRegexRules(context).any { rule ->
+            if (!isUserOwnedBlockingRule(rule)) return@any false
+            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
             if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
             if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@any false
             matchesRegexRule(rule, fullUrl)
         }
-        if (hasExceptionMatch) return false
+        val hasImportantBlock = matchingRules.any(::isImportantBlockingRule) || getRegexRules(context).any { rule ->
+            if (!isImportantBlockingRule(rule)) return@any false
+            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
+            if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
+            if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@any false
+            matchesRegexRule(rule, fullUrl)
+        }
+        if (hasImportantBlock) return true
+        if (isCoreTrafficProtectedDomain(normalizedHost) && !hasUserOwnedBlock) return false
+        val hasExceptionMatch = matchingRules.any { it.exceptionRule } || getRegexRules(context).any { rule ->
+            if (rule.source == RuleSource.UNSUPPORTED) return@any false
+            if (!rule.exceptionRule) return@any false
+            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
+            if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
+            if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@any false
+            matchesRegexRule(rule, fullUrl)
+        }
+        if (!hasUserOwnedBlock && hasExceptionMatch) return false
+        if (hasUserOwnedBlock) return true
         val matched = matchingRules.any { !it.exceptionRule } || getRegexRules(context).any { rule ->
             if (rule.source == RuleSource.UNSUPPORTED) return@any false
             if (rule.exceptionRule) return@any false
-            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain)) return@any false
+            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
             if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
             if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@any false
             matchesRegexRule(rule, fullUrl)
@@ -2713,6 +2777,22 @@ object RuleRepository {
         if (matched) return true
         if (isWhitelistedDomain(normalizedHost)) return false
         return false
+    }
+
+    private fun inferRequestTypeFromPath(path: String): String? {
+        val cleanPath = path.substringBefore('?').substringBefore('#').lowercase()
+        return when {
+            cleanPath.endsWith(".js") || cleanPath.endsWith(".mjs") -> "script"
+            cleanPath.endsWith(".css") -> "stylesheet"
+            cleanPath.endsWith(".png") || cleanPath.endsWith(".jpg") || cleanPath.endsWith(".jpeg") ||
+                cleanPath.endsWith(".gif") || cleanPath.endsWith(".webp") || cleanPath.endsWith(".avif") ||
+                cleanPath.endsWith(".svg") || cleanPath.endsWith(".ico") -> "image"
+            cleanPath.endsWith(".woff") || cleanPath.endsWith(".woff2") || cleanPath.endsWith(".ttf") ||
+                cleanPath.endsWith(".otf") || cleanPath.endsWith(".eot") -> "font"
+            cleanPath.endsWith(".mp4") || cleanPath.endsWith(".m4v") || cleanPath.endsWith(".webm") ||
+                cleanPath.endsWith(".mp3") || cleanPath.endsWith(".m3u8") || cleanPath.endsWith(".ts") -> "media"
+            else -> null
+        }
     }
 
     fun findMatchingIpRule(
@@ -2867,9 +2947,8 @@ object RuleRepository {
         sourcePort: Int? = null
     ): BlockRule? {
         val normalized = sanitizeDomain(domain) ?: return null
-        if (isCoreTrafficProtectedDomain(normalized)) return null
         val ruleMap = getRuleMap(context)
-        return buildDomainCandidates(normalized)
+        val domainMatch = buildDomainCandidates(normalized)
             .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
             .filter {
                 it.source != RuleSource.UNSUPPORTED &&
@@ -2878,7 +2957,24 @@ object RuleRepository {
                     matchesPortScope(it.destinationPorts, destinationPort) &&
                     matchesPortScope(it.sourcePorts, sourcePort)
             }
-            .firstOrNull() ?: getRegexRules(context).firstOrNull { it.source != RuleSource.UNSUPPORTED && !it.exceptionRule && matchesRegexRule(it, normalized) }
+            .firstOrNull()
+        val regexMatch = getRegexRules(context).firstOrNull { it.source != RuleSource.UNSUPPORTED && !it.exceptionRule && matchesRegexRule(it, normalized) }
+        val match = domainMatch ?: regexMatch
+        if (isCoreTrafficProtectedDomain(normalized) && match?.let(::isUserOwnedBlockingRule) != true) return null
+        return match
+    }
+
+    internal fun isUserOwnedRule(rule: BlockRule): Boolean {
+        return rule.source == RuleSource.MANUAL ||
+            (rule.source == RuleSource.IMPORTED && rule.remoteSourceId.isNullOrBlank())
+    }
+
+    private fun isUserOwnedBlockingRule(rule: BlockRule): Boolean {
+        return isUserOwnedRule(rule) && !rule.exceptionRule && rule.source != RuleSource.UNSUPPORTED
+    }
+
+    private fun isImportantBlockingRule(rule: BlockRule): Boolean {
+        return rule.important && !rule.exceptionRule && rule.source != RuleSource.UNSUPPORTED
     }
 
     private fun isCoreTrafficProtectedDomain(domain: String): Boolean {
@@ -2892,14 +2988,28 @@ object RuleRepository {
             isProtectedNovelAppDomain(domain)
     }
 
-    fun getRequestRewriteDirectives(context: Context, host: String, path: String, appName: String? = null, requestDomain: String? = null): RequestRewriteDirectives {
+    fun getRequestRewriteDirectives(
+        context: Context,
+        host: String,
+        path: String,
+        appName: String? = null,
+        requestDomain: String? = null,
+        requestType: String? = null
+    ): RequestRewriteDirectives {
         val normalizedHost = sanitizeDomain(host) ?: return RequestRewriteDirectives()
+        val effectiveRequestType = requestType?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
+            ?: inferRequestTypeFromPath(path)
         val matchedRules = buildDomainCandidates(normalizedHost)
             .flatMap { candidate -> getRuleMap(context)[candidate].orEmpty().asSequence() }
-            .filter { it.source != RuleSource.UNSUPPORTED && ruleMatches(it, null, appName, normalizedHost, requestDomain) }
-        val matchedRegexRules = getRegexRules(context).filter { it.source != RuleSource.UNSUPPORTED && (matchesRegexRule(it, "$normalizedHost$path") || matchesRegexRule(it, normalizedHost)) }
-        val allRules = (matchedRules + matchedRegexRules).distinctBy { it.id }
-        if (allRules.any { it.exceptionRule }) {
+            .filter { it.source != RuleSource.UNSUPPORTED && ruleMatches(it, null, appName, normalizedHost, requestDomain, effectiveRequestType) }
+        val matchedRegexRules = getRegexRules(context).filter {
+            it.source != RuleSource.UNSUPPORTED &&
+                ruleMatches(it, null, appName, normalizedHost, requestDomain, effectiveRequestType) &&
+                (matchesRegexRule(it, "$normalizedHost$path") || matchesRegexRule(it, normalizedHost))
+        }
+        val allRules = (matchedRules + matchedRegexRules).distinctBy { it.id }.toList()
+        val importantActionableRules = allRules.filter(::isImportantBlockingRule)
+        if (allRules.any { it.exceptionRule } && importantActionableRules.isEmpty()) {
             return RequestRewriteDirectives(cosmeticSelectors = getCosmeticSelectors(
                 context = context,
                 host = normalizedHost,
@@ -2908,7 +3018,7 @@ object RuleRepository {
                 requestDomain = requestDomain
             ))
         }
-        val actionableRules = allRules.filterNot { it.exceptionRule }
+        val actionableRules = importantActionableRules.ifEmpty { allRules.filterNot { it.exceptionRule } }
         val removeParams = actionableRules.flatMap { it.removeParams }.toSet()
         val removeParamRegexes = actionableRules.flatMap { it.removeParamRegexes }.toSet()
         val removeRequestHeaders = actionableRules.flatMap { it.removeRequestHeaders }.toSet()
@@ -2916,6 +3026,7 @@ object RuleRepository {
         val replaceRules = actionableRules.flatMap { it.replaceRules }.toSet()
         val cspValue = actionableRules.mapNotNull { it.cspValue }.firstOrNull()
         val redirectResource = actionableRules.mapNotNull { it.redirectResource }.firstOrNull()
+        val jsInjectRules = actionableRules.flatMap { it.jsInjectRules }.toSet()
         val cosmeticSelectors = getCosmeticSelectors(
             context = context,
             host = normalizedHost,
@@ -2931,6 +3042,7 @@ object RuleRepository {
             replaceRules = replaceRules,
             cspValue = cspValue,
             redirectResource = redirectResource,
+            jsInjectRules = jsInjectRules,
             cosmeticSelectors = cosmeticSelectors
         )
     }
@@ -2965,6 +3077,7 @@ object RuleRepository {
                     rule.setRequestHeaders.isNotEmpty() ||
                     rule.replaceRules.isNotEmpty() ||
                     !rule.cspValue.isNullOrBlank() ||
+                    rule.jsInjectRules.isNotEmpty() ||
                     !rule.cosmeticSelector.isNullOrBlank() ||
                     (!rule.keywordPattern.isNullOrBlank() && fullUrl.contains(rule.keywordPattern))
         }
@@ -3291,6 +3404,20 @@ object RuleRepository {
             refererDomain = normalizeSuspiciousSampleDomain(refererDomain.orEmpty()) ?: previous?.refererDomain.orEmpty(),
             lastSampleAt = now
         )
+        TrainingSampleExporter.appendUnknownVendorSample(
+            context = context,
+            host = normalized,
+            path = matchedPathHint,
+            protocol = when (signal) {
+                SuspiciousSignal.DNS_QUERY, SuspiciousSignal.DNS_ALIAS -> "DNS"
+                SuspiciousSignal.TLS_SNI -> "HTTPS"
+                SuspiciousSignal.HTTP_FLOW, SuspiciousSignal.HTTP_REDIRECT -> "HTTPS"
+            },
+            appName = normalizedAppName,
+            isHttpdns = normalized.contains("httpdns", ignoreCase = true),
+            hitAdToken = hasStrongDomainSignal,
+            label = "unlabeled"
+        )
         val trimmed = samples.entries
             .sortedWith(
                 compareByDescending<Map.Entry<String, SuspiciousDomainRecord>> {
@@ -3527,6 +3654,8 @@ object RuleRepository {
         if (looksLikeAdDomain(normalized)) score += 4
         if (looksLikePushRecommendationAdDomain(normalized)) score += 3
         if (hasAggressiveNovelAdSignal(normalized)) score += 3
+        if (looksLikeDynamicAliasOrEncryptedDnsAdDomain(normalized)) score += 3
+        if (looksLikeHighEntropyAdCandidate(normalized)) score += 2
         
         // 通用广告商识别
         if (normalizedVendor == GENERIC_AD_VENDOR) score += 3
@@ -3537,6 +3666,7 @@ object RuleRepository {
         if (count >= 8) score += 2 else if (count >= 3) score += 1
         if (dnsHits >= 5) score += 2 else if (dnsHits >= 2) score += 1
         if (aliasHits >= 2) score += 2 else if (aliasHits >= 1) score += 1
+        if (aliasHits >= 1 && looksLikeDynamicAliasOrEncryptedDnsAdDomain(normalized)) score += 2
         if (tlsSniHits >= 2) score += 2 else if (tlsSniHits >= 1) score += 1
         if (httpHits >= 2) score += 2 else if (httpHits >= 1) score += 1
         if (pathHits >= 2) score += 2 else if (pathHits >= 1) score += 1
@@ -3580,6 +3710,29 @@ object RuleRepository {
         
         score += confidenceBoost.coerceIn(0, 4)
         return score.coerceAtLeast(0)
+    }
+
+    private fun looksLikeDynamicAliasOrEncryptedDnsAdDomain(domain: String): Boolean {
+        val lower = domain.lowercase()
+        val normalizedTokens = lower.replace(Regex("[^a-z0-9]"), "")
+        val signals = listOf(
+            "cnamead", "adalias", "aliasad", "cnamecloakad", "cloakedad", "adcloak",
+            "httpdnsad", "dohad", "doqad", "dotad", "dnsqueryad", "encrypteddnsad",
+            "adquic", "quicad", "adgateway", "adresolver", "adresolver"
+        )
+        return signals.any { lower.contains(it) || normalizedTokens.contains(it) }
+    }
+
+    private fun looksLikeHighEntropyAdCandidate(domain: String): Boolean {
+        val lower = domain.lowercase()
+        val labels = lower.split('.', '-', '_').filter { it.length >= 10 }
+        if (labels.isEmpty()) return false
+        return labels.any { label ->
+            val digitCount = label.count(Char::isDigit)
+            val uniqueCount = label.toSet().size
+            val adHint = label.contains("ad") || label.contains("ads") || label.contains("adx") || label.contains("bid")
+            adHint && digitCount >= 2 && uniqueCount >= 8
+        }
     }
 
     fun shouldTreatAsGeneralAdTraffic(
@@ -3780,6 +3933,18 @@ object RuleRepository {
             "promotion", "promo", "marketing", "track", "tracking", "log", "logger", "stat", "stats", "analytics"
         )
         if (adSubdomainPatterns.any { lower.startsWith("$it.") || lower.startsWith("$it-") || lower == it }) return false
+        val firstLabel = lower.substringBefore('.')
+        val aggressivePrefixPatterns = listOf(
+            Regex("^ads?\\d+[-_].*"),
+            Regex("^adx\\d*[-_].*"),
+            Regex("^ad[-_]?.*"),
+            Regex("^feed[-_]?ad.*"),
+            Regex("^reward[-_]?.*"),
+            Regex("^splash[-_]?.*"),
+            Regex("^launch[-_]?ad.*"),
+            Regex("^open[-_]?screen.*")
+        )
+        if (aggressivePrefixPatterns.any { it.containsMatchIn(firstLabel) }) return false
         // 具有强烈广告信号的域名不保护
         if (RuleProtectionSupport.hasAggressiveNovelAdSignal(normalized)) return false
         // 移除 looksLikeAdDomain 调用，避免与 isLowValueSuspiciousSampleDomain 形成循环
@@ -3981,6 +4146,11 @@ object RuleRepository {
                 if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) {
                     return@forEach
                 }
+                parseFastImportRule(trimmed, lineContext)?.let { parsedRule ->
+                    mergeParsedImportRule(parsedRules, parsedRule)
+                    parsedRuleCount += 1
+                    return@forEach
+                }
                 val parsedLineRules = parseRuleLine(fragment, lineContext)
                 parsedLineRules.forEach { parsedRule ->
                     mergeParsedImportRule(parsedRules, parsedRule)
@@ -4049,6 +4219,10 @@ object RuleRepository {
                 if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) {
                     return@forEach
                 }
+                parseFastImportRule(trimmed, RuleParsingSupport.LineContext())?.let { parsedRule ->
+                    mergeParsedImportRule(parsedRules, parsedRule)
+                    return@forEach
+                }
                 parseRuleLine(fragment, RuleParsingSupport.LineContext()).forEach { parsedRule ->
                     mergeParsedImportRule(parsedRules, parsedRule)
                 }
@@ -4071,6 +4245,96 @@ object RuleRepository {
             parsedRule.isException -> mergeParsedRuleInto(buckets.exceptions, parsedRule)
             else -> mergeParsedRuleInto(buckets.blocked, parsedRule)
         }
+    }
+
+    private fun parseFastImportRule(line: String, lineContext: RuleParsingSupport.LineContext): ParsedRule? {
+        val normalizedLine = RuleParsingSupport.stripYamlListPrefix(RuleParsingSupport.unwrapRuleWrapper(line)).trim()
+        if (normalizedLine.isBlank()) return null
+        parseFastAdblockDomainRule(normalizedLine, lineContext)?.let { return it }
+        parseFastHostsDomainRule(normalizedLine, lineContext)?.let { return it }
+        parseFastDnsRedirectRule(normalizedLine, lineContext)?.let { return it }
+        parseFastProviderDomainRule(normalizedLine, lineContext)?.let { return it }
+        parseFastWildcardDomainRule(normalizedLine, lineContext)?.let { return it }
+        sanitizeDomain(normalizeDomainToken(normalizedLine))?.let { domain ->
+            return ParsedRule(domain = domain, isException = false, vendorHints = lineContext.vendorHints)
+        }
+        return null
+    }
+
+    private fun parseFastAdblockDomainRule(line: String, lineContext: RuleParsingSupport.LineContext): ParsedRule? {
+        val isException = line.startsWith("@@||")
+        val prefix = if (isException) "@@||" else "||"
+        if (!line.startsWith(prefix)) return null
+        val body = line.removePrefix(prefix)
+        val domainPart = body.substringBefore('^').substringBefore('/').substringBefore('$').trim()
+        val domain = sanitizeDomain(normalizeDomainToken(domainPart)) ?: return null
+        val modifierPart = line.substringAfter('$', missingDelimiterValue = "")
+        return ParsedRule(
+            domain = domain,
+            isException = isException,
+            important = modifierPart.split(',').any { it.equals("important", ignoreCase = true) },
+            isBadfilter = modifierPart.split(',').any { it.equals("badfilter", ignoreCase = true) },
+            vendorHints = lineContext.vendorHints
+        )
+    }
+
+    private fun parseFastHostsDomainRule(line: String, lineContext: RuleParsingSupport.LineContext): ParsedRule? {
+        val parts = line.split(splitWhitespaceRegex).filter { it.isNotBlank() }
+        if (parts.size < 2) return null
+        val ip = parts[0]
+        if (ip != "0.0.0.0" && ip != "127.0.0.1" && ip != "::" && ip != "::1") return null
+        val domain = sanitizeDomain(normalizeDomainToken(parts[1])) ?: return null
+        return ParsedRule(domain = domain, isException = false, vendorHints = lineContext.vendorHints)
+    }
+
+    private fun parseFastDnsRedirectRule(line: String, lineContext: RuleParsingSupport.LineContext): ParsedRule? {
+        val trimmed = line.trim()
+        val prefixes = listOf("address=/", "server=/", "local=/", "bogus-nxdomain=")
+        val prefix = prefixes.firstOrNull { trimmed.startsWith(it, ignoreCase = true) } ?: return null
+        val value = if (prefix.endsWith('/')) {
+            trimmed.substring(prefix.length).substringBefore('/').trim()
+        } else {
+            trimmed.substringAfter('=').trim()
+        }
+        val domain = sanitizeDomain(normalizeDomainToken(value)) ?: return null
+        return ParsedRule(domain = domain, isException = false, vendorHints = lineContext.vendorHints)
+    }
+
+    private fun parseFastProviderDomainRule(line: String, lineContext: RuleParsingSupport.LineContext): ParsedRule? {
+        val trimmed = line.trim().removeSurrounding("\"").removeSurrounding("'")
+        val value = when {
+            trimmed.startsWith("DOMAIN-SUFFIX,", ignoreCase = true) -> trimmed.substringAfter(',')
+            trimmed.startsWith("HOST-SUFFIX,", ignoreCase = true) -> trimmed.substringAfter(',')
+            trimmed.startsWith("DOMAIN,", ignoreCase = true) -> trimmed.substringAfter(',')
+            trimmed.startsWith("HOST,", ignoreCase = true) -> trimmed.substringAfter(',')
+            trimmed.startsWith("DOMAIN-KEYWORD,", ignoreCase = true) -> return null
+            trimmed.startsWith("HOST-KEYWORD,", ignoreCase = true) -> return null
+            trimmed.startsWith("URL-REGEX,", ignoreCase = true) -> trimmed.substringAfter(',')
+            trimmed.startsWith("domain:", ignoreCase = true) -> trimmed.substringAfter(':')
+            trimmed.startsWith("domainSuffix:", ignoreCase = true) -> trimmed.substringAfter(':')
+            trimmed.startsWith("domain-full:", ignoreCase = true) -> trimmed.substringAfter(':')
+            trimmed.startsWith("full:", ignoreCase = true) -> trimmed.substringAfter(':')
+            trimmed.startsWith("suffix:", ignoreCase = true) -> trimmed.substringAfter(':')
+            trimmed.startsWith("geosite:", ignoreCase = true) -> return null
+            trimmed.startsWith("host-suffix,", ignoreCase = true) -> trimmed.substringAfter(',')
+            trimmed.startsWith("host,", ignoreCase = true) -> trimmed.substringAfter(',')
+            else -> return null
+        }.substringBefore(',').trim()
+        val domain = sanitizeDomain(normalizeDomainToken(value)) ?: return null
+        return ParsedRule(domain = domain, isException = false, vendorHints = lineContext.vendorHints)
+    }
+
+    private fun parseFastWildcardDomainRule(line: String, lineContext: RuleParsingSupport.LineContext): ParsedRule? {
+        val trimmed = line.trim().removeSurrounding("\"").removeSurrounding("'")
+        val value = when {
+            trimmed.startsWith("+.") -> trimmed.substring(2)
+            trimmed.startsWith("*.") -> trimmed.substring(2)
+            trimmed.startsWith(".") -> trimmed.substring(1)
+            trimmed.startsWith("||") -> trimmed.removePrefix("||").substringBefore('^').substringBefore('/').substringBefore('$')
+            else -> return null
+        }.trim()
+        val domain = sanitizeDomain(normalizeDomainToken(value)) ?: return null
+        return ParsedRule(domain = domain, isException = false, vendorHints = lineContext.vendorHints)
     }
 
     fun parseManualInput(rawInput: String): List<String> {
@@ -4216,10 +4480,13 @@ object RuleRepository {
                 excludedDnsTypes = modifierInfo.excludedDnsTypes,
                 thirdParty = modifierInfo.thirdParty,
                 firstParty = modifierInfo.firstParty,
+                important = modifierInfo.important,
                 redirect = modifierInfo.redirect,
                 domainConstraints = modifierInfo.domainConstraints,
+                excludedDomainConstraints = modifierInfo.excludedDomainConstraints,
                 denyallow = modifierInfo.denyallow,
                 urlblock = modifierInfo.urlblock,
+                requestTypes = modifierInfo.requestTypes,
                 appPackages = modifierInfo.appPackages,
                 destinationPorts = modifierInfo.destinationPorts,
                 sourcePorts = modifierInfo.sourcePorts,
@@ -4235,6 +4502,7 @@ object RuleRepository {
                 replaceRules = modifierInfo.replaceRules,
                 cspValue = modifierInfo.cspValue,
                 redirectResource = modifierInfo.redirectResource,
+                jsInjectRules = modifierInfo.jsinject?.let { setOf(it) }.orEmpty(),
                 vendorHints = lineContext.vendorHints
             )
         }
@@ -4275,6 +4543,7 @@ object RuleRepository {
             parsedRule.setRequestHeaders.isNotEmpty() ||
             parsedRule.replaceRules.isNotEmpty() ||
             parsedRule.cspValue != null ||
+            parsedRule.jsInjectRules.isNotEmpty() ||
             parsedRule.redirectResource != null
         ) {
             return buildParsedRuleIdentity(parsedRule)
@@ -4306,12 +4575,15 @@ object RuleRepository {
         return listOf(
             rule.domain,
             rule.isException.toString(),
+            rule.important.toString(),
             rule.keywordPattern.orEmpty(),
             rule.pathPattern.orEmpty(),
             rule.ipCidr.orEmpty(),
             rule.regexPattern.orEmpty(),
             rule.cosmeticSelector.orEmpty(),
             rule.appPackages.toSortedSet().joinToString("|"),
+            rule.excludedDomainConstraints.toSortedSet().joinToString("|"),
+            rule.requestTypes.toSortedSet().joinToString("|"),
             rule.destinationPorts.toSortedSet().joinToString("|"),
             rule.sourcePorts.toSortedSet().joinToString("|"),
             rule.removeParams.toSortedSet().joinToString("|"),
@@ -4320,6 +4592,7 @@ object RuleRepository {
             rule.setRequestHeaders.toSortedSet().joinToString("|"),
             rule.replaceRules.toSortedSet().joinToString("|"),
             rule.cspValue.orEmpty(),
+            rule.jsInjectRules.toSortedSet().joinToString("|"),
             rule.redirectResource.orEmpty(),
             rule.denyallow.toSortedSet().joinToString("|")
         ).joinToString("::")
@@ -4394,11 +4667,186 @@ object RuleRepository {
         val selector = line.substringAfter(marker, "").trim()
         if (selector.isBlank()) return null
         val parsedDomain = sanitizeDomain(normalizeDomainToken(domainPart))
+        if (marker == "#%#") {
+            val scriptlet = buildAdGuardScriptletInjection(selector) ?: return null
+            return ParsedRule(
+                domain = parsedDomain ?: COSMETIC_RULE_DOMAIN,
+                isException = false,
+                jsInjectRules = setOf(scriptlet)
+            )
+        }
         return ParsedRule(
             domain = parsedDomain ?: COSMETIC_RULE_DOMAIN,
             isException = marker == "#@#",
             cosmeticSelector = selector
         )
+    }
+
+    private fun buildAdGuardScriptletInjection(selector: String): String? {
+        val trimmed = selector.trim()
+        val scriptletCall = trimmed.substringAfter("scriptlet(", missingDelimiterValue = "")
+            .substringBeforeLast(')', missingDelimiterValue = "")
+            .takeIf { it.isNotBlank() }
+            ?: return null
+        val args = splitScriptletArguments(scriptletCall)
+        val name = args.firstOrNull()?.trim()?.trim('"', '\'')?.lowercase() ?: return null
+        val scriptArgs = args.drop(1).map { it.trim().trim('"', '\'') }
+        return when (name) {
+            "remove-attr", "ubo-remove-attr" -> buildRemoveAttrScriptlet(scriptArgs)
+            "remove-class", "ubo-remove-class" -> buildRemoveClassScriptlet(scriptArgs)
+            "set-constant", "ubo-set-constant" -> buildSetConstantScriptlet(scriptArgs)
+            "abort-on-property-read", "ubo-abort-on-property-read" -> buildAbortOnPropertyReadScriptlet(scriptArgs)
+            "abort-on-property-write", "ubo-abort-on-property-write" -> buildAbortOnPropertyWriteScriptlet(scriptArgs)
+            "prevent-settimeout", "prevent-set-timeout", "ubo-prevent-settimeout", "ubo-prevent-set-timeout" -> buildPreventTimerScriptlet("setTimeout", scriptArgs)
+            "prevent-setinterval", "prevent-set-interval", "ubo-prevent-setinterval", "ubo-prevent-set-interval" -> buildPreventTimerScriptlet("setInterval", scriptArgs)
+            "prevent-fetch", "ubo-prevent-fetch" -> buildPreventNetworkScriptlet("fetch", scriptArgs)
+            "prevent-xhr", "prevent-xmlhttprequest", "ubo-prevent-xhr", "ubo-prevent-xmlhttprequest" -> buildPreventNetworkScriptlet("xhr", scriptArgs)
+            "prevent-addeventlistener", "prevent-add-event-listener", "ubo-prevent-addeventlistener", "ubo-prevent-add-event-listener" -> buildPreventAddEventListenerScriptlet(scriptArgs)
+            else -> null
+        }
+    }
+
+    private fun splitScriptletArguments(input: String): List<String> {
+        val result = mutableListOf<String>()
+        val current = StringBuilder()
+        var quote: Char? = null
+        var escaped = false
+        input.forEach { char ->
+            when {
+                escaped -> {
+                    current.append(char)
+                    escaped = false
+                }
+                char == '\\' -> {
+                    current.append(char)
+                    escaped = true
+                }
+                quote != null -> {
+                    current.append(char)
+                    if (char == quote) quote = null
+                }
+                char == '\'' || char == '"' -> {
+                    current.append(char)
+                    quote = char
+                }
+                char == ',' -> {
+                    result += current.toString().trim()
+                    current.clear()
+                }
+                else -> current.append(char)
+            }
+        }
+        if (current.isNotBlank()) result += current.toString().trim()
+        return result
+    }
+
+    private fun buildRemoveAttrScriptlet(args: List<String>): String? {
+        val attr = args.getOrNull(0)?.takeIf(::isSafeDomToken) ?: return null
+        val selector = args.getOrNull(1)?.takeIf(::isSafeSelectorToken) ?: "[$attr]"
+        return """
+            (function(){try{var run=function(){document.querySelectorAll(${jsString(selector)}).forEach(function(el){el.removeAttribute(${jsString(attr)});});};run();if(window.MutationObserver&&document.documentElement){new MutationObserver(run).observe(document.documentElement,{childList:true,subtree:true,attributes:true});}}catch(e){}})();
+        """.trimIndent()
+    }
+
+    private fun buildRemoveClassScriptlet(args: List<String>): String? {
+        val className = args.getOrNull(0)?.takeIf(::isSafeDomToken) ?: return null
+        val selector = args.getOrNull(1)?.takeIf(::isSafeSelectorToken) ?: ".$className"
+        return """
+            (function(){try{var run=function(){document.querySelectorAll(${jsString(selector)}).forEach(function(el){el.classList.remove(${jsString(className)});});};run();if(window.MutationObserver&&document.documentElement){new MutationObserver(run).observe(document.documentElement,{childList:true,subtree:true,attributes:true});}}catch(e){}})();
+        """.trimIndent()
+    }
+
+    private fun buildSetConstantScriptlet(args: List<String>): String? {
+        val property = args.getOrNull(0)?.takeIf(::isSafePropertyPath) ?: return null
+        val value = normalizeScriptletConstant(args.getOrNull(1) ?: "undefined") ?: return null
+        return """
+            (function(){try{var path=${jsString(property)}.split('.');var root=window;for(var i=0;i<path.length-1;i++){root[path[i]]=root[path[i]]||{};root=root[path[i]];}Object.defineProperty(root,path[path.length-1],{configurable:true,get:function(){return $value;},set:function(){}});}catch(e){}})();
+        """.trimIndent()
+    }
+
+    private fun buildAbortOnPropertyReadScriptlet(args: List<String>): String? {
+        val property = args.getOrNull(0)?.takeIf(::isSafePropertyPath) ?: return null
+        return """
+            (function(){try{var path=${jsString(property)}.split('.');var root=window;for(var i=0;i<path.length-1;i++){root[path[i]]=root[path[i]]||{};root=root[path[i]];}Object.defineProperty(root,path[path.length-1],{configurable:true,get:function(){throw new ReferenceError('Blocked by HanFeng scriptlet');},set:function(){}});}catch(e){}})();
+        """.trimIndent()
+    }
+
+    private fun buildAbortOnPropertyWriteScriptlet(args: List<String>): String? {
+        val property = args.getOrNull(0)?.takeIf(::isSafePropertyPath) ?: return null
+        return """
+            (function(){try{var path=${jsString(property)}.split('.');var root=window;for(var i=0;i<path.length-1;i++){root[path[i]]=root[path[i]]||{};root=root[path[i]];}Object.defineProperty(root,path[path.length-1],{configurable:true,get:function(){return undefined;},set:function(){throw new ReferenceError('Blocked by HanFeng scriptlet');}});}catch(e){}})();
+        """.trimIndent()
+    }
+
+    private fun buildPreventTimerScriptlet(timerName: String, args: List<String>): String? {
+        val pattern = args.firstOrNull()?.takeIf(::isSafeScriptletPattern) ?: return null
+        val delay = args.getOrNull(1)?.trim()?.trim('"', '\'')?.toLongOrNull()
+        val delayCheck = delay?.takeIf { it >= 0 }?.let { " && delay === $it" }.orEmpty()
+        val timerKey = jsString(timerName)
+        return """
+            (function(){try{var original=window[$timerKey];window[$timerKey]=function(fn,delay){var source=String(fn);if(source.indexOf(${jsString(pattern)})!==-1$delayCheck){return 0;}return original.apply(this,arguments);};}catch(e){}})();
+        """.trimIndent()
+    }
+
+    private fun buildPreventNetworkScriptlet(kind: String, args: List<String>): String? {
+        val pattern = args.firstOrNull()?.takeIf(::isSafeScriptletPattern) ?: return null
+        return when (kind) {
+            "fetch" -> """
+                (function(){try{if(!window.fetch)return;var original=window.fetch;window.fetch=function(input,init){var url=String(typeof input==='string'?input:(input&&input.url)||'');if(url.indexOf(${jsString(pattern)})!==-1){return Promise.resolve(new Response('',{status:204,statusText:'Blocked by HanFeng'}));}return original.apply(this,arguments);};}catch(e){}})();
+            """.trimIndent()
+            "xhr" -> """
+                (function(){try{if(!window.XMLHttpRequest)return;var open=XMLHttpRequest.prototype.open;var send=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.open=function(method,url){this.__hanfengBlocked=String(url||'').indexOf(${jsString(pattern)})!==-1;return open.apply(this,arguments);};XMLHttpRequest.prototype.send=function(){if(this.__hanfengBlocked)return;return send.apply(this,arguments);};}catch(e){}})();
+            """.trimIndent()
+            else -> null
+        }
+    }
+
+    private fun buildPreventAddEventListenerScriptlet(args: List<String>): String? {
+        val eventPattern = args.getOrNull(0)?.takeIf(::isSafeScriptletPattern) ?: return null
+        val handlerPattern = args.getOrNull(1)?.takeIf(::isSafeScriptletPattern)
+        val handlerCheck = handlerPattern?.let { " && String(listener).indexOf(${jsString(it)})!==-1" }.orEmpty()
+        return """
+            (function(){try{var original=EventTarget.prototype.addEventListener;EventTarget.prototype.addEventListener=function(type,listener,options){if(String(type).indexOf(${jsString(eventPattern)})!==-1$handlerCheck){return;}return original.apply(this,arguments);};}catch(e){}})();
+        """.trimIndent()
+    }
+
+    private fun normalizeScriptletConstant(raw: String): String? {
+        return when (raw.trim().trim('"', '\'').lowercase()) {
+            "undefined" -> "undefined"
+            "null" -> "null"
+            "true" -> "true"
+            "false" -> "false"
+            "noopfunc", "emptyfunc", "function" -> "function(){}"
+            "nooparray", "emptyarr", "[]" -> "[]"
+            "noopobject", "emptyobj", "{}" -> "{}"
+            "0", "1" -> raw.trim().trim('"', '\'')
+            else -> null
+        }
+    }
+
+    private fun isSafeDomToken(value: String): Boolean {
+        return value.length in 1..80 && value.matches(Regex("[A-Za-z0-9_-]+"))
+    }
+
+    private fun isSafePropertyPath(value: String): Boolean {
+        return value.length in 1..160 && value.matches(Regex("[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)*"))
+    }
+
+    private fun isSafeSelectorToken(value: String): Boolean {
+        return value.length in 1..240 && !value.contains('<') && !value.contains('>') && !value.contains("</script", ignoreCase = true)
+    }
+
+    private fun isSafeScriptletPattern(value: String): Boolean {
+        return value.length in 1..160 && !value.contains('<') && !value.contains('>') && !value.contains("</script", ignoreCase = true)
+    }
+
+    private fun jsString(value: String): String {
+        val escaped = value
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        return "'$escaped'"
     }
 
     private fun parseSurgeWildcardDomain(line: String): List<ParsedRule>? {
@@ -5104,7 +5552,7 @@ object RuleRepository {
         return RuleDomainParserSupport.looksLikeIpAddress(token, ipV4Regex)
     }
 
-    private fun looksLikeAdDomain(domain: String): Boolean {
+    fun looksLikeAdDomain(domain: String): Boolean {
         return RuleAdDomainSupport.looksLikeAdDomain(
             domain = domain,
             adKeywords = adKeywords,
@@ -5293,6 +5741,7 @@ object RuleRepository {
         excludedDnsTypes: Set<Int>?,
         badfilter: Boolean,
         firstParty: Boolean = false,
+        important: Boolean = false,
         pathPattern: String? = null,
         ipCidr: String? = null,
         regexPattern: String? = null,
@@ -5303,8 +5752,11 @@ object RuleRepository {
         setRequestHeaders: Set<String> = emptySet(),
         replaceRules: Set<String> = emptySet(),
         cspValue: String? = null,
+        jsInjectRules: Set<String> = emptySet(),
         keywordPattern: String? = null,
         domainConstraints: Set<String>? = emptySet(),
+        excludedDomainConstraints: Set<String> = emptySet(),
+        requestTypes: Set<String> = emptySet(),
         appPackages: Set<String> = emptySet(),
         destinationPorts: Set<Int> = emptySet(),
         sourcePorts: Set<Int> = emptySet(),
@@ -5319,7 +5771,10 @@ object RuleRepository {
         val removeRequestHeaderKey = removeRequestHeaders.toSortedSet().joinToString("|")
         val setRequestHeaderKey = setRequestHeaders.toSortedSet().joinToString("|")
         val replaceRuleKey = replaceRules.toSortedSet().joinToString("|")
+        val jsInjectKey = jsInjectRules.toSortedSet().joinToString("|")
         val domainConstraintKey = (domainConstraints ?: emptySet()).toSortedSet().joinToString("|")
+        val excludedDomainConstraintKey = excludedDomainConstraints.toSortedSet().joinToString("|")
+        val requestTypeKey = requestTypes.toSortedSet().joinToString("|")
         val appPackageKey = appPackages.toSortedSet().joinToString("|")
         val destinationPortKey = destinationPorts.toSortedSet().joinToString("|")
         val sourcePortKey = sourcePorts.toSortedSet().joinToString("|")
@@ -5330,6 +5785,7 @@ object RuleRepository {
             excludedDnsKey,
             badfilter.toString(),
             "1p:$firstParty",
+            "important:$important",
             pathPattern.orEmpty(),
             ipCidr.orEmpty(),
             regexPattern.orEmpty(),
@@ -5341,8 +5797,11 @@ object RuleRepository {
             "header:$setRequestHeaderKey",
             "replace:$replaceRuleKey",
             cspValue.orEmpty(),
+            "jsinject:$jsInjectKey",
             "kw:${keywordPattern.orEmpty()}",
             "domains:$domainConstraintKey",
+            "excluded-domains:$excludedDomainConstraintKey",
+            "types:$requestTypeKey",
             "apps:$appPackageKey",
             "dports:$destinationPortKey",
             "sports:$sourcePortKey",
@@ -5459,8 +5918,27 @@ object RuleRepository {
                 prefs.edit().remove(KEY_RULES).apply()
                 LogRepository.append(context, "规则存储已迁移到文件：${file.name}")
             }
+        } else {
+            val seedRules = buildBuiltInAdSeedRules()
+            writeRulesFile(context, seedRules)
+            LogRepository.append(context, "Initialized built-in ad seed rules: count=${seedRules.size}")
+            return gson.toJson(seedRules)
         }
         return legacyJson
+    }
+
+    private fun buildBuiltInAdSeedRules(): List<BlockRule> {
+        return geositeAdSeedDomains.mapNotNull { rawDomain ->
+            sanitizeDomain(rawDomain)?.let { domain ->
+                BlockRule(
+                    id = "builtin-ad-seed-$domain",
+                    domain = domain,
+                    vendor = GENERIC_AD_VENDOR,
+                    source = RuleSource.IMPORTED,
+                    remoteSourceId = BUILTIN_AD_SEED_SOURCE_ID
+                )
+            }
+        }.distinctBy { it.domain }
     }
 
     private fun writeRulesJson(context: Context, json: String, ruleCount: Int) {
@@ -5664,9 +6142,17 @@ object RuleRepository {
         cachedRuleInventory = null
     }
 
-    private fun ruleMatches(rule: BlockRule, qType: Int?, appName: String? = null, host: String? = null, requestDomain: String? = null): Boolean {
+    private fun ruleMatches(
+        rule: BlockRule,
+        qType: Int?,
+        appName: String? = null,
+        host: String? = null,
+        requestDomain: String? = null,
+        requestType: String? = null
+    ): Boolean {
         if (!matchesAppPackage(rule.appPackages, appName)) return false
         if (!matchesRequestContext(rule, host, requestDomain)) return false
+        if (!matchesRequestType(rule.requestTypes, requestType)) return false
         if (qType == null) return true
         val dnsTypes = normalizeDnsTypes(rule.dnsTypes)
         val excludedDnsTypes = normalizeDnsTypes(rule.excludedDnsTypes)
@@ -5674,18 +6160,30 @@ object RuleRepository {
         return dnsTypes == null || dnsTypes.contains(qType)
     }
 
+    private fun matchesRequestType(ruleRequestTypes: Set<String>, requestType: String?): Boolean {
+        if (ruleRequestTypes.isEmpty()) return true
+        val normalized = requestType?.trim()?.lowercase()?.takeIf { it.isNotBlank() } ?: return false
+        return normalized in ruleRequestTypes
+    }
+
     private fun matchesRequestContext(rule: BlockRule, host: String?, requestDomain: String?): Boolean {
         val normalizedHost = host?.let(::sanitizeDomain)
         val normalizedRequestDomain = requestDomain?.let(::sanitizeDomain)
-        if (rule.denyallow.isNotEmpty() && normalizedRequestDomain != null) {
-            if (rule.denyallow.any { denied -> normalizedRequestDomain == denied || normalizedRequestDomain.endsWith(".$denied") }) {
+        if (rule.denyallow.isNotEmpty() && normalizedHost != null) {
+            if (rule.denyallow.any { denied -> normalizedHost == denied || normalizedHost.endsWith(".$denied") }) {
+                return false
+            }
+        }
+        val contextDomain = normalizedRequestDomain ?: normalizedHost
+        if (rule.excludedDomainConstraints.isNotEmpty() && contextDomain != null) {
+            if (rule.excludedDomainConstraints.any { excluded -> contextDomain == excluded || contextDomain.endsWith(".$excluded") }) {
                 return false
             }
         }
         if (rule.domainConstraints?.isNotEmpty() == true) {
-            val contextDomain = normalizedRequestDomain ?: normalizedHost ?: return false
+            val scopedDomain = contextDomain ?: return false
             val allowed = rule.domainConstraints.any { allowedDomain ->
-                contextDomain == allowedDomain || contextDomain.endsWith(".$allowedDomain")
+                scopedDomain == allowedDomain || scopedDomain.endsWith(".$allowedDomain")
             }
             if (!allowed) return false
         }
@@ -5751,6 +6249,7 @@ object RuleRepository {
             excludedDnsTypes = rule.excludedDnsTypes,
             badfilter = false,
             firstParty = rule.firstParty,
+            important = rule.important,
             pathPattern = rule.pathPattern,
             ipCidr = rule.ipCidr,
             regexPattern = rule.regexPattern,
@@ -5758,10 +6257,14 @@ object RuleRepository {
             removeParams = rule.removeParams,
             removeParamRegexes = rule.removeParamRegexes,
             removeRequestHeaders = rule.removeRequestHeaders,
+            setRequestHeaders = rule.setRequestHeaders,
             replaceRules = rule.replaceRules,
             cspValue = rule.cspValue,
+            jsInjectRules = rule.jsInjectRules,
             keywordPattern = rule.keywordPattern,
             domainConstraints = rule.domainConstraints.orEmpty(),
+            excludedDomainConstraints = rule.excludedDomainConstraints,
+            requestTypes = rule.requestTypes,
             appPackages = rule.appPackages,
             destinationPorts = rule.destinationPorts,
             sourcePorts = rule.sourcePorts,
@@ -5861,6 +6364,7 @@ object RuleRepository {
         val replaceRules: Set<String> = emptySet(),
         val cspValue: String? = null,
         val redirectResource: String? = null,
+        val jsInjectRules: Set<String> = emptySet(),
         val cosmeticSelectors: List<String> = emptyList()
     )
 
@@ -5996,10 +6500,13 @@ object RuleRepository {
             excludedDnsTypes = mergeDnsTypes(existing.excludedDnsTypes, incoming.excludedDnsTypes),
             thirdParty = existing.thirdParty || incoming.thirdParty,
             firstParty = existing.firstParty || incoming.firstParty,
+            important = existing.important || incoming.important,
             redirect = existing.redirect || incoming.redirect,
             domainConstraints = (existing.domainConstraints.orEmpty() + incoming.domainConstraints).toSet(),
+            excludedDomainConstraints = (existing.excludedDomainConstraints + incoming.excludedDomainConstraints).toSet(),
             denyallow = mergedDenyallow,
             urlblock = existing.urlblock || incoming.urlblock,
+            requestTypes = mergeRequestTypeScopes(existing.requestTypes, incoming.requestTypes),
             appPackages = mergedAppPackages,
             destinationPorts = mergedDestinationPorts,
             sourcePorts = mergedSourcePorts,
@@ -6016,7 +6523,8 @@ object RuleRepository {
             setRequestHeaders = (existing.setRequestHeaders + incoming.setRequestHeaders).toSet(),
             replaceRules = (existing.replaceRules + incoming.replaceRules).toSet(),
             cspValue = incoming.cspValue ?: existing.cspValue,
-            redirectResource = incoming.redirectResource ?: existing.redirectResource
+            redirectResource = incoming.redirectResource ?: existing.redirectResource,
+            jsInjectRules = (existing.jsInjectRules + incoming.jsInjectRules).toSet()
         )
     }
 
@@ -6030,10 +6538,13 @@ object RuleRepository {
         excludedDnsTypes: Set<Int>? = rule.excludedDnsTypes,
         thirdParty: Boolean = rule.thirdParty,
         firstParty: Boolean = rule.firstParty,
+        important: Boolean = rule.important,
         redirect: Boolean = rule.redirect,
         domainConstraints: Set<String>? = rule.domainConstraints,
+        excludedDomainConstraints: Set<String>? = rule.excludedDomainConstraints,
         denyallow: Set<String>? = rule.denyallow,
         urlblock: Boolean = rule.urlblock,
+        requestTypes: Set<String>? = rule.requestTypes,
         appPackages: Set<String>? = rule.appPackages,
         destinationPorts: Set<Int>? = rule.destinationPorts,
         sourcePorts: Set<Int>? = rule.sourcePorts,
@@ -6051,6 +6562,7 @@ object RuleRepository {
         replaceRules: Set<String>? = rule.replaceRules,
         cspValue: String? = rule.cspValue,
         redirectResource: String? = rule.redirectResource,
+        jsInjectRules: Set<String>? = rule.jsInjectRules,
         remoteSourceId: String? = rule.remoteSourceId
     ): BlockRule {
         return BlockRule(
@@ -6062,10 +6574,13 @@ object RuleRepository {
             excludedDnsTypes = excludedDnsTypes,
             thirdParty = thirdParty,
             firstParty = firstParty,
+            important = important,
             redirect = redirect,
             domainConstraints = domainConstraints,
+            excludedDomainConstraints = excludedDomainConstraints.orEmpty(),
             denyallow = denyallow.orEmpty(),
             urlblock = urlblock,
+            requestTypes = requestTypes.orEmpty(),
             appPackages = appPackages.orEmpty(),
             destinationPorts = destinationPorts.orEmpty(),
             sourcePorts = sourcePorts.orEmpty(),
@@ -6083,6 +6598,7 @@ object RuleRepository {
             replaceRules = replaceRules.orEmpty(),
             cspValue = cspValue,
             redirectResource = redirectResource,
+            jsInjectRules = jsInjectRules.orEmpty(),
             remoteSourceId = remoteSourceId
         )
     }
@@ -6132,8 +6648,10 @@ object RuleRepository {
             firstParty = existing.firstParty || incoming.firstParty,
             redirect = existing.redirect || incoming.redirect,
             domainConstraints = (existing.domainConstraints + incoming.domainConstraints).toSet(),
+            excludedDomainConstraints = (existing.excludedDomainConstraints + incoming.excludedDomainConstraints).toSet(),
             denyallow = mergedDenyallow,
             urlblock = existing.urlblock || incoming.urlblock,
+            requestTypes = mergeRequestTypeScopes(existing.requestTypes, incoming.requestTypes),
             appPackages = mergedAppPackages,
             destinationPorts = mergedDestinationPorts,
             sourcePorts = mergedSourcePorts,
@@ -6148,13 +6666,19 @@ object RuleRepository {
             setRequestHeaders = (existing.setRequestHeaders + incoming.setRequestHeaders).toSet(),
             replaceRules = (existing.replaceRules + incoming.replaceRules).toSet(),
             cspValue = incoming.cspValue ?: existing.cspValue,
-            redirectResource = incoming.redirectResource ?: existing.redirectResource
+            redirectResource = incoming.redirectResource ?: existing.redirectResource,
+            jsInjectRules = (existing.jsInjectRules + incoming.jsInjectRules).toSet()
         )
     }
 
     private fun <T> mergeRuleScopes(existing: Set<T>, incoming: Set<T>): Set<T> {
         if (existing.isEmpty()) return incoming
         if (incoming.isEmpty()) return existing
+        return (existing + incoming).toSet()
+    }
+
+    private fun mergeRequestTypeScopes(existing: Set<String>, incoming: Set<String>): Set<String> {
+        if (existing.isEmpty() || incoming.isEmpty()) return emptySet()
         return (existing + incoming).toSet()
     }
 
@@ -6268,10 +6792,13 @@ object RuleRepository {
         val excludedDnsTypes: Set<Int>? = null,
         val thirdParty: Boolean = false,
         val firstParty: Boolean = false,
+        val important: Boolean = false,
         val redirect: Boolean = false,
         val domainConstraints: Set<String> = emptySet(),
+        val excludedDomainConstraints: Set<String> = emptySet(),
         val denyallow: Set<String> = emptySet(),
         val urlblock: Boolean = false,
+        val requestTypes: Set<String> = emptySet(),
         val appPackages: Set<String> = emptySet(),
         val destinationPorts: Set<Int> = emptySet(),
         val sourcePorts: Set<Int> = emptySet(),
@@ -6287,6 +6814,7 @@ object RuleRepository {
         val replaceRules: Set<String> = emptySet(),
         val cspValue: String? = null,
         val redirectResource: String? = null,
+        val jsInjectRules: Set<String> = emptySet(),
         val vendorHints: Set<String> = emptySet(),
         val isUnsupported: Boolean = false
     )

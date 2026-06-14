@@ -1,6 +1,8 @@
 package com.HanFeng.service
 
 import android.content.Context
+import com.HanFeng.core.network.ThermalThrottleManager
+import com.HanFeng.core.network.UserAdFeedbackManager
 import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.RuleRepository
 import org.brotli.dec.BrotliInputStream
@@ -13,7 +15,6 @@ import java.util.concurrent.ConcurrentHashMap
 
 object HttpMitmFilter {
     private const val MAX_HTTP1_FILTER_BUFFER_BYTES = 512 * 1024
-    private const val MAX_HTTP2_DATA_SAMPLE_BYTES = 64 * 1024  // 增强：8KB→64KB（提高 JSON 广告识别率）
     
     // 正则表达式缓存（P1 优化）
     private val compiledReplaceRules = object : LinkedHashMap<String, Regex>(512, 0.75f, true) {
@@ -38,6 +39,33 @@ object HttpMitmFilter {
         "drama-ad-cluster", "live-ad-cluster", "comic-ad-cluster", "player-ad-cluster", "player-ad-extended",
         "splash-ad-cluster", "startup-ad-extended", "startup-ad-cache-extended", "startup-ad-preload-extended",
         "startup-ad-material-extended", "reward-ad-extended", "neutralized-body-reward-unlock", "path-strong-suspicious",
+        "mediation-bid-material-extended", "mediation-waterfall-material-extended", "adn-placement-material-extended",
+        "sdk-config-ad-extended", "sdk-tracker-array-extended",
+        "ad-markup-payload-extended", "attribution-payload-extended",
+        "openrtb-bid-response-extended",
+        "admob-mediation-payload-extended", "applovin-max-payload-extended", "ironsource-auction-payload-extended",
+        "vast-video-ad-payload-extended", "native-assets-ad-payload-extended", "playable-endcard-payload-extended",
+        "push-notification-ad-payload-extended", "fake-system-alert-ad-payload-extended",
+        "deeplink-market-ad-payload-extended", "operation-popup-ad-payload-extended",
+        "precache-material-ad-payload-extended", "shake-sensor-ad-payload-extended",
+        "httpdns-ad-resolution-payload-extended", "websocket-sse-ad-stream-payload-extended",
+        "grpc-protobuf-ad-payload-extended", "dynamic-code-ad-module-payload-extended",
+        "encrypted-config-ad-payload-extended", "private-protocol-ad-gateway-payload-extended",
+        "media-preroll-metadata-payload-extended", "audio-ad-break-payload-extended",
+        "comic-manga-unlock-ad-payload-extended", "short-drama-episode-ad-payload-extended",
+        "task-reward-offerwall-payload-extended", "game-interstitial-ad-payload-extended",
+        "live-room-ad-payload-extended", "search-recommend-ad-payload-extended",
+        "experiment-ad-config-payload-extended", "miniapp-landing-ad-payload-extended",
+        "fake-action-button-payload-extended", "clipboard-share-ad-payload-extended",
+        "serviceworker-cache-ad-payload-extended", "system-surface-ad-payload-extended",
+        "social-interaction-ad-payload-extended", "cloud-template-ad-payload-extended",
+        "asset-package-ad-payload-extended", "coupon-redpacket-ad-payload-extended",
+        "ecommerce-affiliate-ad-payload-extended", "local-life-tool-ad-payload-extended",
+        "leadgen-survey-ad-payload-extended", "calendar-reminder-ad-payload-extended",
+        "browser-startpage-ad-payload-extended", "appstore-promotion-ad-payload-extended",
+        "oem-security-cleaner-ad-payload-extended", "cross-device-ad-payload-extended",
+        "lightweight-payload-model-ad-extended",
+        "wasm-js-obfuscated-loader-ad-extended", "media-fingerprint-watermark-ad-extended",
         "location-strong-header", "set-cookie-strong-header", "path-strong-keyword", "location-strong-keyword",
         "set-cookie-strong-keyword"
     )
@@ -54,6 +82,7 @@ object HttpMitmFilter {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, BodySignalInspection>?): Boolean = size > 1024  // 增强：256→1024
     }
     private val bodySignalCacheLock = Any()
+    private val jsonWhitespaceRegex = Regex("\\s+")
     private val defaultAdQueryParams = setOf(
         "ad", "ads", "adid", "ad_id", "adunit", "ad_unit", "adslot", "ad_slot", "adpos", "ad_pos",
         "adscene", "ad_scene", "adposition", "ad_position", "adtag", "ad_tag", "adfrom", "ad_from",
@@ -154,6 +183,15 @@ object HttpMitmFilter {
         "price_ratio",
         "adx",
         "rtb",
+        "openrtb",
+        "seatbid",
+        "impid",
+        "adomain",
+        "crid",
+        "burl",
+        "nurl",
+        "lurl",
+        "iurl",
         "dsp",
         "ssp",
         "bidding",
@@ -207,11 +245,20 @@ object HttpMitmFilter {
         "ad_strategy", "adstrategy", "ad_plan", "adplan", "ad_schedule", "adschedule",
         "ad_statistics", "adstatistics", "ad_track", "adtrack", "ad_log", "adlog",
         "ad_payload", "adpayload", "ad_meta", "admeta", "ad_trace", "adtrace", "ad_event", "adevent",
+        "ad_request", "adrequest", "ad_response_info", "adresponseinfo", "ad_loader", "adloader",
+        "ad_cache", "adcache", "ad_preload", "adpreload", "ad_config", "adconfig",
+        "ad_tracking", "adtracking", "tracking_list", "trackinglist", "tracker_list", "trackerlist",
+        "imp_trackers", "imptrackers", "click_trackers", "clicktrackers", "view_trackers", "viewtrackers",
+        "creative_data", "creativedata", "render_data", "renderdata", "template_data", "templatedata",
+        "asset_list", "assetlist", "assets", "ad_assets", "adassets",
         "sponsor_info", "sponsorinfo", "sponsored_info", "commercial_info", "native_ad", "nativead",
         "impression_url", "impressionurl", "monitor_url", "monitorurl", "exposure_url", "exposureurl",
         "ad_report", "adreport", "ad_analytics", "adanalytics", "ad_monitor", "admonitor",
         "cache_buster", "cachebuster", "sdk_version", "sdkversion", "placement_type", "placementtype",
         "ad_html", "adhtml", "ad_template", "adtemplate", "ad_payload", "adpayload",
+        "ecpm_floor", "ecpmfloor", "floor_price", "floorprice", "ad_floor_price", "adfloorprice",
+        "bid_token", "bidtoken", "bid_id", "bidid", "auction_result", "auctionresult",
+        "seatbid", "impid", "adomain", "crid", "cid", "burl", "nurl", "lurl", "iurl",
         "waterfall", "waterfall_id", "waterfallid", "waterfall_config", "waterfallconfig",
         "waterfall_item", "waterfallitem", "waterfall_list", "waterfalllist", "waterfall_group", "waterfallgroup",
         "bidding_token", "biddingtoken", "bid_token", "bidtoken", "bid_floor", "bidfloor", "bid_price", "bidprice",
@@ -486,7 +533,12 @@ object HttpMitmFilter {
         "\"skadn\"", "\"skadnetwork\"", "\"win_notice_url\"", "\"loss_notice_url\"",
         "\"event_trackers\"", "\"tracking_events\"", "\"ad_payload\"", "\"ad_meta\"",
         "\"adn\"", "\"adn_name\"", "\"network_name\"", "\"network_placement\"", "\"bidfloor\"", "\"bid_floor\"",
-        "\"auction_price\"", "\"auction_token\"", "\"sdk_ad\"", "\"sdk_ads\"", "\"ad_ecpm\"", "\"ad_bid\"", "\"ad_bid_id\""
+        "\"auction_price\"", "\"auction_token\"", "\"sdk_ad\"", "\"sdk_ads\"", "\"ad_ecpm\"", "\"ad_bid\"", "\"ad_bid_id\"",
+        "\"ad_extra\"", "\"adextra\"", "\"sponsor_info\"", "\"sponsorinfo\"", "\"commercial_info\"", "\"commercialinfo\"",
+        "\"ad_request\"", "\"adrequest\"", "\"ad_response_info\"", "\"adresponseinfo\"", "\"ad_loader\"", "\"adloader\"",
+        "\"ad_cache\"", "\"adcache\"", "\"ad_preload\"", "\"adpreload\"", "\"ad_config\"", "\"adconfig\"",
+        "\"creative_data\"", "\"creativedata\"", "\"render_data\"", "\"renderdata\"", "\"template_data\"", "\"templatedata\"",
+        "\"asset_list\"", "\"assetlist\"", "\"ad_assets\"", "\"adassets\"", "\"ecpm_floor\"", "\"floor_price\""
     )
     private val generalAdFieldTokens = listOf(
         "\"banner\"", "\"banner_list\"", "\"bannerlist\"", "\"banner_infos\"", "\"banner_info\"",
@@ -526,10 +578,16 @@ object HttpMitmFilter {
         "\"rewarded_ad\"", "\"rewarded_ads\"", "\"rewarded_video_ad\"", "\"inspire_video_ad\"", "\"incentive_ad\"",
         "\"offerwall_ad\"", "\"draw_video_ad\"", "\"short_drama_ad\"", "\"comic_insert_ad\"", "\"manga_insert_ad\"",
         "\"adn\"", "\"adn_name\"", "\"network_name\"", "\"bidfloor\"", "\"bid_floor\"", "\"auction_token\"",
+        "\"ad_request\"", "\"ad_response_info\"", "\"ad_loader\"", "\"ad_preload\"", "\"ad_tracking\"",
+        "\"tracking_list\"", "\"tracker_list\"", "\"imp_trackers\"", "\"click_trackers\"", "\"view_trackers\"",
+        "\"creative_data\"", "\"render_data\"", "\"template_data\"", "\"asset_list\"", "\"ad_assets\"",
+        "\"ecpm_floor\"", "\"floor_price\"", "\"ad_floor_price\"", "\"auction_result\"",
         "\"is_ad\"", "\"isAd\"", "\"ad_type\"", "\"adType\"", "\"ad_source\"", "\"adSource\"", "\"ad_scene\"", "\"adScene\"",
         "\"ad_position\"", "\"adPosition\"", "\"ad_label\"", "\"adLabel\"", "\"entity_type\"", "\"entityType\"",
+        "\"entity_template\"", "\"entityTemplate\"", "\"entity_data\"", "\"entityData\"",
         "\"reader_bottom_card\"", "\"reader_insert_card\"", "\"page_ad_card\"", "\"chapter_ad_card\"", "\"turn_page_card\"",
-        "\"comment_ad_card\"", "\"reply_ad_card\"", "\"feed_ad_card\"", "\"sponsor_feed\"", "\"commercial_feed\""
+        "\"comment_ad_card\"", "\"reply_ad_card\"", "\"feed_ad_card\"", "\"sponsor_feed\"", "\"commercial_feed\"",
+        "\"comment_entity_ad\"", "\"reply_entity_ad\"", "\"sponsor_info\"", "\"commercial_info\""
     )
     private val novelAdFieldTokens = listOf(
         "\"book_id\"", "\"book_name\"", "\"chapter_id\"", "\"chapter_name\"", "\"reader_type\"",
@@ -589,8 +647,21 @@ object HttpMitmFilter {
         "\"rewarded_video\"", "\"rewardedvideo\"", "\"incentive_video\"", "\"incentivevideo\"",
         "\"ad_payload\"", "\"ad_meta\"", "\"ad_event\"", "\"event_trackers\"",
         "\"bid_request\"", "\"bid_response\"", "\"win_notice_url\"", "\"loss_notice_url\"",
-        "\"adn\"", "\"adn_name\"", "\"network_name\"", "\"bidfloor\"", "\"auction_token\"",
+        "\"adn\"", "\"adn_name\"", "\"adn_id\"", "\"adn_slot_id\"", "\"network_name\"", "\"network_id\"", "\"network_placement_id\"",
+        "\"bidfloor\"", "\"bid_floor\"", "\"bid_payload\"", "\"bid_token\"", "\"bidding_token\"", "\"auction_token\"", "\"auction_id\"",
+        "\"win_price\"", "\"win_notice\"", "\"loss_notice\"", "\"render_url\"", "\"creative_url\"", "\"tracking_urls\"",
+        "\"impression_urls\"", "\"click_urls\"", "\"sdk_extra\"", "\"third_sdk\"", "\"mediation_id\"", "\"waterfall_id\"",
         "\"rewarded_ad\"", "\"rewarded_ads\"", "\"offerwall_ad\"", "\"short_drama_ad\"", "\"comic_insert_ad\"",
+        "\"ad_unit_id\"", "\"adunit_id\"", "\"sdk_ad_unit_id\"", "\"sdk_slot_id\"", "\"ad_slot_id\"", "\"adslot_id\"",
+        "\"native_template\"", "\"native_template_id\"", "\"template_style\"", "\"render_template\"", "\"ad_template\"",
+        "\"reward_video\"", "\"rewarded_video\"", "\"rewarded_video_ad\"", "\"interstitial_ad\"", "\"splash_ad\"",
+        "\"show_trackers\"", "\"click_trackers\"", "\"exposure_trackers\"", "\"monitor_urls\"", "\"imp_trackers\"",
+        "\"view_trackers\"", "\"tracking_list\"", "\"tracker_list\"", "\"ad_tracking\"", "\"ad_events\"",
+        "\"ad_request\"", "\"ad_response_info\"", "\"ad_loader\"", "\"ad_preload\"", "\"ad_cache\"",
+        "\"creative_data\"", "\"render_data\"", "\"template_data\"", "\"asset_list\"", "\"ad_assets\"",
+        "\"ecpm_floor\"", "\"floor_price\"", "\"ad_floor_price\"", "\"bid_id\"", "\"auction_result\"",
+        "\"adm\"", "\"vast\"", "\"vast_tag\"", "\"vast_xml\"", "\"mraid\"", "\"omid\"", "\"playable_url\"",
+        "\"endcard_url\"", "\"companion_ads\"", "\"skadn\"", "\"skadnetwork\"", "\"conversion_value\"",
         "\"is_ad\"", "\"isAd\"", "\"ad_type\"", "\"adType\"", "\"ad_source\"", "\"adSource\"", "\"ad_scene\"", "\"adScene\"",
         "\"ad_position\"", "\"adPosition\"", "\"ad_label\"", "\"adLabel\"", "\"entity_type\"", "\"entityType\"",
         "\"reader_bottom_card\"", "\"reader_insert_card\"", "\"page_ad_card\"", "\"chapter_ad_card\"", "\"turn_page_card\"",
@@ -623,6 +694,11 @@ object HttpMitmFilter {
         "welfare-page", "welfare_page", "task-center", "task_center", "coin-reward", "coin_reward",
         "reading-bonus", "reading_bonus", "reward-video", "watch-ad", "watch_ad", "unlock-by-ad",
         "unlock_chapter", "offerwall", "benefit-page", "benefit_page"
+    )
+    private val readerVisibleAdTextTokens = listOf(
+        "穿山甲广告", "优量汇广告", "广告是为了更好地支持作者创作", "看视频免广告",
+        "滑动可继续阅读", "免广告", "戳我下载", "立即打开", "查看详情", "北京抖音科技有限公司",
+        "pangolin", "pangle", "gromore", "youlianghui", "guangdiantong"
     )
     private val rewardUnlockTokens = listOf(
         "\"reward_verify\"", "\"rewardverify\"", "\"reward_unlock\"", "\"rewardunlock\"",
@@ -1054,26 +1130,34 @@ object HttpMitmFilter {
             )
             return FilterResult.Replaced(response, "redirect-resource-applied", chunk.size)
         }
-        val replacedBody = applyReplaceRules(contentType, body, directives.replaceRules)
+        val scrubbedBody = scrubHtmlAdArtifacts(contentType, body)
+        val replacedBody = applyReplaceRules(contentType, scrubbedBody, directives.replaceRules)
         if (replacedBody != null && replacedBody != body) {
             val replacementBodyBytes = replacedBody.toByteArray(StandardCharsets.UTF_8)
             val response = buildSyntheticResponse(responseHeaders.statusLine, contentType, replacementBodyBytes, directives.cspValue)
             return FilterResult.Replaced(response, "replace-rule-applied", chunk.size)
         }
+        val rewrittenBody = replacedBody ?: scrubbedBody
         if (neutralizeReason == null) {
-            if (contentType.contains("text/html") && (cosmeticSelectors.isNotEmpty() || !directives.cspValue.isNullOrBlank())) {
-                val injectedBodyBytes = buildInjectedHtmlBody(body, cosmeticSelectors, directives.cspValue)
+            if (contentType.contains("text/html") &&
+                (cosmeticSelectors.isNotEmpty() || directives.jsInjectRules.isNotEmpty() || !directives.cspValue.isNullOrBlank() || scrubbedBody != body)) {
+                val injectedBodyBytes = buildInjectedHtmlBody(rewrittenBody, cosmeticSelectors, directives.cspValue, directives.jsInjectRules)
                 val response = buildSyntheticResponse(responseHeaders.statusLine, contentType, injectedBodyBytes, directives.cspValue)
-                return FilterResult.Replaced(response, "cosmetic-html-injected", chunk.size)
+                val reason = if (scrubbedBody != body) "html-ad-artifact-scrubbed" else "cosmetic-html-injected"
+                return FilterResult.Replaced(response, reason, chunk.size)
             }
             return FilterResult.PassThrough(chunk, "response-allowed")
         }
-        val replacementBodyBytes = buildReplacementBody(contentType, body, cosmeticSelectors, directives.cspValue)
+        val replacementBodyBytes = buildReplacementBody(contentType, rewrittenBody, cosmeticSelectors, directives.cspValue, directives.jsInjectRules)
         val response = buildSyntheticResponse(responseHeaders.statusLine, contentType, replacementBodyBytes, directives.cspValue)
         return FilterResult.Replaced(response, neutralizeReason, chunk.size)
     }
 
-    fun maxHttp1FilterBufferBytes(): Int = MAX_HTTP1_FILTER_BUFFER_BYTES
+    fun maxHttp1FilterBufferBytes(): Int = if (ThermalThrottleManager.shouldBypassMitmBodyInspection()) {
+        0
+    } else {
+        minOf(MAX_HTTP1_FILTER_BUFFER_BYTES, ThermalThrottleManager.responseBodyLimitBytes())
+    }
 
     fun inspectBufferedHttp1Response(
         buffer: ByteArray,
@@ -1134,12 +1218,13 @@ object HttpMitmFilter {
         session: TlsMitmSessionManager.TlsMitmSession,
         headerInspection: Http2HeaderInspection?,
         currentSample: ByteArray,
-        incomingFragment: ByteArray
+        incomingFragment: ByteArray,
+        completeResponse: Boolean = false
     ): Http2DataInspection? {
         if (incomingFragment.isEmpty()) return null
         if (headerInspection?.responseLike != true) return null
         val context = TlsMitmSessionManager.getContextOrNull() ?: return null
-        val combinedSample = appendSample(currentSample, incomingFragment, MAX_HTTP2_DATA_SAMPLE_BYTES)
+        val combinedSample = appendSample(currentSample, incomingFragment, ThermalThrottleManager.responseBodyLimitBytes())
         val contentType = headerInspection.contentType?.lowercase().orEmpty()
         val targetedContentType = contentType.contains("json") ||
             contentType.contains("javascript") ||
@@ -1156,7 +1241,29 @@ object HttpMitmFilter {
             requestDomain = extractRequestDomain(headerInspection)
         )
         val decoded = decodeAscii(combinedSample) ?: return null
+        val bodyRewrite = if (completeResponse) {
+            rewriteHttp2CompleteTextBody(contentType, decoded, directives)
+        } else {
+            null
+        }
+        if (bodyRewrite != null) {
+            return Http2DataInspection(
+                suspiciousScore = 3,
+                suspiciousReasons = listOf(bodyRewrite.reason),
+                confidence = if (bodyRewrite.reason == "redirect-resource-applied") "high" else "medium",
+                samplePreview = decoded.replace('\r', ' ').replace('\n', ' ').take(160),
+                vendor = headerInspection.vendor,
+                combinedSample = combinedSample,
+                redirectResource = directives.redirectResource,
+                cspValue = directives.cspValue,
+                contentType = bodyRewrite.contentType,
+                replacementBody = bodyRewrite.body,
+                replacementContentType = bodyRewrite.contentType,
+                rewriteReason = bodyRewrite.reason
+            )
+        }
         val lowerBody = decoded.lowercase()
+        val normalizedBody = normalizeBodyForAdInspection(lowerBody)
         val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         val isCommunityApp = RuleRepository.isCommunityAppHint(session.appName)
         if (RuleRepository.shouldProtectMediaTraffic(headerInspection.authority)) return null
@@ -1171,12 +1278,12 @@ object HttpMitmFilter {
             session.appName,
             vendor
         )
-        val bodySignals = inspectAdBodySignals(lowerBody)
+        val bodySignals = inspectAdBodySignals(normalizedBody)
         val jsonAdFieldHitCount = if (contentType.contains("json")) {
-            http2JsonAdFieldTokens.count(lowerBody::contains)
+            http2JsonAdFieldTokens.count(normalizedBody::contains)
         } else 0
         val jsonAdFieldMatched = jsonAdFieldHitCount > 0
-        val jsonAdArrayMatched = contentType.contains("json") && lowerBody.trim().startsWith("[") && jsonAdFieldHitCount >= 2
+        val jsonAdArrayMatched = contentType.contains("json") && normalizedBody.trim().startsWith("[") && jsonAdFieldHitCount >= 2
         if (bodySignals.reasons.isEmpty() && !jsonAdFieldMatched && !jsonAdArrayMatched) return null
         var suspiciousScore = bodySignals.score + if (targetedContentType) 1 else 0
         if (isCommunityApp && inspectCommentAdBodySignals(lowerBody).hasAnyStrongCommentAdSignal) suspiciousScore += 2
@@ -1196,7 +1303,7 @@ object HttpMitmFilter {
         if (isKnownAdVendor(vendor)) reasons += "vendor:$vendor"
         if (aggressiveNovelTarget) reasons += "novel-app-aggressive"
         // 新增：Content-Type 包含广告特征
-        if (contentType.contains("json") && strongResponseAdKeywords.any { lowerBody.contains(it) }) {
+        if (contentType.contains("json") && strongResponseAdKeywords.any { normalizedBody.contains(it) }) {
             suspiciousScore += 2
             reasons += "json-ad-content"
         }
@@ -1217,6 +1324,17 @@ object HttpMitmFilter {
             matchedPathHint = headerInspection.path,
             refererDomain = extractRequestDomain(headerInspection)
         )
+        UserAdFeedbackManager.recordNetworkActivity(
+            context,
+            UserAdFeedbackManager.NetworkActivity(
+                appName = session.appName,
+                host = headerInspection.authority,
+                path = headerInspection.path,
+                protocol = "HTTPS",
+                source = "mitm_http2_body",
+                score = suspiciousScore
+            )
+        )
         return Http2DataInspection(
             suspiciousScore = suspiciousScore,
             suspiciousReasons = reasons.distinct(),
@@ -1228,6 +1346,53 @@ object HttpMitmFilter {
             cspValue = directives.cspValue,
             contentType = contentType
         )
+    }
+
+    fun rewriteHttp2CompleteTextBody(
+        contentType: String,
+        body: String,
+        directives: RuleRepository.RequestRewriteDirectives
+    ): Http2BodyRewriteResult? {
+        val lowerType = contentType.lowercase()
+        val textLike = lowerType.contains("text") ||
+            lowerType.contains("json") ||
+            lowerType.contains("javascript") ||
+            lowerType.contains("xml") ||
+            lowerType.contains("html")
+        if (!textLike || body.isEmpty()) return null
+        val redirectBodyBytes = buildRedirectReplacementBody(lowerType, directives.redirectResource)
+        if (redirectBodyBytes != null) {
+            return Http2BodyRewriteResult(
+                body = redirectBodyBytes,
+                contentType = inferRedirectContentType(lowerType, directives.redirectResource),
+                reason = "redirect-resource-applied"
+            )
+        }
+        val scrubbedBody = scrubHtmlAdArtifacts(lowerType, body)
+        val replacedBody = applyReplaceRules(lowerType, scrubbedBody, directives.replaceRules)
+        val rewrittenBody = replacedBody ?: scrubbedBody
+        if (lowerType.contains("text/html") &&
+            (directives.cosmeticSelectors.isNotEmpty() || directives.jsInjectRules.isNotEmpty() || !directives.cspValue.isNullOrBlank() || scrubbedBody != body)) {
+            val injectedBody = buildInjectedHtmlBody(
+                rewrittenBody,
+                directives.cosmeticSelectors,
+                directives.cspValue,
+                directives.jsInjectRules
+            )
+            return Http2BodyRewriteResult(
+                body = injectedBody,
+                contentType = lowerType.ifBlank { "text/html; charset=utf-8" },
+                reason = if (scrubbedBody != body) "html-ad-artifact-scrubbed" else "cosmetic-html-injected"
+            )
+        }
+        if (replacedBody != null && replacedBody != body) {
+            return Http2BodyRewriteResult(
+                body = replacedBody.toByteArray(StandardCharsets.UTF_8),
+                contentType = lowerType,
+                reason = "replace-rule-applied"
+            )
+        }
+        return null
     }
 
     private fun decodeChunkedBody(body: ByteArray): ByteArray? {
@@ -1935,6 +2100,17 @@ object HttpMitmFilter {
             matchedPathHint = reportContext.matchedPathHint,
             refererDomain = reportContext.refererDomain
         )
+        UserAdFeedbackManager.recordNetworkActivity(
+            reportContext.context,
+            UserAdFeedbackManager.NetworkActivity(
+                appName = reportContext.appName ?: "未知应用",
+                host = reportContext.host,
+                path = reportContext.matchedPathHint,
+                protocol = "HTTPS",
+                source = "mitm_http1_body",
+                score = confidenceBoost + 2
+            )
+        )
         return reason
     }
 
@@ -2027,18 +2203,53 @@ object HttpMitmFilter {
     private fun buildInjectedHtmlBody(originalBody: String, cosmeticSelectors: List<String>, cspValue: String? = null): ByteArray {
         val styleTag = buildCosmeticStyleTag(cosmeticSelectors)
         val cspMetaTag = buildCspMetaTag(cspValue)
+        return buildInjectedHtmlBody(originalBody, styleTag, cspMetaTag, emptySet())
+    }
+
+    private fun buildInjectedHtmlBody(
+        originalBody: String,
+        cosmeticSelectors: List<String>,
+        cspValue: String?,
+        jsInjectRules: Set<String>
+    ): ByteArray {
+        val styleTag = buildCosmeticStyleTag(cosmeticSelectors)
+        val cspMetaTag = buildCspMetaTag(cspValue)
+        return buildInjectedHtmlBody(originalBody, styleTag, cspMetaTag, jsInjectRules)
+    }
+
+    private fun buildInjectedHtmlBody(
+        originalBody: String,
+        styleTag: String,
+        cspMetaTag: String,
+        jsInjectRules: Set<String>
+    ): ByteArray {
+        val ruleScriptTag = buildRuleScriptInjection(jsInjectRules)
+        val injection = "$cspMetaTag$styleTag$SCRIPTLET_INJECTION$ruleScriptTag"
         val injected = when {
             originalBody.contains("</head>", ignoreCase = true) -> {
-                originalBody.replaceFirst("</head>", "$cspMetaTag$styleTag$SCRIPTLET_INJECTION</head>", ignoreCase = true)
+                originalBody.replaceFirst("</head>", "$injection</head>", ignoreCase = true)
             }
             originalBody.contains("<body", ignoreCase = true) -> {
-                "$cspMetaTag$styleTag$SCRIPTLET_INJECTION$originalBody"
+                "$injection$originalBody"
             }
             else -> {
-                "<html><head>$cspMetaTag$styleTag$SCRIPTLET_INJECTION</head><body>$originalBody</body></html>"
+                "<html><head>$injection</head><body>$originalBody</body></html>"
             }
         }
         return injected.toByteArray(StandardCharsets.UTF_8)
+    }
+
+    private fun buildRuleScriptInjection(jsInjectRules: Set<String>): String {
+        if (jsInjectRules.isEmpty()) return ""
+        val script = jsInjectRules
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+            .take(12_000)
+            .replace("</script", "<\\/script", ignoreCase = true)
+        if (script.isBlank()) return ""
+        return "<script data-hanfeng-rule-inject=\"1\">\n$script\n</script>"
     }
 
     private fun buildCspMetaTag(cspValue: String?): String {
@@ -2135,8 +2346,59 @@ object HttpMitmFilter {
         }
         // 拦截资源地址和页面跳转中的广告 URL
         var isAdLikeUrl = function(url) {
-            return typeof url === 'string' && /ad|ads|banner|splash|promo|tracking|preroll|midroll|postroll|offerwall|unlock|material|landing|recommend|discover/i.test(url);
+            return typeof url === 'string' && /ad|ads|banner|splash|promo|promotion|tracking|tracker|preroll|midroll|postroll|offerwall|unlock|material|landing|recommend|discover|campaign|creative|market:\/\/|intent:\/\/|deeplink|download|install|openapp|shake|push|notify|notice|popup|interstitial|waterfall|mediation|bid|auction|hotword|task|mission|welfare|benefit|coin|reward|revive|game|live|miniapp|mini_program|mini-program|quickapp|quick_app|clipboard|share|serviceworker|service-worker|precache|prefetch|ad_unit_id|slot_id|adx_id|auction_id|bid_token|impression_url|click_tracking|cname|httpdns|dns-query|quic|http3|udp443|h3ad|getBiddingToken|connectAd|biddingToken|adToken/i.test(url);
         };
+        var isAdLikeText = function(value) {
+            return typeof value === 'string' && /广告|推广|赞助|摇一摇|立即下载|立即安装|打开应用|系统更新|立即清理|一键加速|看视频|领金币|领福利|复制口令|分享赚钱|ad|ads|sponsor|promo|promotion|market:\/\/|intent:\/\/|deeplink|campaign|creative|reward|offerwall|splash|interstitial|clipboard|share|miniapp|quickapp|adid|aid|slotid|slot_id|ad_unit|auction|bidtoken/i.test(value);
+        };
+        var emptyAdBridge = {
+            init:function(){}, load:function(){}, show:function(){}, render:function(){}, request:function(){}, preload:function(){}, report:function(){}, track:function(){}, connect:function(){}, bind:function(){}, getAdId:function(){return '';}, getDeviceId:function(){return '';}, getBiddingToken:function(){return '';}, connectAd:function(){return null;}, getAdToken:function(){return '';}, getBidToken:function(){return '';}, getAuctionToken:function(){return '';}
+        };
+        ['adBridge','AdBridge','adsBridge','AdsBridge','adSdk','AdSdk','adSDK','H5Ad','NativeAd','AdService','adService','AdBidding','adBidding','BiddingToken','biddingToken','AdToken','adToken','AdConnector','adConnector','connectAd','getBiddingToken','getBidToken','getAdToken','getAuctionToken','navigator.getBiddingToken','navigator.connectAd'].forEach(function(name){
+            try { if(!window[name] || isAdLikeText(name)) window[name] = emptyAdBridge; } catch(e) {}
+        });
+        try {
+            if(navigator) {
+                navigator.getBiddingToken = function(){ return ''; };
+                navigator.connectAd = function(){ return null; };
+                navigator.getAdToken = function(){ return ''; };
+                navigator.getBidToken = function(){ return ''; };
+            }
+        } catch(e) {}
+        if(window.WebAssembly) {
+            var originalWasmInstantiate = window.WebAssembly.instantiate;
+            var originalWasmCompile = window.WebAssembly.compile;
+            var originalWasmInstantiateStreaming = window.WebAssembly.instantiateStreaming;
+            var originalWasmCompileStreaming = window.WebAssembly.compileStreaming;
+            window.WebAssembly.instantiate = function(buffer, imports) {
+                var text = '';
+                try { text = String(buffer && (buffer.url || buffer.byteLength || buffer)); } catch(e) {}
+                if(isAdLikeText(text) || isAdLikeUrl(text)) return Promise.reject(new Error('blocked'));
+                return originalWasmInstantiate.apply(this, arguments);
+            };
+            window.WebAssembly.compile = function(buffer) {
+                var text = '';
+                try { text = String(buffer && (buffer.url || buffer.byteLength || buffer)); } catch(e) {}
+                if(isAdLikeText(text) || isAdLikeUrl(text)) return Promise.reject(new Error('blocked'));
+                return originalWasmCompile.apply(this, arguments);
+            };
+            if(originalWasmInstantiateStreaming) {
+                window.WebAssembly.instantiateStreaming = function(source, imports) {
+                    var text = '';
+                    try { text = String(source && (source.url || source)); } catch(e) {}
+                    if(isAdLikeText(text) || isAdLikeUrl(text)) return Promise.reject(new Error('blocked'));
+                    return originalWasmInstantiateStreaming.apply(this, arguments);
+                };
+            }
+            if(originalWasmCompileStreaming) {
+                window.WebAssembly.compileStreaming = function(source) {
+                    var text = '';
+                    try { text = String(source && (source.url || source)); } catch(e) {}
+                    if(isAdLikeText(text) || isAdLikeUrl(text)) return Promise.reject(new Error('blocked'));
+                    return originalWasmCompileStreaming.apply(this, arguments);
+                };
+            }
+        }
         if(window.Element && window.Element.prototype && window.Element.prototype.setAttribute) {
             var origSetAttribute = window.Element.prototype.setAttribute;
             window.Element.prototype.setAttribute = function(name, value) {
@@ -2144,6 +2406,23 @@ object HttpMitmFilter {
                     return;
                 }
                 return origSetAttribute.apply(this, arguments);
+            };
+        }
+        if(window.Document && document && document.createElement) {
+            var origCreateElement = document.createElement.bind(document);
+            document.createElement = function(tagName) {
+                var el = origCreateElement(tagName);
+                try {
+                    var tag = String(tagName || '').toLowerCase();
+                    if((tag === 'script' || tag === 'iframe' || tag === 'link' || tag === 'source' || tag === 'video' || tag === 'audio') && el && el.setAttribute) {
+                        var originalElementSetAttribute = el.setAttribute;
+                        el.setAttribute = function(name, value) {
+                            if((name === 'src' || name === 'href' || name === 'data-src' || name === 'poster') && isAdLikeUrl(value)) return;
+                            return originalElementSetAttribute.apply(this, arguments);
+                        };
+                    }
+                } catch(e){}
+                return el;
             };
         }
         if(window.HTMLImageElement && Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src')) {
@@ -2186,6 +2465,13 @@ object HttpMitmFilter {
                 };
             }
         }
+        if(window.open) {
+            var originalWindowOpen = window.open;
+            window.open = function(url, target, features) {
+                if(isAdLikeUrl(url) || isAdLikeText(url)) return null;
+                return originalWindowOpen.apply(this, arguments);
+            };
+        }
         if(window.history && window.history.pushState) {
             var origPushState = window.history.pushState;
             window.history.pushState = function(state, title, url) {
@@ -2200,16 +2486,110 @@ object HttpMitmFilter {
                 return origReplaceState.apply(this, arguments);
             };
         }
+        if(window.WebSocket) {
+            var OriginalWebSocket = window.WebSocket;
+            window.WebSocket = function(url, protocols) {
+                if(isAdLikeUrl(url)) {
+                    return { close:function(){}, send:function(){}, addEventListener:function(){}, removeEventListener:function(){}, readyState:3 };
+                }
+                return protocols === undefined ? new OriginalWebSocket(url) : new OriginalWebSocket(url, protocols);
+            };
+            window.WebSocket.prototype = OriginalWebSocket.prototype;
+        }
+        if(window.EventSource) {
+            var OriginalEventSource = window.EventSource;
+            window.EventSource = function(url, options) {
+                if(isAdLikeUrl(url)) {
+                    return { close:function(){}, addEventListener:function(){}, removeEventListener:function(){}, readyState:2 };
+                }
+                return new OriginalEventSource(url, options);
+            };
+            window.EventSource.prototype = OriginalEventSource.prototype;
+        }
+        if(window.Notification && window.Notification.requestPermission) {
+            var originalRequestPermission = window.Notification.requestPermission.bind(window.Notification);
+            window.Notification.requestPermission = function(callback) {
+                var stack = '';
+                try { stack = String(new Error().stack || ''); } catch(e) {}
+                if(isAdLikeText(stack)) {
+                    if(typeof callback === 'function') callback('denied');
+                    return Promise.resolve('denied');
+                }
+                return originalRequestPermission(callback);
+            };
+        }
+        if(navigator && navigator.clipboard && navigator.clipboard.writeText) {
+            var originalClipboardWriteText = navigator.clipboard.writeText.bind(navigator.clipboard);
+            navigator.clipboard.writeText = function(text) {
+                if(isAdLikeText(text)) return Promise.resolve();
+                return originalClipboardWriteText(text);
+            };
+        }
+        if(navigator && navigator.share) {
+            var originalNavigatorShare = navigator.share.bind(navigator);
+            navigator.share = function(data) {
+                var text = '';
+                try { text = JSON.stringify(data || {}); } catch(e) { text = String(data || ''); }
+                if(isAdLikeText(text) || isAdLikeUrl(text)) return Promise.resolve();
+                return originalNavigatorShare(data);
+            };
+        }
+        if(navigator && navigator.serviceWorker && navigator.serviceWorker.register) {
+            var originalServiceWorkerRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+            navigator.serviceWorker.register = function(scriptURL, options) {
+                if(isAdLikeUrl(scriptURL)) return Promise.reject(new Error('blocked'));
+                return originalServiceWorkerRegister(scriptURL, options);
+            };
+        }
+        if(window.addEventListener) {
+            var originalWindowAddEventListener = window.addEventListener;
+            window.addEventListener = function(type, listener, options) {
+                if(/devicemotion|deviceorientation/i.test(String(type || ''))) {
+                    var listenerText = String(listener || '');
+                    if(isAdLikeText(listenerText) || /shake|accelerometer|gyroscope|market|intent|deeplink/i.test(listenerText)) return;
+                }
+                return originalWindowAddEventListener.call(this, type, listener, options);
+            };
+        }
+        if(document && document.addEventListener) {
+            var originalDocumentAddEventListener = document.addEventListener;
+            document.addEventListener = function(type, listener, options) {
+                if(/visibilitychange|click|touchstart|touchmove|touchend|pointerdown|pointerup/i.test(String(type || ''))) {
+                    var listenerText = String(listener || '');
+                    if(/market:\/\/|intent:\/\/|deeplink|ad|ads|promo|promotion|sponsor|download|install|slotId|adid|auction|shake/i.test(listenerText)) return;
+                }
+                return originalDocumentAddEventListener.call(this, type, listener, options);
+            };
+        }
+        if(window.DeviceMotionEvent) {
+            try {
+                Object.defineProperty(window, 'DeviceMotionEvent', { value: function(){}, configurable: true });
+            } catch(e) {}
+        }
+        if(window.DeviceOrientationEvent) {
+            try {
+                Object.defineProperty(window, 'DeviceOrientationEvent', { value: function(){}, configurable: true });
+            } catch(e) {}
+        }
         if(window.MutationObserver && document && document.documentElement) {
             new MutationObserver(function(mutations){
                 mutations.forEach(function(mutation){
                     mutation.addedNodes && Array.prototype.forEach.call(mutation.addedNodes, function(node){
-                        if(!node || !node.querySelectorAll) return;
-                        if(node.matches && node.matches('[class*="ad"],[id*="ad"],[class*="banner"],[class*="promo"],[class*="splash"]')) {
+                        if(!node) return;
+                        var tagName = String(node.tagName || '').toLowerCase();
+                        if((tagName === 'iframe' || tagName === 'script' || tagName === 'img' || tagName === 'video' || tagName === 'source' || tagName === 'link') && isAdLikeUrl(node.src || node.href || node.getAttribute && (node.getAttribute('src') || node.getAttribute('href') || node.getAttribute('data-src')))) {
+                            node.remove && node.remove();
+                            return;
+                        }
+                        if(!node.querySelectorAll) return;
+                        if(node.matches && node.matches('[class*="ad"],[id*="ad"],[class*="banner"],[class*="promo"],[class*="splash"],[class*="sponsor"],[class*="commercial"],[class*="shake"],[class*="push"],[class*="notify"],[class*="market"],[class*="download"],[class*="install"],[class*="reward"],[class*="welfare"],[class*="benefit"],[class*="offerwall"],[class*="hotword"],[class*="miniapp"]')) {
                             node.remove();
                             return;
                         }
-                        node.querySelectorAll('[class*="ad"],[id*="ad"],[class*="banner"],[class*="promo"],[class*="splash"],[class*="recommend"]')
+                        node.querySelectorAll('iframe,script,img,video,source,link').forEach(function(child){
+                            if(isAdLikeUrl(child.src || child.href || child.getAttribute('src') || child.getAttribute('href'))) child.remove();
+                        });
+                        node.querySelectorAll('[class*="ad"],[id*="ad"],[class*="banner"],[class*="promo"],[class*="splash"],[class*="recommend"],[class*="sponsor"],[class*="commercial"],[class*="shake"],[class*="push"],[class*="notify"],[class*="market"],[class*="download"],[class*="install"],[class*="reward"],[class*="welfare"],[class*="benefit"],[class*="offerwall"],[class*="hotword"],[class*="miniapp"],[data-ad],[data-ad-slot],[data-promotion],[data-deeplink],[data-market],[data-download]')
                             .forEach(function(child){ child.remove(); });
                     });
                 });
@@ -2231,7 +2611,10 @@ object HttpMitmFilter {
 #adSlot, .ad-slot-container, .ad-slot-wrapper, .ad-slot-block, .ad-slot-area,
 .bottom-banner, .floating-banner, .reader-banner, .reader-bottom-banner, .chapter-ad,
 .insert-ad, .reading-insert-ad, .startup-banner, .pause-ad, .player-ad, .reward-pop,
-.offerwall, .unlock-by-ad, .watch-ad-unlock, .preroll-ad, .midroll-ad, .postroll-ad { 
+.offerwall, .unlock-by-ad, .watch-ad-unlock, .preroll-ad, .midroll-ad, .postroll-ad,
+.sponsor-card, .sponsored-card, .commercial-card, .promotion-card, .promo-card,
+.shake-ad, .push-ad, .notify-ad, .market-ad, .install-ad, .download-ad,
+.operation-popup, .activity-popup, .welfare-popup, .benefit-popup {
     display: none !important; 
     visibility: hidden !important;
     opacity: 0 !important;
@@ -2297,6 +2680,81 @@ object HttpMitmFilter {
 
     private fun decodeAscii(chunk: ByteArray): String? {
         return runCatching { String(chunk, StandardCharsets.ISO_8859_1) }.getOrNull()
+    }
+
+    private fun normalizeBodyForAdInspection(lowerBody: String): String {
+        if (lowerBody.isBlank()) return lowerBody
+        var normalized = stripJsonpEnvelope(lowerBody.trim())
+        if (normalized.indexOf('\\') >= 0) {
+            normalized = decodeEscapedJsonText(normalized)
+        }
+        return normalized.lowercase()
+    }
+
+    private fun stripJsonpEnvelope(body: String): String {
+        val openParen = body.indexOf('(')
+        val closeParen = body.lastIndexOf(')')
+        if (openParen <= 0 || closeParen <= openParen) return body
+        val prefix = body.substring(0, openParen).trim()
+        if (prefix.isBlank() || !prefix.all { it.isLetterOrDigit() || it == '_' || it == '.' || it == '$' }) return body
+        val candidate = body.substring(openParen + 1, closeParen).trim()
+        return if (candidate.startsWith('{') || candidate.startsWith('[') || candidate.startsWith('"')) candidate else body
+    }
+
+    private fun decodeEscapedJsonText(value: String): String {
+        val output = StringBuilder(value.length)
+        var index = 0
+        while (index < value.length) {
+            val ch = value[index]
+            if (ch != '\\' || index + 1 >= value.length) {
+                output.append(ch)
+                index++
+                continue
+            }
+            when (val next = value[index + 1]) {
+                'u' -> {
+                    if (index + 5 < value.length) {
+                        val code = value.substring(index + 2, index + 6).toIntOrNull(16)
+                        if (code != null) {
+                            output.append(code.toChar())
+                            index += 6
+                            continue
+                        }
+                    }
+                    output.append(ch)
+                    index++
+                }
+                '"', '\\', '/' -> {
+                    output.append(next)
+                    index += 2
+                }
+                'b' -> {
+                    output.append('\b')
+                    index += 2
+                }
+                'f' -> {
+                    output.append('\u000C')
+                    index += 2
+                }
+                'n' -> {
+                    output.append('\n')
+                    index += 2
+                }
+                'r' -> {
+                    output.append('\r')
+                    index += 2
+                }
+                't' -> {
+                    output.append('\t')
+                    index += 2
+                }
+                else -> {
+                    output.append(next)
+                    index += 2
+                }
+            }
+        }
+        return output.toString()
     }
 
     private fun shouldPreferDeepInspection(
@@ -2456,16 +2914,18 @@ object HttpMitmFilter {
         contentType: String,
         originalBody: String,
         cosmeticSelectors: List<String>,
-        cspValue: String? = null
+        cspValue: String? = null,
+        jsInjectRules: Set<String> = emptySet()
     ): ByteArray {
         return when {
             contentType.contains("application/json") -> "{}".toByteArray(StandardCharsets.UTF_8)
             contentType.contains("javascript") -> "".toByteArray(StandardCharsets.UTF_8)
             contentType.contains("text/html") -> {
                 if (cosmeticSelectors.isEmpty()) {
-                    "<html><head>${buildCspMetaTag(cspValue)}$SCRIPTLET_INJECTION</head><body></body></html>".toByteArray(StandardCharsets.UTF_8)
+                    val ruleScriptTag = buildRuleScriptInjection(jsInjectRules)
+                    "<html><head>${buildCspMetaTag(cspValue)}$SCRIPTLET_INJECTION$ruleScriptTag</head><body></body></html>".toByteArray(StandardCharsets.UTF_8)
                 } else {
-                    buildInjectedHtmlBody(originalBody, cosmeticSelectors, cspValue)
+                    buildInjectedHtmlBody(originalBody, cosmeticSelectors, cspValue, jsInjectRules)
                 }
             }
             contentType.contains("image") -> TRANSPARENT_1X1_GIF
@@ -2480,6 +2940,15 @@ object HttpMitmFilter {
             resource.contains("noopjs") || resource.contains("noop.js") || resource.contains("noop-script") || resource.contains("noopscript") || resource.contains("abp-resource:blank-js") || resource.contains("blank-js") || resource.contains("empty-js") -> {
                 "(()=>{})();".toByteArray(StandardCharsets.UTF_8)
             }
+            resource.contains("noopjson") || resource.contains("noop-json") || resource.contains("blank-json") || resource.contains("empty-json") || resource.contains("abp-resource:blank-json") -> {
+                "{}".toByteArray(StandardCharsets.UTF_8)
+            }
+            resource.contains("noophtml") || resource.contains("noop-html") || resource.contains("blank-html") || resource.contains("empty-html") || resource.contains("abp-resource:blank-html") -> {
+                "<html><head></head><body></body></html>".toByteArray(StandardCharsets.UTF_8)
+            }
+            resource.contains("noopvast") || resource.contains("noop-vast") || resource.contains("blank-vast") || resource.contains("empty-vast") || resource.contains("vast-empty") -> {
+                "<VAST version=\"3.0\"></VAST>".toByteArray(StandardCharsets.UTF_8)
+            }
             resource.contains("1x1") || resource.contains("pixel") || resource.contains("transparent") || resource.contains("noopimage") || resource.contains("noop-image") || resource.contains("blank-image") || resource.contains("abp-resource:blank-image") || resource.contains("empty-image") -> {
                 TRANSPARENT_1X1_GIF
             }
@@ -2489,7 +2958,7 @@ object HttpMitmFilter {
             resource.contains("empty") && contentType.contains("json") -> {
                 "{}".toByteArray(StandardCharsets.UTF_8)
             }
-            resource.contains("noopmp4") || resource.contains("noop-video") || resource.contains("noopvideo") || resource.contains("blank-mp4") || resource.contains("empty-mp4") -> {
+            resource.contains("noopmp4") || resource.contains("noop-video") || resource.contains("noopvideo") || resource.contains("blank-mp4") || resource.contains("empty-mp4") || resource.contains("blank-video") || resource.contains("empty-video") -> {
                 ByteArray(0)
             }
             resource.contains("noopcss") || resource.contains("noop-css") || resource.contains("blank-css") || resource.contains("abp-resource:blank-css") || resource.contains("empty-css") -> {
@@ -2501,6 +2970,28 @@ object HttpMitmFilter {
             else -> null
         }
     }
+
+    private fun scrubHtmlAdArtifacts(contentType: String, body: String): String {
+        if (!contentType.contains("text/html") || body.isBlank()) return body
+        var updated = body
+        htmlAdScriptRegexes.forEach { regex ->
+            updated = regex.replace(updated, "")
+        }
+        return updated
+    }
+
+    private val htmlAdScriptRegexes = listOf(
+        Regex("""<script\b(?=[^>]*(?:adservice|doubleclick|googlesyndication|googleadservices|adsbygoogle|gdt|pangle|pangolin|toutiao|csj|tanx|alimama|applovin|mintegral|mbridge|ironsrc|vungle|unityads|sigmob|kwad|ksad|topon|tradplus|anythink|mobvista))[^>]*>.*?</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
+        Regex("""<script\b[^>]*>(?=[\s\S]*?(?:adsbygoogle|adservice|doubleclick|googlesyndication|googleadservices|gdt|pangle|pangolin|gromore|csj|tanx|alimama|applovin|mintegral|mbridge|ironsrc|vungle|unityads|sigmob|kwad|ksad|topon|tradplus|anythink|mobvista|moloco|bidmachine|startapp|criteo|pubnative))(?=[\s\S]*?(?:createElement\s*\(|appendChild\s*\(|insertBefore\s*\(|document\.write\s*\(|adBreak\s*\(|requestAd\s*\())[^<]*.*?</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
+        Regex("""<script\b(?=[^>]*(?:ad|ads|banner|splash|promo|reward|offerwall|preroll|midroll|postroll|interstitial|material))(?=[^>]*\bsrc\s*=)[^>]*>\s*</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
+        Regex("""<link\b(?=[^>]*\brel\s*=\s*["']?(?:preload|prefetch|dns-prefetch|preconnect)["']?)(?=[^>]*(?:adservice|doubleclick|googlesyndication|googleadservices|gdt|pangle|pangolin|tanx|alimama|applovin|mintegral|ironsrc|vungle|unityads|sigmob|kwad|ksad|topon|tradplus|anythink))[^>]*>""", RegexOption.IGNORE_CASE),
+        Regex("""<iframe\b(?=[^>]*(?:adservice|doubleclick|googlesyndication|googleadservices|adsbygoogle|gdt|pangle|pangolin|tanx|alimama|applovin|mintegral|ironsrc|vungle|unityads|sigmob|kwad|ksad|topon|tradplus|anythink))[^>]*>.*?</iframe>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
+        Regex("""<meta\b(?=[^>]*\bhttp-equiv\s*=\s*["']?refresh["']?)(?=[^>]*(?:ad|ads|banner|splash|promo|promotion|landing|material|doubleclick|googlesyndication|googleadservices|gdt|pangle|pangolin|tanx|alimama))[^>]*>""", RegexOption.IGNORE_CASE),
+        Regex("""<noscript\b(?=[^>]*(?:ad|ads|banner|splash|promo|promotion|doubleclick|googlesyndication|googleadservices|gdt|pangle|pangolin|tanx|alimama))[^>]*>.*?</noscript>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
+        Regex("""<(?:div|section|aside|ins)\b(?=[^>]*(?:\bclass\s*=|\bid\s*=|\bdata-ad(?:-|=)|\bdata-ads(?:-|=)|\bdata-google-query-id\b))(?=[^>]*(?:adsbygoogle|ad-slot|ad_unit|ad-container|ad_container|ad-wrapper|ad_wrapper|ad-banner|ad_banner|banner-ad|native-ad|feed-ad|splash-ad|interstitial-ad|rewarded-ad|sponsor-card|sponsored-card|promotion-card))[^>]*>.*?</(?:div|section|aside|ins)>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
+        Regex("""<template\b(?=[^>]*(?:ad|ads|banner|splash|native|reward|interstitial|promotion|sponsor|material|creative))[^>]*>.*?</template>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
+        Regex("""<img\b(?=[^>]*(?:adservice|doubleclick|googlesyndication|googleadservices|adsbygoogle|gdt|pangle|pangolin|tanx|alimama|applovin|mintegral|ironsrc|vungle|unityads|sigmob|kwad|ksad|topon|tradplus|anythink|moloco|bidmachine|startapp|criteo|pubnative))[^>]*>""", RegexOption.IGNORE_CASE)
+    )
 
     // P1 增强：正则表达式缓存，避免重复编译
     private fun getCompiledRegex(pattern: String, flags: String): Regex? {
@@ -2574,9 +3065,12 @@ object HttpMitmFilter {
         val resource = redirectResource?.trim()?.lowercase().orEmpty()
         return when {
             resource.contains("noopjs") || resource.contains("noop.js") || resource.contains("noop-script") || resource.contains("noopscript") || resource.contains("abp-resource:blank-js") || resource.contains("blank-js") || resource.contains("empty-js") -> "application/javascript; charset=utf-8"
+            resource.contains("noopjson") || resource.contains("noop-json") || resource.contains("blank-json") || resource.contains("empty-json") || resource.contains("abp-resource:blank-json") -> "application/json; charset=utf-8"
+            resource.contains("noophtml") || resource.contains("noop-html") || resource.contains("blank-html") || resource.contains("empty-html") || resource.contains("abp-resource:blank-html") -> "text/html; charset=utf-8"
+            resource.contains("noopvast") || resource.contains("noop-vast") || resource.contains("blank-vast") || resource.contains("empty-vast") || resource.contains("vast-empty") -> "application/xml; charset=utf-8"
             resource.contains("1x1") || resource.contains("pixel") || resource.contains("transparent") || resource.contains("noopimage") || resource.contains("noop-image") || resource.contains("blank-image") || resource.contains("abp-resource:blank-image") || resource.contains("empty-image") -> "image/gif"
             resource.contains("noopcss") || resource.contains("noop-css") || resource.contains("blank-css") || resource.contains("abp-resource:blank-css") || resource.contains("empty-css") -> "text/css; charset=utf-8"
-            resource.contains("noopmp4") || resource.contains("noop-video") || resource.contains("noopvideo") || resource.contains("blank-mp4") || resource.contains("empty-mp4") -> "video/mp4"
+            resource.contains("noopmp4") || resource.contains("noop-video") || resource.contains("noopvideo") || resource.contains("blank-mp4") || resource.contains("empty-mp4") || resource.contains("blank-video") || resource.contains("empty-video") -> "video/mp4"
             resource.contains("empty") && originalContentType.contains("json") -> "application/json; charset=utf-8"
             resource.contains("empty") && originalContentType.contains("html") -> "text/html; charset=utf-8"
             originalContentType.isBlank() -> "text/plain; charset=utf-8"
@@ -2601,13 +3095,34 @@ object HttpMitmFilter {
         )
     }
 
+    fun buildHttp2BodyRewriteSyntheticResponse(
+        streamId: Int,
+        rewrite: Http2DataInspection
+    ): ByteArray? {
+        val body = rewrite.replacementBody ?: return null
+        val contentType = rewrite.replacementContentType.ifBlank { rewrite.contentType }
+        return Http2FrameCodec.buildSyntheticResponseFrames(
+            streamId = streamId,
+            status = 200,
+            contentType = contentType.ifBlank { "text/plain; charset=utf-8" },
+            body = body,
+            extraHeaders = buildList {
+                add("cache-control" to "no-store")
+                add("pragma" to "no-cache")
+                add("x-hanfeng-block" to "1")
+                rewrite.cspValue?.trim()?.takeIf { it.isNotBlank() }?.let { add("content-security-policy" to it) }
+            }
+        )
+    }
+
     private fun inspectAdBodySignals(lowerBody: String): BodySignalInspection {
         if (lowerBody.isBlank()) return BodySignalInspection(0, emptyList())
-        val cacheKey = if (lowerBody.length <= 2048) lowerBody else lowerBody.take(2048)
+        val inspectionBody = normalizeBodyForAdInspection(lowerBody)
+        val cacheKey = if (inspectionBody.length <= 2048) inspectionBody else inspectionBody.take(2048)
         synchronized(bodySignalCacheLock) {
             bodySignalCache[cacheKey]?.let { return it }
         }
-        val scene = collectAdBodySceneSignals(lowerBody)
+        val scene = collectAdBodySceneSignals(inspectionBody)
         val accumulator = BodySignalAccumulator()
         val reasons = mutableListOf<String>()
         var score = scene.strongKeywordScore + scene.weakKeywordScore + scene.baseSceneScore
@@ -2631,7 +3146,7 @@ object HttpMitmFilter {
         score += applyAccumulatedBodySignals(accumulator, reasons) {
             applyCommentFeedPushScores(
                 accumulator = accumulator,
-                lowerBody = lowerBody,
+                lowerBody = inspectionBody,
                 commentAdPlacementHit = scene.commentAdPlacementHit,
                 commentSceneHit = scene.commentSceneHit,
                 commentOrPostSceneHit = scene.commentOrPostSceneHit,
@@ -2660,7 +3175,7 @@ object HttpMitmFilter {
                 recommendCardHit = scene.recommendCardHit,
                 materialUrlSceneHit = scene.materialUrlSceneHit,
                 clickOrMaterialSceneHit = scene.clickOrMaterialSceneHit,
-                pangleAndGdtSignalHit = pangleAndGdtBodySignals.any(lowerBody::contains)
+                pangleAndGdtSignalHit = pangleAndGdtBodySignals.any(inspectionBody::contains)
             )
         }
         score += applyAccumulatedBodySignals(accumulator, reasons) {
@@ -2712,6 +3227,40 @@ object HttpMitmFilter {
             )
         }
         score += applyAccumulatedBodySignals(accumulator, reasons) {
+            applyMediationAuctionScores(
+                accumulator = accumulator,
+                mediationSceneHit = scene.mediationSceneHit,
+                mediationPlacementHit = scene.mediationPlacementHit,
+                mediationBidHit = scene.mediationBidHit,
+                mediationWaterfallHit = scene.mediationWaterfallHit,
+                mediationCreativeMaterialHit = scene.mediationCreativeMaterialHit,
+                mediationTrackingHit = scene.mediationTrackingHit,
+                sdkConfigPlacementHit = scene.sdkConfigPlacementHit,
+                sdkConfigTemplateHit = scene.sdkConfigTemplateHit,
+                sdkRewardOrFormatHit = scene.sdkRewardOrFormatHit,
+                sdkTrackerArrayHit = scene.sdkTrackerArrayHit,
+                adMarkupPayloadHit = scene.adMarkupPayloadHit,
+                attributionPayloadHit = scene.attributionPayloadHit,
+                openRtbBidResponseHit = scene.openRtbBidResponseHit,
+                materialUrlSceneHit = scene.materialUrlSceneHit
+            )
+        }
+        score += applyAccumulatedBodySignals(accumulator, reasons) {
+            applyUniversalMobileAdPayloadScores(accumulator, inspectionBody)
+        }
+        score += applyAccumulatedBodySignals(accumulator, reasons) {
+            applyExtendedDeliveryPayloadScores(accumulator, inspectionBody)
+        }
+        score += applyAccumulatedBodySignals(accumulator, reasons) {
+            applyMediaContentAdPayloadScores(accumulator, inspectionBody)
+        }
+        score += applyAccumulatedBodySignals(accumulator, reasons) {
+            applyBusinessDeliveryAdPayloadScores(accumulator, inspectionBody)
+        }
+        score += applyAccumulatedBodySignals(accumulator, reasons) {
+            applyLightweightPayloadModelScores(accumulator, inspectionBody)
+        }
+        score += applyAccumulatedBodySignals(accumulator, reasons) {
             applyTailBodySceneScores(
                 accumulator = accumulator,
                 dramaSceneHit = scene.dramaSceneHit,
@@ -2750,6 +3299,32 @@ object HttpMitmFilter {
             reasons = reasons
         ) { scoreDelta -> score += scoreDelta }
         return cacheBodySignalInspection(cacheKey, BodySignalInspection(score, reasons.distinct()))
+    }
+
+    private fun applyLightweightPayloadModelScores(
+        accumulator: BodySignalAccumulator,
+        lowerBody: String
+    ) {
+        var modelScore = 0
+        val keySignals = listOf(
+            "\"reward\"", "\"reward_amount\"", "\"video_url\"", "\"click_tracking_urls\"",
+            "\"impression_urls\"", "\"track_url\"", "\"monitor_urls\"", "\"landing_url\"",
+            "\"ad_unit_id\"", "\"slot_id\"", "\"auction_id\"", "\"bid_token\"",
+            "\"creative_id\"", "\"material_url\"", "\"duration\"", "\"ecpm\""
+        )
+        modelScore += keySignals.count(lowerBody::contains)
+        if (Regex("\"duration\"\\s*:\\s*(1[5-9]|2[0-9]|30)").containsMatchIn(lowerBody)) modelScore += 2
+        if (Regex("\"reward_amount\"\\s*:\\s*[1-9][0-9]*").containsMatchIn(lowerBody)) modelScore += 2
+        if (Regex("<iframe[^>]+(?:width=[\"']?(?:0|1|300|320)|height=[\"']?(?:0|1|250|480))").containsMatchIn(lowerBody)) modelScore += 2
+        if (lowerBody.contains("display:none") && (lowerBody.contains("track") || lowerBody.contains("impression"))) modelScore += 2
+        if (lowerBody.contains("click_tracking") && lowerBody.contains("impression")) modelScore += 2
+        if (lowerBody.contains("video_url") && lowerBody.contains("landing_url")) modelScore += 2
+        addBodySignalReasonIf(
+            accumulator,
+            modelScore >= 6,
+            4,
+            "lightweight-payload-model-ad-extended"
+        )
     }
 
     private fun appendBodySignalReasons(
@@ -2796,6 +3371,8 @@ object HttpMitmFilter {
 
     private fun collectAdBodySceneSignals(lowerBody: String): AdBodySceneSignals {
         fun containsAny(vararg tokens: String): Boolean = tokens.any(lowerBody::contains)
+        val compactBody = lowerBody.replace(jsonWhitespaceRegex, "")
+        fun containsAnyCompact(vararg tokens: String): Boolean = tokens.any(compactBody::contains)
 
         val strongMatches = bodyStrongMarkers.filter(lowerBody::contains)
         val weakMatches = bodyWeakMarkers.filter(lowerBody::contains)
@@ -2832,6 +3409,41 @@ object HttpMitmFilter {
             (lowerBody.contains("\"ad") || lowerBody.contains("\"preroll") || lowerBody.contains("\"midroll"))) {
             addBaseSceneReason("video-ad-cluster")
         }
+        val readerVisibleAdTextHits = readerVisibleAdTextTokens.filter(lowerBody::contains)
+        if (readerVisibleAdTextHits.size >= 2) {
+            baseSceneScore += 4
+            baseSceneReasons += "reader-visible-ad-text"
+        }
+
+        val genericAdArrayHit = containsAnyCompact(
+            "\"ads\":[", "\"ad_list\":[", "\"adlist\":[", "\"ad_items\":[", "\"ad_cards\":[",
+            "\"creatives\":[", "\"creative_list\":[", "\"materials\":[", "\"material_list\":[",
+            "\"native_ads\":[", "\"feed_ads\":[", "\"banner_ads\":[", "\"splash_ads\":["
+        )
+        val genericAdTemplateHit = containsAny(
+            "\"template_id\"", "\"templateid\"", "\"native_template\"", "\"render_template\"",
+            "\"ad_template\"", "\"layout_type\"", "\"render_data\"", "\"creative_data\""
+        )
+        val genericAdTrackerHit = containsAny(
+            "\"impression_urls\"", "\"click_urls\"", "\"show_trackers\"", "\"click_trackers\"",
+            "\"view_trackers\"", "\"monitor_urls\"", "\"tracking_urls\"", "\"event_trackers\""
+        )
+        val genericAdMediaHit = containsAny(
+            "\"image_url\"", "\"video_url\"", "\"material_url\"", "\"creative_url\"",
+            "\"landing_url\"", "\"deep_link\"", "\"download_url\"", "\"icon_url\""
+        )
+        if (genericAdArrayHit && (genericAdMediaHit || genericAdTrackerHit)) {
+            baseSceneScore += 4
+            baseSceneReasons += "generic-ad-array-material"
+        }
+        if (genericAdTemplateHit && genericAdMediaHit && genericAdTrackerHit) {
+            baseSceneScore += 4
+            baseSceneReasons += "generic-ad-template-tracker"
+        }
+        if (genericAdArrayHit && genericAdTemplateHit && genericAdTrackerHit) {
+            baseSceneScore += 4
+            baseSceneReasons += "generic-native-ad-payload"
+        }
 
         val commentSceneHit = containsAny("\"comment", "\"reply", "\"floor")
         val commentOrPostSceneHit = commentSceneHit || lowerBody.contains("\"post\"")
@@ -2843,7 +3455,9 @@ object HttpMitmFilter {
         val adMaterialHit = containsAny(
             "\"ad_material", "\"material_url", "\"landing_url", "\"click_url", "\"show_url",
             "\"impression_url", "\"monitor_url", "\"track_url", "\"creative_id", "\"material_id",
-            "\"ad_info", "\"ad_data", "\"ad_payload", "\"native_ad"
+            "\"ad_info", "\"ad_data", "\"ad_payload", "\"native_ad", "\"ad_extra", "\"adextra",
+            "\"sponsor_info", "\"commercial_info", "\"entity_template", "\"entitytype",
+            "\"creative_data", "\"render_data", "\"template_data", "\"asset_list", "\"ad_assets"
         )
         val deepLinkMaterialHit = containsAny("\"deep_link", "\"download_url", "\"landing_url", "\"ad_material", "\"target_url")
         val recommendCardHit = containsAny(
@@ -2976,7 +3590,10 @@ object HttpMitmFilter {
         val coolapkCommentSceneHit = coolapkSceneHit || commentOrPostSceneHit
         val coolapkCommentPlacementHit = containsAny(
             "\"comment_feed_ad\"", "\"comment_flow_ad\"", "\"reply_flow_ad\"", "\"comment_overlay_ad\"",
-            "\"comment_float_card\"", "\"reply_float_card\""
+            "\"comment_float_card\"", "\"reply_float_card\"", "\"comment_entity_ad\"", "\"reply_entity_ad\"",
+            "\"sponsor_info\"", "\"commercial_info\"", "\"entity_template\"", "\"entitytype\":\"ad",
+            "\"entity_type\":\"ad", "\"entitytype\":\"sponsor", "\"entity_type\":\"sponsor",
+            "\"entitytype\":\"commercial", "\"entity_type\":\"commercial"
         )
         val gdtSdkSceneHit = containsAny("\"gdt\"", "\"youlianghui\"", "\"guangdiantong\"", "\"adqq\"")
         val sdkMediationSceneHit = containsAny("\"waterfall\"", "\"mediation\"")
@@ -2994,6 +3611,53 @@ object HttpMitmFilter {
             "\"placement_id\"", "\"slot_id\"", "\"template_id\"", "\"ad_strategy\"", "\"ad_dispatch\""
         )
         val mediationSceneHit = sdkMediationSceneHit || containsAny("\"bidding\"", "\"auction\"")
+        val mediationBidHit = containsAny(
+            "\"bid_request\"", "\"bid_response\"", "\"bid_payload\"", "\"bid_token\"", "\"bidding_token\"",
+            "\"auction_token\"", "\"auction_id\"", "\"bidfloor\"", "\"bid_floor\"", "\"win_price\"",
+            "\"bid_id\"", "\"auction_result\"", "\"ecpm_floor\"", "\"floor_price\"", "\"ad_floor_price\""
+        )
+        val mediationWaterfallHit = containsAny(
+            "\"waterfall\"", "\"waterfall_id\"", "\"mediation_id\"", "\"adn\"", "\"adn_name\"", "\"adn_id\"",
+            "\"network_name\"", "\"network_id\"", "\"network_placement_id\"", "\"third_sdk\""
+        )
+        val mediationCreativeMaterialHit = containsAny(
+            "\"creative_url\"", "\"render_url\"", "\"material_url\"", "\"video_url\"", "\"image_url\"",
+            "\"landing_url\"", "\"deep_link\"", "\"download_url\"", "\"creative_data\"", "\"render_data\"",
+            "\"template_data\"", "\"asset_list\"", "\"ad_assets\""
+        )
+        val mediationTrackingHit = containsAny(
+            "\"win_notice\"", "\"win_notice_url\"", "\"loss_notice\"", "\"loss_notice_url\"",
+            "\"impression_urls\"", "\"click_urls\"", "\"tracking_urls\"", "\"event_trackers\"",
+            "\"tracking_list\"", "\"tracker_list\"", "\"ad_tracking\"", "\"ad_events\"", "\"view_trackers\""
+        )
+        val sdkConfigPlacementHit = containsAny(
+            "\"ad_unit_id\"", "\"adunit_id\"", "\"sdk_ad_unit_id\"", "\"sdk_slot_id\"",
+            "\"ad_slot_id\"", "\"adslot_id\"", "\"slot_id\"", "\"placement_id\""
+        )
+        val sdkConfigTemplateHit = containsAny(
+            "\"native_template\"", "\"native_template_id\"", "\"template_style\"", "\"render_template\"",
+            "\"ad_template\"", "\"template_id\""
+        )
+        val sdkRewardOrFormatHit = containsAny(
+            "\"reward_video\"", "\"rewarded_video\"", "\"rewarded_video_ad\"", "\"interstitial_ad\"",
+            "\"splash_ad\"", "\"native_ad\"", "\"banner_ad\""
+        )
+        val sdkTrackerArrayHit = containsAny(
+            "\"show_trackers\"", "\"click_trackers\"", "\"exposure_trackers\"", "\"monitor_urls\"",
+            "\"imp_trackers\"", "\"impression_urls\"", "\"click_urls\"", "\"view_trackers\"",
+            "\"tracking_list\"", "\"tracker_list\"", "\"ad_tracking\"", "\"ad_events\""
+        )
+        val adMarkupPayloadHit = containsAny(
+            "\"adm\"", "\"vast\"", "\"vast_tag\"", "\"vast_xml\"", "\"mraid\"", "\"omid\"",
+            "\"playable_url\"", "\"endcard_url\"", "\"companion_ads\""
+        )
+        val attributionPayloadHit = containsAny(
+            "\"skadn\"", "\"skadnetwork\"", "\"conversion_value\"", "\"campaign_id\"",
+            "\"creative_set_id\"", "\"source_app_id\"", "\"attribution_signature\""
+        )
+        val openRtbBidResponseHit = containsAny("\"seatbid\"", "\"impid\"", "\"adomain\"") &&
+            containsAny("\"adm\"", "\"crid\"", "\"cid\"", "\"iurl\"") &&
+            containsAny("\"burl\"", "\"nurl\"", "\"lurl\"", "\"impression_urls\"", "\"click_urls\"")
         val commentInsertPlacementHit = containsAny(
             "\"comment_guide_ad\"", "\"comment_hot_ad\"", "\"comment_float_ad\"", "\"comment_promote_card\"",
             "\"comment_stream_ad\"", "\"reply_promote_card\"", "\"floor_insert_ad\"", "\"comment_promote\"",
@@ -3112,6 +3776,17 @@ object HttpMitmFilter {
             taskBenefitPlacementHit = taskBenefitPlacementHit,
             mediationSceneHit = mediationSceneHit,
             mediationPlacementHit = mediationPlacementHit,
+            mediationBidHit = mediationBidHit,
+            mediationWaterfallHit = mediationWaterfallHit,
+            mediationCreativeMaterialHit = mediationCreativeMaterialHit,
+            mediationTrackingHit = mediationTrackingHit,
+            sdkConfigPlacementHit = sdkConfigPlacementHit,
+            sdkConfigTemplateHit = sdkConfigTemplateHit,
+            sdkRewardOrFormatHit = sdkRewardOrFormatHit,
+            sdkTrackerArrayHit = sdkTrackerArrayHit,
+            adMarkupPayloadHit = adMarkupPayloadHit,
+            attributionPayloadHit = attributionPayloadHit,
+            openRtbBidResponseHit = openRtbBidResponseHit,
             commentSceneExtendedForInsertHit = commentSceneExtendedForInsertHit,
             commentInsertPlacementHit = commentInsertPlacementHit,
             commentMaterialSceneExtendedHit = commentMaterialSceneExtendedHit,
@@ -3212,6 +3887,17 @@ object HttpMitmFilter {
         val taskBenefitPlacementHit: Boolean,
         val mediationSceneHit: Boolean,
         val mediationPlacementHit: Boolean,
+        val mediationBidHit: Boolean,
+        val mediationWaterfallHit: Boolean,
+        val mediationCreativeMaterialHit: Boolean,
+        val mediationTrackingHit: Boolean,
+        val sdkConfigPlacementHit: Boolean,
+        val sdkConfigTemplateHit: Boolean,
+        val sdkRewardOrFormatHit: Boolean,
+        val sdkTrackerArrayHit: Boolean,
+        val adMarkupPayloadHit: Boolean,
+        val attributionPayloadHit: Boolean,
+        val openRtbBidResponseHit: Boolean,
         val commentSceneExtendedForInsertHit: Boolean,
         val commentInsertPlacementHit: Boolean,
         val commentMaterialSceneExtendedHit: Boolean,
@@ -3517,6 +4203,659 @@ object HttpMitmFilter {
         if (shortvideoSdkSceneHit && shortvideoSdkPlacementHit && materialUrlSceneHit) {
             addBodySignalReason(accumulator, 4, "shortvideo-sdk-ad-extended")
         }
+    }
+
+    private fun applyMediationAuctionScores(
+        accumulator: BodySignalAccumulator,
+        mediationSceneHit: Boolean,
+        mediationPlacementHit: Boolean,
+        mediationBidHit: Boolean,
+        mediationWaterfallHit: Boolean,
+        mediationCreativeMaterialHit: Boolean,
+        mediationTrackingHit: Boolean,
+        sdkConfigPlacementHit: Boolean,
+        sdkConfigTemplateHit: Boolean,
+        sdkRewardOrFormatHit: Boolean,
+        sdkTrackerArrayHit: Boolean,
+        adMarkupPayloadHit: Boolean,
+        attributionPayloadHit: Boolean,
+        openRtbBidResponseHit: Boolean,
+        materialUrlSceneHit: Boolean
+    ) {
+        if (mediationSceneHit && mediationBidHit && (mediationCreativeMaterialHit || materialUrlSceneHit)) {
+            addBodySignalReason(accumulator, 4, "mediation-bid-material-extended")
+        }
+        if (mediationWaterfallHit && mediationPlacementHit && (mediationCreativeMaterialHit || mediationTrackingHit)) {
+            addBodySignalReason(accumulator, 4, "mediation-waterfall-material-extended")
+        }
+        if (mediationWaterfallHit && mediationBidHit && mediationTrackingHit) {
+            addBodySignalReason(accumulator, 4, "adn-placement-material-extended")
+        }
+        if (sdkConfigPlacementHit && sdkConfigTemplateHit && sdkRewardOrFormatHit && (mediationWaterfallHit || mediationSceneHit)) {
+            addBodySignalReason(accumulator, 4, "sdk-config-ad-extended")
+        }
+        if (sdkTrackerArrayHit && sdkConfigPlacementHit && (mediationCreativeMaterialHit || materialUrlSceneHit)) {
+            addBodySignalReason(accumulator, 4, "sdk-tracker-array-extended")
+        }
+        if (adMarkupPayloadHit && sdkConfigPlacementHit && (mediationTrackingHit || mediationBidHit || mediationWaterfallHit)) {
+            addBodySignalReason(accumulator, 4, "ad-markup-payload-extended")
+        }
+        if (attributionPayloadHit && sdkConfigPlacementHit && (mediationBidHit || mediationTrackingHit || sdkTrackerArrayHit)) {
+            addBodySignalReason(accumulator, 4, "attribution-payload-extended")
+        }
+        if (openRtbBidResponseHit && (mediationBidHit || mediationSceneHit || adMarkupPayloadHit)) {
+            addBodySignalReason(accumulator, 4, "openrtb-bid-response-extended")
+        }
+    }
+
+    private fun applyUniversalMobileAdPayloadScores(
+        accumulator: BodySignalAccumulator,
+        lowerBody: String
+    ) {
+        fun containsAny(vararg tokens: String): Boolean = tokens.any(lowerBody::contains)
+
+        val placementHit = containsAny(
+            "\"ad_unit_id\"", "\"adunit_id\"", "\"placement_id\"", "\"placement_name\"",
+            "\"slot_id\"", "\"ad_slot_id\"", "\"inventory_id\"", "\"zone_id\""
+        )
+        val creativeHit = containsAny(
+            "\"creative_id\"", "\"creativeid\"", "\"creative_url\"", "\"creative_data\"",
+            "\"material_url\"", "\"image_url\"", "\"video_url\"", "\"html_snippet\"",
+            "\"render_url\"", "\"adm\""
+        )
+        val trackerHit = containsAny(
+            "\"impression_url\"", "\"impression_urls\"", "\"imptrackers\"", "\"eventtrackers\"",
+            "\"click_url\"", "\"click_urls\"", "\"clicktrackers\"", "\"view_trackers\"",
+            "\"monitor_urls\"", "\"tracking_urls\""
+        )
+        val auctionHit = containsAny(
+            "\"auction_id\"", "\"auctionid\"", "\"bid_id\"", "\"bidid\"", "\"bid_token\"",
+            "\"bidtoken\"", "\"bid_response\"", "\"waterfall\"", "\"waterfall_id\"",
+            "\"mediation\"", "\"adapter_responses\"", "\"network_responses\""
+        )
+        val admobOrFanHit = containsAny(
+            "\"admob\"", "\"google_mobile_ads\"", "\"gma\"", "\"facebook_audience_network\"",
+            "\"audience_network\"", "\"fan\"", "\"mediation_adapter_class_name\"",
+            "\"adapter_class_name\"", "\"response_id\""
+        )
+        val applovinMaxHit = containsAny(
+            "\"applovin\"", "\"max_ad_unit_id\"", "\"maxsdk\"", "\"network_placement\"",
+            "\"revenue\"", "\"ad_format\"", "\"ad_values\""
+        )
+        val ironSourceHit = containsAny(
+            "\"ironsource\"", "\"iron_source\"", "\"supersonic\"", "\"instance_id\"",
+            "\"instance_name\"", "\"demand_source_name\"", "\"impression_data\""
+        )
+        val vastVideoHit = containsAny("<vast", "\"vast\"", "\"vast_xml\"", "\"vast_tag\"") &&
+            containsAny("<ad", "\"mediafiles\"", "\"media_file\"", "\"companionads\"", "\"trackingevents\"") &&
+            containsAny("impression", "clickthrough", "\"video_url\"", "\"creative\"")
+        val nativeAssetsHit = containsAny("\"assets\"", "\"asset_list\"", "\"native\"", "\"native_ad\"") &&
+            containsAny("\"imptrackers\"", "\"eventtrackers\"", "\"clicktrackers\"", "\"link\"") &&
+            containsAny("\"img\"", "\"video\"", "\"data\"", "\"title\"")
+        val playableEndcardHit = containsAny("\"playable_url\"", "\"playableurl\"", "\"endcard_url\"", "\"endcardurl\"", "\"endcard\"") &&
+            containsAny("\"click_url\"", "\"landing_url\"", "\"download_url\"", "\"deeplink\"", "\"deep_link\"") &&
+            (placementHit || auctionHit || trackerHit)
+
+        addBodySignalReasonIf(
+            accumulator,
+            admobOrFanHit && placementHit && auctionHit && (creativeHit || trackerHit),
+            4,
+            "admob-mediation-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            applovinMaxHit && placementHit && (creativeHit || trackerHit) && (auctionHit || containsAny("\"revenue\"")),
+            4,
+            "applovin-max-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            ironSourceHit && placementHit && auctionHit && (creativeHit || trackerHit),
+            4,
+            "ironsource-auction-payload-extended"
+        )
+        addBodySignalReasonIf(accumulator, vastVideoHit, 4, "vast-video-ad-payload-extended")
+        addBodySignalReasonIf(
+            accumulator,
+            nativeAssetsHit && (placementHit || creativeHit || trackerHit),
+            4,
+            "native-assets-ad-payload-extended"
+        )
+        addBodySignalReasonIf(accumulator, playableEndcardHit, 4, "playable-endcard-payload-extended")
+    }
+
+    private fun applyExtendedDeliveryPayloadScores(
+        accumulator: BodySignalAccumulator,
+        lowerBody: String
+    ) {
+        fun containsAny(vararg tokens: String): Boolean = tokens.any(lowerBody::contains)
+
+        val materialHit = containsAny(
+            "\"material_url\"", "\"material_urls\"", "\"image_url\"", "\"video_url\"",
+            "\"creative_url\"", "\"landing_url\"", "\"target_url\"", "\"download_url\""
+        )
+        val trackingHit = containsAny(
+            "\"track_url\"", "\"tracking_url\"", "\"tracking_urls\"", "\"monitor_url\"",
+            "\"monitor_urls\"", "\"impression_url\"", "\"impression_urls\"", "\"click_url\"", "\"click_urls\""
+        )
+        val adSceneHit = containsAny(
+            "\"ad\"", "\"ads\"", "\"advert\"", "\"promotion\"", "\"promo\"",
+            "\"sponsor\"", "\"commercial\"", "\"campaign\"", "\"activity_ad\""
+        )
+        val pushSceneHit = containsAny(
+            "\"push\"", "\"push_type\"", "\"push_scene\"", "\"notification\"", "\"notify\"",
+            "\"notice\"", "\"message_center\"", "\"inbox\"", "\"push_title\"", "\"push_content\""
+        )
+        val fakeSystemHit = containsAny(
+            "\"system_alert\"", "\"system_notice\"", "\"system_notification\"", "\"cleaner\"",
+            "\"boost\"", "\"speedup\"", "\"virus\"", "\"security_scan\"", "\"battery_saver\"",
+            "手机内存不足", "系统更新", "安全风险", "立即清理", "一键加速"
+        )
+        val deeplinkMarketHit = containsAny(
+            "\"deeplink\"", "\"deep_link\"", "\"schema_url\"", "\"scheme_url\"", "\"intent_url\"",
+            "\"market_url\"", "market://", "intent://", "snssdk", "tbopen://", "tmall://", "openapp."
+        )
+        val operationPopupHit = containsAny(
+            "\"operation_popup\"", "\"operation_banner\"", "\"operation_card\"", "\"activity_popup\"",
+            "\"activity_banner\"", "\"red_packet\"", "\"redpacket\"", "\"coupon_popup\"",
+            "\"welfare_popup\"", "\"benefit_popup\"", "\"mission_popup\"", "\"sign_popup\""
+        )
+        val precacheHit = containsAny(
+            "\"precache\"", "\"pre_cache\"", "\"cache_list\"", "\"cache_material\"", "\"cache_url\"",
+            "\"preload\"", "\"preload_list\"", "\"preload_material\"", "\"prefetch\"", "\"prefetch_url\""
+        )
+        val shakeSensorHit = containsAny(
+            "\"shake\"", "\"shake_ad\"", "\"shake_jump\"", "\"sensor_ad\"", "\"accelerometer\"",
+            "\"gyroscope\"", "\"motion_trigger\"", "\"shake_landing\"", "摇一摇", "摇动"
+        )
+
+        addBodySignalReasonIf(
+            accumulator,
+            pushSceneHit && adSceneHit && (materialHit || trackingHit || deeplinkMarketHit),
+            4,
+            "push-notification-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            fakeSystemHit && (adSceneHit || operationPopupHit) && (materialHit || deeplinkMarketHit || trackingHit),
+            4,
+            "fake-system-alert-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            deeplinkMarketHit && (adSceneHit || materialHit || trackingHit) &&
+                containsAny("\"pkg\"", "\"package\"", "\"app_id\"", "\"campaign\"", "\"creative_id\"", "\"click_id\""),
+            4,
+            "deeplink-market-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            operationPopupHit && (adSceneHit || materialHit || deeplinkMarketHit),
+            4,
+            "operation-popup-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            precacheHit && adSceneHit && (materialHit || trackingHit),
+            4,
+            "precache-material-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            shakeSensorHit && (adSceneHit || deeplinkMarketHit) && (materialHit || trackingHit || deeplinkMarketHit),
+            4,
+            "shake-sensor-ad-payload-extended"
+        )
+
+        val httpDnsHit = containsAny(
+            "\"httpdns\"", "\"dns_records\"", "\"dns_records\"", "\"resolve\"", "\"resolver\"",
+            "\"qname\"", "\"cname\"", "\"ttl\"", "\"ips\"", "\"ipv4\"", "\"ipv6\""
+        )
+        val adDomainHint = containsAny(
+            "ad.", ".ad.", "ads.", ".ads.", "adx", "adx", "adlog", "adtrack",
+            "doubleclick", "gdt", "pangle", "pangolin", "applovin", "ironsource", "mintegral", "topon"
+        )
+        val streamingTransportHit = containsAny(
+            "\"websocket\"", "\"ws_url\"", "\"wss_url\"", "\"socket_url\"", "\"event_stream\"",
+            "\"sse\"", "text/event-stream", "\"stream_channel\"", "\"push_channel\""
+        )
+        val grpcProtoHit = containsAny(
+            "\"grpc\"", "application/grpc", "\"protobuf\"", "\"proto\"", "\"pb\"",
+            "\"adservice\"", "\"ads_service\"", "\"bidservice\"", "\"ad_request_pb\"", "\"ad_response_pb\""
+        )
+        val dynamicCodeHit = containsAny(
+            "\"dex_url\"", "\"plugin_url\"", "\"module_url\"", "\"hotfix_url\"", "\"bundle_url\"",
+            "\"js_bundle\"", "\"wasm_url\"", "\"dynamic_module\"", "\"ad_plugin\"", "\"adsdk_plugin\""
+        )
+        val encryptedConfigHit = containsAny(
+            "\"encrypted_payload\"", "\"cipher_text\"", "\"ciphertext\"", "\"encrypted_config\"",
+            "\"config_sign\"", "\"sign\"", "\"nonce\"", "\"iv\"", "\"secret_version\""
+        )
+        val privateGatewayHit = containsAny(
+            "\"tcp_gateway\"", "\"udp_gateway\"", "\"quic_gateway\"", "\"binary_gateway\"",
+            "\"socket_gateway\"", "\"ad_gateway\"", "\"adsdk_gateway\"", "\"report_gateway\"",
+            "\"gateway_token\"", "\"channel_token\""
+        )
+
+        addBodySignalReasonIf(
+            accumulator,
+            httpDnsHit && adDomainHint,
+            4,
+            "httpdns-ad-resolution-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            streamingTransportHit && (adSceneHit || materialHit || trackingHit || deeplinkMarketHit),
+            4,
+            "websocket-sse-ad-stream-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            grpcProtoHit && (adSceneHit || materialHit || trackingHit || placementLikePayload(lowerBody)),
+            4,
+            "grpc-protobuf-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            dynamicCodeHit && (adSceneHit || materialHit || trackingHit || adDomainHint),
+            4,
+            "dynamic-code-ad-module-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            encryptedConfigHit && (adSceneHit || auctionLikePayload(lowerBody) || placementLikePayload(lowerBody)),
+            4,
+            "encrypted-config-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            privateGatewayHit && (adSceneHit || trackingHit || auctionLikePayload(lowerBody) || adDomainHint),
+            4,
+            "private-protocol-ad-gateway-payload-extended"
+        )
+    }
+
+    private fun placementLikePayload(lowerBody: String): Boolean {
+        return containsAny(
+            lowerBody,
+            "\"placement_id\"", "\"slot_id\"", "\"ad_unit_id\"", "\"adunit_id\"",
+            "\"ad_slot_id\"", "\"inventory_id\"", "\"zone_id\""
+        )
+    }
+
+    private fun auctionLikePayload(lowerBody: String): Boolean {
+        return containsAny(
+            lowerBody,
+            "\"waterfall\"", "\"mediation\"", "\"auction_id\"", "\"bid_token\"",
+            "\"bid_response\"", "\"bidding_token\"", "\"ecpm\"", "\"price\""
+        )
+    }
+
+    private fun applyMediaContentAdPayloadScores(
+        accumulator: BodySignalAccumulator,
+        lowerBody: String
+    ) {
+        fun containsAny(vararg tokens: String): Boolean = tokens.any(lowerBody::contains)
+
+        val mediaSceneHit = containsAny(
+            "\"player\"", "\"playback\"", "\"video\"", "\"vod\"", "\"episode\"", "\"stream\""
+        )
+        val adBreakHit = containsAny(
+            "\"ad_break\"", "\"adbreak\"", "\"ad_breaks\"", "\"cue_points\"", "\"cuepoints\"",
+            "\"preroll\"", "\"pre_roll\"", "\"midroll\"", "\"mid_roll\"", "\"postroll\"", "\"post_roll\"",
+            "\"pause_ad\"", "\"player_ad\"", "\"patch_ad\"", "\"video_patch\""
+        )
+        val mediaMaterialHit = containsAny(
+            "\"vast\"", "\"vmap\"", "\"vast_url\"", "\"vmap_url\"", "\"ad_tag_url\"",
+            "\"media_file\"", "\"mediafiles\"", "\"companion_ads\"", "\"trackingevents\"",
+            "\"skip_offset\"", "\"skip_time\"", "\"clickthrough\""
+        )
+        val audioSceneHit = containsAny(
+            "\"audio\"", "\"listen\"", "\"podcast\"", "\"tts\"", "\"audiobook\"", "\"fm\""
+        )
+        val audioAdHit = containsAny(
+            "\"audio_ad\"", "\"audio_ads\"", "\"audio_preroll\"", "\"audio_midroll\"",
+            "\"listen_ad\"", "\"listen_reward_ad\"", "\"voice_ad\"", "\"ad_audio_url\""
+        )
+        val comicSceneHit = containsAny("\"comic\"", "\"manga\"", "\"manhua\"", "\"cartoon\"")
+        val comicUnlockHit = containsAny(
+            "\"comic_unlock_ad\"", "\"manga_unlock_ad\"", "\"comic_reward_ad\"", "\"manga_reward_ad\"",
+            "\"comic_page_ad\"", "\"manga_page_ad\"", "\"chapter_unlock_ad\"", "\"unlock_by_ad\""
+        )
+        val dramaSceneHit = containsAny("\"short_drama\"", "\"shortdrama\"", "\"drama\"", "\"episode\"")
+        val dramaAdHit = containsAny(
+            "\"episode_unlock_ad\"", "\"episode_reward_ad\"", "\"episode_preload_ad\"",
+            "\"drama_interstitial_ad\"", "\"drama_feed_ad\"", "\"short_drama_unlock_ad\"",
+            "\"shortdrama_unlock_ad\"", "\"drama_reward_ad\""
+        )
+        val commonAdMaterialHit = containsAny(
+            "\"material_url\"", "\"video_url\"", "\"audio_url\"", "\"landing_url\"", "\"click_url\"",
+            "\"impression_urls\"", "\"track_url\"", "\"monitor_urls\""
+        )
+
+        addBodySignalReasonIf(
+            accumulator,
+            mediaSceneHit && adBreakHit && (mediaMaterialHit || commonAdMaterialHit),
+            4,
+            "media-preroll-metadata-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            audioSceneHit && audioAdHit && commonAdMaterialHit,
+            4,
+            "audio-ad-break-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            comicSceneHit && comicUnlockHit && commonAdMaterialHit,
+            4,
+            "comic-manga-unlock-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            dramaSceneHit && dramaAdHit && commonAdMaterialHit,
+            4,
+            "short-drama-episode-ad-payload-extended"
+        )
+    }
+
+    private fun applyBusinessDeliveryAdPayloadScores(
+        accumulator: BodySignalAccumulator,
+        lowerBody: String
+    ) {
+        fun containsAny(vararg tokens: String): Boolean = tokens.any(lowerBody::contains)
+
+        val commonMaterialHit = containsAny(
+            "\"material_url\"", "\"material_urls\"", "\"creative_url\"", "\"render_url\"",
+            "\"image_url\"", "\"video_url\"", "\"landing_url\"", "\"target_url\"",
+            "\"click_url\"", "\"download_url\"", "\"deep_link\"", "\"deeplink\""
+        )
+        val commonTrackingHit = containsAny(
+            "\"impression_url\"", "\"impression_urls\"", "\"show_url\"", "\"show_urls\"",
+            "\"track_url\"", "\"track_urls\"", "\"tracking_urls\"", "\"monitor_urls\"",
+            "\"click_trackers\"", "\"show_trackers\"", "\"view_trackers\""
+        )
+        val placementHit = containsAny(
+            "\"placement_id\"", "\"slot_id\"", "\"ad_slot_id\"", "\"ad_unit_id\"",
+            "\"position_id\"", "\"zone_id\"", "\"inventory_id\"", "\"campaign_id\""
+        )
+        val taskRewardHit = containsAny(
+            "\"task_ad\"", "\"task_ads\"", "\"daily_task_ad\"", "\"mission_ad\"",
+            "\"benefit_ad\"", "\"welfare_ad\"", "\"coin_ad\"", "\"coin_reward_ad\"",
+            "\"checkin_ad\"", "\"sign_ad\"", "\"offerwall\"", "\"offer_wall\"",
+            "\"watch_ad_task\"", "\"watch_ad_reward\"", "看广告得", "看视频领", "任务奖励"
+        )
+        val gameAdHit = containsAny(
+            "\"game_ad\"", "\"game_ads\"", "\"game_interstitial\"", "\"level_complete_ad\"",
+            "\"revive_ad\"", "\"revival_ad\"", "\"double_reward_ad\"", "\"booster_ad\"",
+            "\"chest_ad\"", "\"loot_ad\"", "\"game_reward_video\"", "\"rewarded_interstitial\""
+        )
+        val liveAdHit = containsAny(
+            "\"live_ad\"", "\"live_ads\"", "\"live_room_ad\"", "\"room_ad\"",
+            "\"anchor_ad\"", "\"streamer_ad\"", "\"live_banner\"", "\"gift_ad\"",
+            "\"live_popup_ad\"", "\"live_float_ad\"", "\"live_card_ad\""
+        )
+        val searchRecommendHit = containsAny(
+            "\"search_ad\"", "\"search_ads\"", "\"search_banner_ad\"", "\"search_result_ad\"",
+            "\"hotword_ad\"", "\"hot_word_ad\"", "\"keyword_ad\"", "\"query_ad\"",
+            "\"recommend_ad\"", "\"recommend_ads\"", "\"guess_like_ad\"", "\"suggestion_ad\""
+        )
+        val experimentConfigHit = containsAny(
+            "\"abtest\"", "\"ab_test\"", "\"experiment\"", "\"exp_id\"", "\"gray_config\"",
+            "\"grey_config\"", "\"remote_config\"", "\"feature_flag\"", "\"strategy_config\"",
+            "\"ad_strategy\"", "\"ad_switch\"", "\"ad_enable\"", "\"show_ad\""
+        )
+        val miniappLandingHit = containsAny(
+            "\"miniapp\"", "\"mini_app\"", "\"applet\"", "\"mini_program\"",
+            "\"wechat_path\"", "\"wx_path\"", "\"wx_appid\"", "\"quick_app\"",
+            "\"h5_landing\"", "\"landing_page\"", "\"lp_url\"", "\"open_url\""
+        )
+        val fakeActionButtonHit = containsAny(
+            "\"fake_close\"", "\"fake_button\"", "\"fake_play\"", "\"fake_download\"",
+            "\"close_area\"", "\"click_area\"", "\"misclick\"", "\"click_trap\"",
+            "\"download_button\"", "\"install_button\"", "\"play_button\"", "\"skip_button\"",
+            "伪关闭", "立即下载", "立即安装", "点击继续", "点击跳转"
+        )
+        val clipboardShareHit = containsAny(
+            "\"clipboard\"", "\"copy_text\"", "\"copywriting\"", "\"share_ad\"",
+            "\"share_reward\"", "\"share_task\"", "\"share_url\"", "\"share_schema\"",
+            "复制口令", "复制链接", "分享赚钱", "分享领取", "邀请奖励"
+        )
+        val serviceWorkerCacheHit = containsAny(
+            "\"serviceworker\"", "\"service_worker\"", "\"sw_url\"", "\"cache_manifest\"",
+            "\"offline_cache\"", "\"resource_manifest\"", "\"asset_manifest\"", "\"precache_manifest\"",
+            "\"cache_assets\"", "\"prefetch_assets\""
+        )
+        val systemSurfaceHit = containsAny(
+            "\"desktop_badge\"", "\"launcher_badge\"", "\"widget_ad\"", "\"shortcut_ad\"",
+            "\"status_bar\"", "\"notification_bar\"", "\"system_surface\"", "\"wallpaper_ad\"",
+            "\"lockscreen_ad\"", "\"screen_saver_ad\"", "\"calendar_ad\""
+        )
+        val socialInteractionHit = containsAny(
+            "\"comment_ad\"", "\"comment_ads\"", "\"comment_card_ad\"", "\"reply_ad\"",
+            "\"danmaku_ad\"", "\"bullet_ad\"", "\"follow_ad\"", "\"profile_ad\"",
+            "\"personal_page_ad\"", "\"inbox_ad\"", "\"message_ad\"", "\"chat_ad\"",
+            "\"private_message_ad\"", "\"topic_ad\"", "\"circle_ad\"", "\"community_ad\""
+        )
+        val cloudTemplateHit = containsAny(
+            "\"template_ad\"", "\"tpl_ad\"", "\"render_template\"", "\"template_id\"",
+            "\"template_url\"", "\"cloud_template\"", "\"cloud_control\"", "\"cloud_config\"",
+            "\"strategy_id\"", "\"scene_config\"", "\"layout_config\"", "\"card_template\""
+        )
+        val assetPackageHit = containsAny(
+            "\"resource_pack\"", "\"asset_pack\"", "\"material_package\"", "\"creative_package\"",
+            "\"bundle_url\"", "\"zip_url\"", "\"patch_url\"", "\"hot_patch\"",
+            "\"plugin_url\"", "\"module_url\"", "\"web_bundle\"", "\"offline_package\""
+        )
+        val couponRedpacketHit = containsAny(
+            "\"coupon_ad\"", "\"redpacket_ad\"", "\"red_packet_ad\"", "\"cash_ad\"",
+            "\"cashback_ad\"", "\"subsidy_ad\"", "\"allowance_ad\"", "\"lottery_ad\"",
+            "\"draw_ad\"", "\"bonus_ad\"", "\"money_reward_ad\"", "\"红包广告\"",
+            "\"领券广告\"", "看广告领红包", "看广告领券"
+        )
+        val ecommerceAffiliateHit = containsAny(
+            "\"product_ad\"", "\"shop_ad\"", "\"mall_ad\"", "\"sku_ad\"",
+            "\"item_ad\"", "\"goods_ad\"", "\"commerce_ad\"", "\"shopping_ad\"",
+            "\"affiliate_ad\"", "\"cps_ad\"", "\"commission_ad\"", "\"rebate_ad\"",
+            "\"taoke_ad\"", "\"jd_union_ad\"", "\"pdd_ad\"", "\"coupon_landing\""
+        )
+        val localLifeToolHit = containsAny(
+            "\"local_life_ad\"", "\"nearby_ad\"", "\"poi_ad\"", "\"map_ad\"",
+            "\"weather_ad\"", "\"calendar_ad\"", "\"tool_ad\"", "\"cleaner_ad\"",
+            "\"battery_ad\"", "\"wifi_ad\"", "\"vpn_ad\"", "\"file_manager_ad\"",
+            "\"takeaway_ad\"", "\"hotel_ad\"", "\"travel_ad\"", "\"ride_ad\""
+        )
+        val leadgenSurveyHit = containsAny(
+            "\"leadgen_ad\"", "\"lead_form_ad\"", "\"form_ad\"", "\"survey_ad\"",
+            "\"questionnaire_ad\"", "\"trial_ad\"", "\"signup_ad\"", "\"reservation_ad\"",
+            "\"phone_collect\"", "\"contact_form\"", "\"lead_url\"", "\"crm_callback\""
+        )
+        val calendarReminderHit = containsAny(
+            "\"calendar_subscribe_ad\"", "\"calendar_reminder_ad\"", "\"reminder_ad\"",
+            "\"alarm_ad\"", "\"schedule_ad\"", "\"ics_url\"", "\"calendar_url\"",
+            "\"reminder_url\"", "\"subscribe_calendar\"", "订阅日历广告", "日历提醒广告"
+        )
+        val browserStartpageHit = containsAny(
+            "\"browser_ad\"", "\"startpage_ad\"", "\"homepage_ad\"", "\"newtab_ad\"",
+            "\"speed_dial_ad\"", "\"bookmark_ad\"", "\"search_box_ad\"", "\"search_suggestion_ad\"",
+            "\"site_nav_ad\"", "\"nav_card_ad\"", "\"hot_search_ad\"", "\"trending_ad\""
+        )
+        val appStorePromotionHit = containsAny(
+            "\"appstore_ad\"", "\"app_store_ad\"", "\"promoted_app\"", "\"app_install_ad\"",
+            "\"app_update_ad\"", "\"install_recommend_ad\"", "\"download_recommend_ad\"",
+            "\"preinstall_ad\"", "\"game_center_ad\"", "\"app_rank_ad\"", "\"apk_ad\""
+        )
+        val oemSecurityCleanerHit = containsAny(
+            "\"oem_ad\"", "\"rom_ad\"", "\"system_manager_ad\"", "\"security_ad\"",
+            "\"cleaner_ad\"", "\"boost_ad\"", "\"phone_boost_ad\"", "\"virus_scan_ad\"",
+            "\"permission_manager_ad\"", "\"storage_clean_ad\"", "\"lockscreen_news_ad\"", "\"negative_screen_ad\""
+        )
+        val crossDeviceHit = containsAny(
+            "\"tv_ad\"", "\"ott_ad\"", "\"cast_ad\"", "\"screen_cast_ad\"",
+            "\"wear_ad\"", "\"watch_ad\"", "\"car_ad\"", "\"carplay_ad\"",
+            "\"iot_ad\"", "\"speaker_ad\"", "\"tablet_ad\"", "\"pad_ad\""
+        )
+        val wasmObfuscatedLoaderHit = containsAny(
+            "\"wasm_url\"", "\"wasm_hash\"", "\"wasm_module\"", "\"webassembly\"",
+            "\"obfuscated_js\"", "\"loader_hash\"", "\"loader_signature\"", "\"js_loader\"",
+            "\"eval_loader\"", "\"packed_script\"", "\"encrypted_script\"", "\"ad_loader\"",
+            "webassembly.instantiate", "webassembly.compilestreaming", "atob(", "eval(function"
+        )
+        val mediaFingerprintHit = containsAny(
+            "\"phash\"", "\"perceptual_hash\"", "\"image_hash\"", "\"media_hash\"",
+            "\"creative_hash\"", "\"asset_hash\"", "\"watermark\"", "\"watermark_text\"",
+            "\"endcard_hash\"", "\"end_card_hash\"", "\"video_fingerprint\"", "\"frame_hash\"",
+            "\"logo_watermark\"", "\"brand_watermark\"", "\"ad_fingerprint\""
+        )
+        val adSceneHit = containsAny(
+            "\"ad\"", "\"ads\"", "\"ad_info\"", "\"ad_data\"", "\"advert\"",
+            "\"promotion\"", "\"promo\"", "\"sponsor\"", "\"commercial\""
+        )
+
+        addBodySignalReasonIf(
+            accumulator,
+            taskRewardHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "task-reward-offerwall-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            gameAdHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "game-interstitial-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            liveAdHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "live-room-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            searchRecommendHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "search-recommend-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            experimentConfigHit && adSceneHit && (placementHit || commonMaterialHit || commonTrackingHit),
+            4,
+            "experiment-ad-config-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            miniappLandingHit && adSceneHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "miniapp-landing-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            fakeActionButtonHit && (adSceneHit || commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "fake-action-button-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            clipboardShareHit && (adSceneHit || commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "clipboard-share-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            serviceWorkerCacheHit && (adSceneHit || commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "serviceworker-cache-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            systemSurfaceHit && (adSceneHit || commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "system-surface-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            socialInteractionHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "social-interaction-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            cloudTemplateHit && adSceneHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "cloud-template-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            assetPackageHit && adSceneHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "asset-package-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            couponRedpacketHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "coupon-redpacket-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            ecommerceAffiliateHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "ecommerce-affiliate-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            localLifeToolHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "local-life-tool-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            leadgenSurveyHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "leadgen-survey-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            calendarReminderHit && (adSceneHit || commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "calendar-reminder-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            browserStartpageHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "browser-startpage-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            appStorePromotionHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "appstore-promotion-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            oemSecurityCleanerHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "oem-security-cleaner-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            crossDeviceHit && (commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "cross-device-ad-payload-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            wasmObfuscatedLoaderHit && (adSceneHit || commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "wasm-js-obfuscated-loader-ad-extended"
+        )
+        addBodySignalReasonIf(
+            accumulator,
+            mediaFingerprintHit && (adSceneHit || commonMaterialHit || commonTrackingHit || placementHit),
+            4,
+            "media-fingerprint-watermark-ad-extended"
+        )
     }
 
     private fun applyTailBodySceneScores(
@@ -4072,7 +5411,12 @@ object HttpMitmFilter {
             redirectResource = directives.redirectResource,
             cspValue = directives.cspValue,
             requestLike = environment.method != null && environment.status == null,
-            responseLike = environment.status != null
+            responseLike = environment.status != null,
+            hasBodyRewriteDirectives = directives.redirectResource != null ||
+                directives.replaceRules.isNotEmpty() ||
+                directives.cosmeticSelectors.isNotEmpty() ||
+                directives.jsInjectRules.isNotEmpty() ||
+                !directives.cspValue.isNullOrBlank()
         )
     }
 
@@ -4393,18 +5737,90 @@ object HttpMitmFilter {
             "/stream/sponsor", "/stream/native", "/stream/commercial", "/post/sponsor", "/post/native",
             "/message_center/ad", "/message/ad", "/notice/ad", "/notify/ad", "/inbox/ad", "/bulletin/ad",
             "/discover/card", "/discover/ad", "/recommend/card", "/promotion/card", "/promo/card",
-            "/sign/popup", "/daily/popup", "/mission/popup", "/benefit/popup", "/welfare/popup"
+            "/sign/popup", "/daily/popup", "/mission/popup", "/benefit/popup", "/welfare/popup",
+            "/httpdns/ad", "/dns/ad", "/resolver/ad", "/ws/ad", "/wss/ad", "/stream/ad",
+            "/event/ad", "/grpc/ad", "/protobuf/ad", "/proto/ad", "/plugin/ad", "/dynamic/ad",
+            "/dex/ad", "/hotfix/ad", "/gateway/ad", "/ad/gateway", "/adsdk/gateway",
+            "/quic/ad", "/http3/ad", "/h3/ad", "/udp443/ad", "/ad/quic", "/ad/http3"
         )
         if (strongPathKeywords.any { path.contains(it) }) return true
         val query = path.substringAfter('?', "")
         if (query.isBlank()) return false
+        if (looksLikeStrongAdParameterQuery(query)) return true
+        if (looksLikeHttpDnsAdQueryPath(path, query)) return true
         val strongQueryKeywords = listOf(
             "watch_ad_unlock", "unlock_by_ad", "reward_unlock", "reward_verify", "ad_dispatch", "ad_request",
             "ad_material", "ad_strategy", "ad_platform", "waterfall", "mediation", "biddingtoken", "auctionid",
             "message_center_ad", "promotion_card", "discover_card", "sign_popup_ad", "benefit_popup_ad", "welfare_popup_ad",
-            "sponsor_card", "sponsored_card", "commercial_card", "native_ad", "native_card_ad", "brand_feed_card"
+            "sponsor_card", "sponsored_card", "commercial_card", "native_ad", "native_card_ad", "brand_feed_card",
+            "httpdns", "dns_records", "ws_url", "wss_url", "grpc", "protobuf", "dex_url", "plugin_url",
+            "encrypted_config", "ad_gateway", "adsdk_gateway", "quic_gateway", "http3_gateway", "udp443", "alt_svc", "altsvc", "h3"
         )
         return strongQueryKeywords.any { keyword -> queryContainsKeywordAssignment(query, keyword) }
+    }
+
+    private fun looksLikeHttpDnsAdQueryPath(path: String, query: String): Boolean {
+        if (path.isBlank() || query.isBlank()) return false
+        val lowerPath = path.lowercase()
+        if (!listOf("httpdns", "dns-query", "/resolve", "/resolver", "/dns").any(lowerPath::contains)) return false
+        val dnsNameKeys = setOf("host", "hosts", "domain", "domains", "dn", "dns", "q", "qname", "name", "hostname", "target", "query")
+        return query.lowercase().split('&').any { part ->
+            val key = part.substringBefore('=', "").replace("-", "_")
+            val value = part.substringAfter('=', "")
+            key in dnsNameKeys && (
+                value.contains("ad") ||
+                    value.contains("ads") ||
+                    value.contains("adx") ||
+                    value.contains("gdt") ||
+                    value.contains("pangle") ||
+                    value.contains("pangolin") ||
+                    value.contains("doubleclick") ||
+                    value.contains("googlesyndication") ||
+                    value.contains("adservice") ||
+                    value.contains("track") ||
+                    value.contains("bid")
+                )
+        }
+    }
+
+    private fun looksLikeStrongAdParameterQuery(query: String): Boolean {
+        if (query.isBlank()) return false
+        val strongAdParameterNames = setOf(
+            "ad_unit_id", "adunit_id", "adunitid", "ad_slot_id", "adslot_id", "adslotid",
+            "slot_id", "slotid", "adx_id", "adxid", "auction_id", "auctionid",
+            "bid_id", "bidid", "bid_token", "bidtoken", "bidding_token", "auction_token",
+            "placement_id", "placementid", "creative_id", "creativeid", "material_id", "materialid",
+            "campaign_id", "campaignid", "impression_id", "impressionid", "request_id", "requestid",
+            "ad_url", "adurl", "track_url", "trackurl", "imp_url", "impurl", "auction_url", "auctionurl",
+            "placement_token", "slot_token", "track_token", "imp_token", "ad_token", "adtoken"
+        )
+        return query.split('&').any { part ->
+            val key = part.substringBefore('=', "").lowercase()
+                .replace("%5f", "_")
+                .replace("-", "_")
+            if (key !in strongAdParameterNames && !looksLikeGeneralizedAdParameterName(key)) return@any false
+            val value = part.substringAfter('=', "").lowercase()
+            if (value.isBlank()) return@any true
+            value.length >= 4 && (
+                value.contains("ad") ||
+                    value.contains("ads") ||
+                    value.contains("adx") ||
+                    value.contains("bid") ||
+                    value.contains("auction") ||
+                    value.contains("slot") ||
+                    value.contains("unit") ||
+                    value.contains("creative") ||
+                    value.contains("material") ||
+                    value.contains("campaign") ||
+                    value.matches(Regex("[a-z0-9_-]{8,}"))
+                )
+        }
+    }
+
+    private fun looksLikeGeneralizedAdParameterName(key: String): Boolean {
+        if (key.isBlank()) return false
+        return Regex("(?:^|_)(ad|ads|slot|auction|placement|track|imp|impression|bid|creative|material|campaign)(?:_)?(id|url|token|key|hash|sig|signature)(?:$|_)")
+            .containsMatchIn(key)
     }
 
     private fun looksLikeRewardUnlockPath(path: String): Boolean {
@@ -4624,7 +6040,8 @@ object HttpMitmFilter {
         val redirectResource: String? = null,
         val cspValue: String? = null,
         val requestLike: Boolean,
-        val responseLike: Boolean
+        val responseLike: Boolean,
+        val hasBodyRewriteDirectives: Boolean = false
     )
 
     data class Http2ActionDecision(
@@ -4657,7 +6074,16 @@ object HttpMitmFilter {
         val combinedSample: ByteArray,
         val redirectResource: String? = null,
         val cspValue: String? = null,
-        val contentType: String = ""
+        val contentType: String = "",
+        val replacementBody: ByteArray? = null,
+        val replacementContentType: String = "",
+        val rewriteReason: String? = null
+    )
+
+    data class Http2BodyRewriteResult(
+        val body: ByteArray,
+        val contentType: String,
+        val reason: String
     )
 
     private data class BodySignalInspection(

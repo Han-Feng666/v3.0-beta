@@ -1,6 +1,8 @@
 package com.HanFeng.data
 
 object RuleParsingSupport {
+    private val adblockRuleFragmentRegex = Regex("""(?:@@)?\|\|.*?(?=(?:\s+(?:@@)?\|\|)|$)""")
+
     data class LineContext(
         val vendorHints: Set<String> = emptySet()
     )
@@ -73,8 +75,7 @@ object RuleParsingSupport {
         val normalized = RuleTextNormalizer.normalizeMessyRuleLine(rawLine)
         if (normalized.isBlank()) return emptyList()
         if (normalized.startsWith("#pkg=", ignoreCase = true)) return listOf(normalized)
-        val matches = Regex("""(?:@@)?\|\|.*?(?=(?:\s+(?:@@)?\|\|)|$)""")
-            .findAll(normalized)
+        val matches = adblockRuleFragmentRegex.findAll(normalized)
             .map { it.value.trim() }
             .filter { it.isNotBlank() }
             .toList()

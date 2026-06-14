@@ -11,10 +11,13 @@ data class BlockRule(
     val excludedDnsTypes: Set<Int>? = null,
     val thirdParty: Boolean = false,
     val firstParty: Boolean = false,
+    val important: Boolean = false,
     val redirect: Boolean = false,
     val domainConstraints: Set<String>? = null,
+    val excludedDomainConstraints: Set<String> = emptySet(),
     val denyallow: Set<String> = emptySet(),
     val urlblock: Boolean = false,
+    val requestTypes: Set<String> = emptySet(),
     val appPackages: Set<String> = emptySet(),
     val destinationPorts: Set<Int> = emptySet(),
     val sourcePorts: Set<Int> = emptySet(),
@@ -32,6 +35,7 @@ data class BlockRule(
     val replaceRules: Set<String> = emptySet(),
     val cspValue: String? = null,
     val redirectResource: String? = null,
+    val jsInjectRules: Set<String> = emptySet(),
     val remoteSourceId: String? = null
 )
 
@@ -84,6 +88,46 @@ data class RankingBundle(
     val appBlocked: List<RankingEntry>,
     val appRequest: List<RankingEntry>,
     val appResponse: List<RankingEntry>
+)
+
+data class UserAdFeedbackSample(
+    val appName: String,
+    val packageName: String?,
+    val host: String?,
+    val path: String?,
+    val sni: String?,
+    val ip: String?,
+    val protocol: String,
+    val source: String = "user_feedback",
+    val capturedAt: Long = System.currentTimeMillis()
+)
+
+data class PendingFeedbackRule(
+    val id: String,
+    val ruleText: String,
+    val host: String?,
+    val path: String?,
+    val appName: String,
+    val source: String,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+data class TrainingSample(
+    val host: String?,
+    val path: String?,
+    val queryKeys: List<String> = emptyList(),
+    val contentType: String? = null,
+    val sampleJsonKeys: List<String> = emptyList(),
+    val payloadLength: Int = 0,
+    val statusCode: Int? = null,
+    val protocol: String,
+    val port: Int? = null,
+    val appCategory: String = "ordinary",
+    val isQuic: Boolean = false,
+    val isHttpdns: Boolean = false,
+    val hitAdToken: Boolean = false,
+    val label: String = "unlabeled",
+    val capturedAt: Long = System.currentTimeMillis()
 )
 
 data class InstalledApp(

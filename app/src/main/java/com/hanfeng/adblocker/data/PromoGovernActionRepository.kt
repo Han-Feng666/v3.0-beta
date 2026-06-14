@@ -4,26 +4,92 @@ import android.content.Context
 import android.content.pm.PackageManager
 
 object PromoGovernActionRepository {
+    private const val SMART_COMPONENT_DISABLE_LIMIT = 6
+
     fun smartGovern(context: Context, target: PromoGovernTarget): String {
         PromoGovernSnapshotRepository.savePackageSnapshot(context, target, notificationTouched = true)
         val status = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
+        val componentResult = disableSmartPromoComponents(context, target)
         val lightGoverned = ShizukuAdControlRepository.blockPackageNotifications(context, target.packageName)
-        if (lightGoverned) return "治理成功，当前已关闭推送广告能力"
+        if (lightGoverned) {
+            return buildSmartGovernSuccessMessage(
+                base = "治理成功，当前已关闭推送广告能力",
+                componentResult = componentResult
+            )
+        }
 
         if (!isDisabledState(status.enabledState)) {
             ShizukuAdControlRepository.disablePackage(context, target.packageName)
             val disabledStatus = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
-            if (isDisabledState(disabledStatus.enabledState)) return "治理成功，当前已冻结"
+            if (isDisabledState(disabledStatus.enabledState)) {
+                return buildSmartGovernSuccessMessage(
+                    base = "治理成功，当前已冻结",
+                    componentResult = componentResult
+                )
+            }
         }
 
         val refreshed = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
         if (!refreshed.suspended) {
             val suspendRequested = ShizukuAdControlRepository.suspendPackage(context, target.packageName)
             val suspendStatus = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
-            if (suspendRequested && suspendStatus.suspended) return "冻结未生效，已自动回退为暂停"
+            if (suspendRequested && suspendStatus.suspended) {
+                return buildSmartGovernSuccessMessage(
+                    base = "冻结未生效，已自动回退为暂停",
+                    componentResult = componentResult
+                )
+            }
         }
-        return "治理失败，请确认系统支持冻结或暂停"
+        return if (componentResult.successCount > 0) {
+            "治理部分成功，已冻结 ${componentResult.successCount} 个推广组件；推送、冻结和暂停未完全生效"
+        } else {
+            "治理失败，请确认系统支持冻结或暂停"
+        }
     }
+
+    private fun disableSmartPromoComponents(context: Context, target: PromoGovernTarget): SmartComponentGovernResult {
+        val candidates = PromoGovernComponentRepository.discoverCandidates(context, target.packageName)
+            .filter(::isSmartGovernSafeComponent)
+            .take(SMART_COMPONENT_DISABLE_LIMIT)
+        if (candidates.isEmpty()) return SmartComponentGovernResult(0, 0)
+        var successCount = 0
+        candidates.forEach { candidate ->
+            PromoGovernSnapshotRepository.saveComponentSnapshot(
+                context = context,
+                packageName = target.packageName,
+                title = target.title,
+                componentName = candidate.componentName,
+                componentWasEnabled = candidate.enabled
+            )
+            if (ShizukuAdControlRepository.disableComponent(context, candidate.componentName)) {
+                successCount++
+            }
+        }
+        return SmartComponentGovernResult(successCount, candidates.size)
+    }
+
+    fun isSmartGovernSafeComponent(candidate: PromoComponentCandidate): Boolean {
+        if (!candidate.enabled) return false
+        if (candidate.riskLabel != "低风险" && candidate.riskLabel != "中风险") return false
+        if (candidate.score < 5) return false
+        val group = candidate.groupLabel
+        if (group.contains("主入口") || group.contains("账号登录") || group.contains("支付") || group.contains("设置") || group.contains("网页容器")) {
+            return false
+        }
+        return group.contains("启动广告") ||
+            group.contains("推送") ||
+            group.contains("广告 Service")
+    }
+
+    private fun buildSmartGovernSuccessMessage(base: String, componentResult: SmartComponentGovernResult): String {
+        if (componentResult.successCount <= 0) return base
+        return "$base，并冻结 ${componentResult.successCount} 个推广组件"
+    }
+
+    private data class SmartComponentGovernResult(
+        val successCount: Int,
+        val attemptedCount: Int
+    )
 
     fun setNotificationsBlocked(context: Context, target: PromoGovernTarget, blocked: Boolean): String {
         if (blocked) PromoGovernSnapshotRepository.savePackageSnapshot(context, target, notificationTouched = true)
@@ -117,6 +183,7 @@ object PromoGovernActionRepository {
         return if (restored.isEmpty()) {
             "恢复未生效，请检查 Shizuku 服务状态和系统支持情况"
         } else {
+            PromoGovernSnapshotRepository.unmarkPackageGoverned(context, snapshot.packageName)
             "已恢复 ${snapshot.title} 的${restored.joinToString("、")}"
         }
     }

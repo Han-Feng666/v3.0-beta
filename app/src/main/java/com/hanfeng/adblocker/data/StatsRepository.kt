@@ -20,6 +20,15 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 object StatsRepository {
+    enum class BlockSource {
+        DNS_RULE,
+        URL_HEURISTIC,
+        MITM_BODY,
+        QUIC_BLOCK,
+        USER_MANUAL,
+        LEARNING_CANDIDATE
+    }
+
     private const val PREFS = "stats_repo"
     private const val KEY_TOTAL_BLOCKED = "total_blocked"
     private const val KEY_REQUEST_TOTAL = "request_total"
@@ -36,6 +45,7 @@ object StatsRepository {
     private const val KEY_APP_BLOCKED = "app_blocked"
     private const val KEY_APP_REQUEST = "app_request"
     private const val KEY_APP_RESPONSE = "app_response"
+    private const val KEY_BLOCK_SOURCE = "block_source"
     private const val MAX_RANKING_ENTRIES = 300
     private val gson = Gson()
     private val dayFormatter = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -60,6 +70,7 @@ object StatsRepository {
     private val appBlockedMap = ConcurrentHashMap<String, AtomicInteger>()
     private val appRequestMap = ConcurrentHashMap<String, AtomicInteger>()
     private val appResponseMap = ConcurrentHashMap<String, AtomicInteger>()
+    private val blockSourceMap = ConcurrentHashMap<String, AtomicInteger>()
 
     // Async flush handler
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -70,8 +81,8 @@ object StatsRepository {
     private val updateDispatchPending = AtomicBoolean(false)
     @Volatile private var lastUpdateDispatchAt = 0L
     private const val UI_UPDATE_MIN_INTERVAL_MILLIS = 5000L
-    private const val FLUSH_DELAY_MILLIS = 120_000L
-    private const val FLUSH_EVENT_THRESHOLD = 200
+    private const val FLUSH_DELAY_MILLIS = 30_000L
+    private const val FLUSH_EVENT_THRESHOLD = 500
 
     private fun ensureInitialized(context: Context) {
         if (initialized) {
@@ -101,6 +112,7 @@ object StatsRepository {
             readMapInto(context, prefs, KEY_APP_BLOCKED, appBlockedMap)
             readMapInto(context, prefs, KEY_APP_REQUEST, appRequestMap)
             readMapInto(context, prefs, KEY_APP_RESPONSE, appResponseMap)
+            readMapInto(context, prefs, KEY_BLOCK_SOURCE, blockSourceMap)
 
             initialized = true
         }
@@ -128,31 +140,31 @@ object StatsRepository {
         scheduleFlush(context)
     }
 
-    fun recordBlockedResponse(context: Context, vendor: String, appName: String, bytesSaved: Long = 0) {
+    fun recordBlockedResponse(context: Context, vendor: String, appName: String, bytesSaved: Long = 0, source: BlockSource = BlockSource.URL_HEURISTIC) {
         ensureInitialized(context)
-        recordBlockedEvent(context, vendor, appName, bytesSaved)
+        recordBlockedEvent(context, vendor, appName, bytesSaved, source)
     }
 
-    fun recordBlockedDns(context: Context, vendor: String, appName: String, bytesSaved: Long = 0) {
+    fun recordBlockedDns(context: Context, vendor: String, appName: String, bytesSaved: Long = 0, source: BlockSource = BlockSource.DNS_RULE) {
         ensureInitialized(context)
-        recordBlockedEvent(context, vendor, appName, bytesSaved)
+        recordBlockedEvent(context, vendor, appName, bytesSaved, source)
         dnsBlocked.incrementAndGet()
     }
 
-    fun recordBlockedHttp(context: Context, vendor: String, appName: String, bytesSaved: Long = 0) {
+    fun recordBlockedHttp(context: Context, vendor: String, appName: String, bytesSaved: Long = 0, source: BlockSource = BlockSource.URL_HEURISTIC) {
         ensureInitialized(context)
-        recordBlockedEvent(context, vendor, appName, bytesSaved)
+        recordBlockedEvent(context, vendor, appName, bytesSaved, source)
         httpBlocked.incrementAndGet()
     }
 
-    fun recordBlockedMitm(context: Context, vendor: String, appName: String, bytesSaved: Long = 0) {
+    fun recordBlockedMitm(context: Context, vendor: String, appName: String, bytesSaved: Long = 0, source: BlockSource = BlockSource.MITM_BODY) {
         ensureInitialized(context)
-        recordBlockedEvent(context, vendor, appName, bytesSaved)
+        recordBlockedEvent(context, vendor, appName, bytesSaved, source)
         httpBlocked.incrementAndGet()
         mitmBlocked.incrementAndGet()
     }
 
-    private fun recordBlockedEvent(context: Context, vendor: String, appName: String, bytesSaved: Long) {
+    private fun recordBlockedEvent(context: Context, vendor: String, appName: String, bytesSaved: Long, source: BlockSource) {
         todayBlocked.incrementAndGet()
         totalBlocked.incrementAndGet()
         responseTotal.incrementAndGet()
@@ -160,6 +172,16 @@ object StatsRepository {
         incrementMapInMemory(vendorBlockedMap, vendor)
         incrementMapInMemory(vendorResponseMap, vendor)
         incrementMapInMemory(appBlockedMap, appName)
+        incrementMapInMemory(appResponseMap, appName)
+        incrementMapInMemory(blockSourceMap, source.name)
+        notifyUpdated()
+        scheduleFlush(context)
+    }
+
+    fun recordLearningCandidate(context: Context, vendor: String, appName: String) {
+        ensureInitialized(context)
+        incrementMapInMemory(blockSourceMap, BlockSource.LEARNING_CANDIDATE.name)
+        incrementMapInMemory(vendorResponseMap, vendor)
         incrementMapInMemory(appResponseMap, appName)
         notifyUpdated()
         scheduleFlush(context)
@@ -201,6 +223,7 @@ object StatsRepository {
         putRankingMap(editor, KEY_APP_BLOCKED, appBlockedMap)
         putRankingMap(editor, KEY_APP_REQUEST, appRequestMap)
         putRankingMap(editor, KEY_APP_RESPONSE, appResponseMap)
+        putRankingMap(editor, KEY_BLOCK_SOURCE, blockSourceMap)
 
         editor.apply()
     }
@@ -269,6 +292,11 @@ object StatsRepository {
             RankingType.APP_RESPONSE -> appResponseMap
         }
         return rankingFromMap(map)
+    }
+
+    fun getBlockSourceRanking(context: Context): List<RankingEntry> {
+        ensureInitialized(context)
+        return rankingFromMap(blockSourceMap)
     }
 
     private fun incrementMapInMemory(map: ConcurrentHashMap<String, AtomicInteger>, name: String) {

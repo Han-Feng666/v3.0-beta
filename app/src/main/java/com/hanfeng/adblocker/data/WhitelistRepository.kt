@@ -105,6 +105,20 @@ object WhitelistRepository {
         return getLocalProxyTargetPackages(context, installedPackages)
     }
 
+    fun getMitmFullCaptureTargetPackages(context: Context): Set<String> {
+        return getCachedInstalledApps(context)
+            .asSequence()
+            .filterNot { it.isSystemApp }
+            .filter { app ->
+                RuleRepository.isAggressiveAdAppHint(app.label) ||
+                    RuleRepository.isAggressiveAdAppHint(app.packageName) ||
+                    RuleRepository.isCommunityAppHint(app.label) ||
+                    RuleRepository.isCommunityAppHint(app.packageName)
+            }
+            .map { it.packageName }
+            .toCollection(linkedSetOf())
+    }
+
     fun toggleCoexistPackage(context: Context, packageName: String, enabled: Boolean) {
         val set = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getStringSet(KEY_COEXIST_PACKAGES, emptySet())

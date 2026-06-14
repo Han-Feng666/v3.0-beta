@@ -129,7 +129,7 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         val runtime = NetworkKernel.snapshot(ctx)
         toggle.text = when {
             runtime.isRunning -> "停止拦截"
-            revokedByOtherVpn && enabled -> "VPN共存中"
+            revokedByOtherVpn && enabled -> "等待恢复"
             else -> "开启拦截"
         }
     }
@@ -147,11 +147,11 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         val shizukuMode = shizukuUiState.mode
         val workStatus = when {
             vpnRunning -> "运行中"
-            revokedByOtherVpn && adBlockEnabled -> "VPN共存中"
+            revokedByOtherVpn && adBlockEnabled -> "等待恢复"
             else -> "未开启"
         }
         val interceptMode = when {
-            revokedByOtherVpn -> "当前处于 VPN 共存中"
+            revokedByOtherVpn -> "VPN 被系统替换，正在自动恢复"
             !vpnRunning && !adBlockEnabled -> "未启用"
             httpDecryptEnabled && certificateInstalled -> "MITM+DNS 拦截"
             httpDecryptEnabled -> "DNS 拦截 (待装证书)"
