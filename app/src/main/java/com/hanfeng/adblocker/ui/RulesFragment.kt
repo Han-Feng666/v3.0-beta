@@ -50,6 +50,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -59,6 +60,8 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private companion object {
         const val LARGE_RULE_FILE_THRESHOLD_BYTES = 2L * 1024L * 1024L
     }
+
+    private class RuleFileTooLargeException : java.io.IOException("规则文件超过 2MB，将自动使用大文件模式导入")
 
     private var mainActivity: MainActivity? = null
     private var _binding: FragmentRulesBinding? = null
@@ -149,14 +152,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private fun String.lineCount(): Int = this.lineSequence().count()
 
     private val importLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val uri = result.data?.data
+        val uri = extractImportUri(result.data)
         safeContext()?.applicationContext?.let { ctx ->
-            LogRepository.append(ctx, "Rule import picker result: resultCode=${result.resultCode}, uri=$uri")
+            LogRepository.append(
+                ctx,
+                "Rule import picker result: resultCode=${result.resultCode}, uri=$uri, data=${result.data}, clipCount=${result.data?.clipData?.itemCount ?: 0}"
+            )
         }
         when {
-            result.resultCode == Activity.RESULT_OK && uri != null -> importRuleFile(uri)
+            uri != null -> importRuleFile(uri)
             result.resultCode == Activity.RESULT_OK -> showShortToast("文件选择器未返回文件路径，请换一个文件管理器重试")
-            else -> showShortToast("未选择规则文件")
+            else -> showShortToast("文件选择器已取消或未返回规则文件，请重新选择")
         }
     }
 
@@ -507,19 +513,53 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun launchImportRulePicker() {
         if (!isAdded) return
+        val ctx = safeContext() ?: return
         try {
-            LogRepository.append(safeContext()?.applicationContext ?: return, "Launching rule import picker")
-            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-                addCategory(Intent.CATEGORY_OPENABLE)
-                type = "*/*"
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            importLauncher.launch(intent)
+            LogRepository.append(ctx.applicationContext, "Launching rule import picker")
+            importLauncher.launch(createRuleImportIntent(Intent.ACTION_OPEN_DOCUMENT))
         } catch (e: Exception) {
-            val ctx = safeContext() ?: return
-            LogRepository.append(ctx, "Launch import picker failed: ${e.message ?: e.javaClass.simpleName}")
-            showShortToast("无法打开文件选择器，请确认系统文件管理器可用")
+            LogRepository.append(ctx, "Launch import picker with ACTION_OPEN_DOCUMENT failed: ${e.message ?: e.javaClass.simpleName}")
+            runCatching {
+                importLauncher.launch(createRuleImportIntent(Intent.ACTION_GET_CONTENT))
+            }.onFailure { fallbackError ->
+                LogRepository.append(ctx, "Launch import picker fallback failed: ${fallbackError.message ?: fallbackError.javaClass.simpleName}")
+                showShortToast("无法打开文件选择器，请确认系统文件管理器可用")
+            }
         }
+    }
+
+    private fun createRuleImportIntent(action: String): Intent {
+        return Intent(action).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (action == Intent.ACTION_OPEN_DOCUMENT) {
+                addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+            }
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf(
+                    "text/plain",
+                    "text/*",
+                    "application/octet-stream",
+                    "application/x-adblock-plus",
+                    "application/json",
+                    "*/*"
+                )
+            )
+        }
+    }
+
+    private fun extractImportUri(intent: Intent?): Uri? {
+        intent ?: return null
+        intent.data?.let { return it }
+        val clipData = intent.clipData ?: return null
+        for (index in 0 until clipData.itemCount) {
+            val uri = clipData.getItemAt(index)?.uri
+            if (uri != null) return uri
+        }
+        return null
     }
 
     private fun openRemoteRuleSourcesPage() {
@@ -1509,6 +1549,21 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 LogRepository.append(appContext, "Import rule file succeeded: content length=${content.length}")
                 importAndAnalyzeRuleContent(sourceLabel = uri.toString(), sourceUri = uri, content = content, progress = progress)
             }.onFailure { e ->
+                if (e is RuleFileTooLargeException) {
+                    runCatching {
+                        LogRepository.append(appContext, "Import rule file switched to streaming path after size limit: uri=$uri")
+                        importLargeRuleFileStreaming(sourceLabel = uri.toString(), sourceUri = uri, progress = progress)
+                    }.onFailure { streamingError ->
+                        dismissProgressDialog(progress)
+                        LogRepository.append(appContext, "Import rule file streaming fallback failed: ${streamingError.message ?: streamingError.javaClass.simpleName}")
+                        if (isAdded) {
+                            safeContext()?.let { ctx ->
+                                Toast.makeText(ctx, "导入规则失败：${streamingError.message ?: streamingError.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                    return@onFailure
+                }
                 dismissProgressDialog(progress)
                 LogRepository.append(appContext, "Import rule file failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
                 if (isAdded) {
@@ -1547,7 +1602,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     ) {
         val appContext = context?.applicationContext ?: return
         updateProgressDialog(progress, "正在以大文件模式导入规则...\n2MB 以上文件会跳过导入前分析")
-        val imported = withContext(Dispatchers.Default) {
+        val imported = withContext(Dispatchers.IO) {
             val stream = appContext.contentResolver.openInputStream(sourceUri)
                 ?: throw IllegalStateException("无法打开规则文件")
             RuleRepository.importRulesStreaming(appContext, stream, allowWhitelistDomains = true) { detail ->
@@ -1584,29 +1639,44 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 LogRepository.append(context, "Failed to take persistable URI permission: ${it.message ?: it.javaClass.simpleName}")
             }
             val contentResolver = context.contentResolver
-            val directContent = runCatching {
-                contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.also { content ->
+            val directContent = try {
+                contentResolver.openInputStream(uri)?.use(::readRuleTextLimited).also { content ->
                     LogRepository.append(context, "Read content via openInputStream: length=${content?.length ?: 0}")
                 }
-            }.getOrNull()
+            } catch (e: RuleFileTooLargeException) {
+                throw e
+            } catch (e: Exception) {
+                LogRepository.append(context, "Read content via openInputStream failed: ${e.message ?: e.javaClass.simpleName}")
+                null
+            }
             if (!directContent.isNullOrBlank()) {
                 LogRepository.append(context, "Successfully read content via openInputStream")
                 return@withContext directContent
             }
-            val textContent = runCatching {
+            val textContent = try {
                 readRuleContentFromTypedAsset(contentResolver, uri, "text/plain").also { content ->
                     LogRepository.append(context, "Read content via typedAsset text/plain: length=${content?.length ?: 0}")
                 }
-            }.getOrNull()
+            } catch (e: RuleFileTooLargeException) {
+                throw e
+            } catch (e: Exception) {
+                LogRepository.append(context, "Read content via typedAsset text/plain failed: ${e.message ?: e.javaClass.simpleName}")
+                null
+            }
             if (!textContent.isNullOrBlank()) {
                 LogRepository.append(context, "Successfully read content via typedAsset text/plain")
                 return@withContext textContent
             }
-            val anyContent = runCatching {
+            val anyContent = try {
                 readRuleContentFromTypedAsset(contentResolver, uri, "*/*").also { content ->
                     LogRepository.append(context, "Read content via typedAsset */*: length=${content?.length ?: 0}")
                 }
-            }.getOrNull()
+            } catch (e: RuleFileTooLargeException) {
+                throw e
+            } catch (e: Exception) {
+                LogRepository.append(context, "Read content via typedAsset */* failed: ${e.message ?: e.javaClass.simpleName}")
+                null
+            }
             if (!anyContent.isNullOrBlank()) {
                 LogRepository.append(context, "Successfully read content via typedAsset */*")
                 return@withContext anyContent
@@ -1617,9 +1687,27 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     }
 
     private fun readRuleContentFromTypedAsset(contentResolver: ContentResolver, uri: Uri, mimeType: String): String? {
-        return runCatching {
-            contentResolver.openTypedAssetFileDescriptor(uri, mimeType, null)?.createInputStream()?.bufferedReader()?.use { it.readText() }
-        }.getOrNull()
+        return contentResolver.openTypedAssetFileDescriptor(uri, mimeType, null)?.use { descriptor ->
+            readRuleTextLimited(descriptor.createInputStream())
+        }
+    }
+
+    private fun readRuleTextLimited(inputStream: InputStream): String {
+        return inputStream.bufferedReader().use { reader ->
+            val builder = StringBuilder()
+            val buffer = CharArray(16 * 1024)
+            var charsRead = 0L
+            while (true) {
+                val read = reader.read(buffer)
+                if (read < 0) break
+                charsRead += read
+                if (charsRead > LARGE_RULE_FILE_THRESHOLD_BYTES) {
+                    throw RuleFileTooLargeException()
+                }
+                builder.append(buffer, 0, read)
+            }
+            builder.toString()
+        }
     }
 
     private suspend fun importAndAnalyzeRuleContent(uri: Uri, content: String) {

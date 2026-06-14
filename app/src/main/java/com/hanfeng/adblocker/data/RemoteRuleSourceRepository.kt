@@ -14,8 +14,8 @@ import java.net.URL
 object RemoteRuleSourceRepository {
     private const val PREFS = "remote_rule_source_repo"
     private const val KEY_LAST_SYNC_AT = "last_sync_at"
-    private const val CONNECT_TIMEOUT_MILLIS = 180_000  // 180 秒（3 分钟，大规则文件需要更长时间建立连接）
-    private const val READ_TIMEOUT_MILLIS = 1_800_000  // 30 分钟（超大规则文件下载可能需要更长时间）
+    private const val CONNECT_TIMEOUT_MILLIS = 20_000
+    private const val READ_TIMEOUT_MILLIS = 120_000
     private const val SYNC_INTERVAL_MILLIS = 24 * 60 * 60 * 1000L
     private const val MAX_TEXT_DOWNLOAD_BYTES = 2 * 1024 * 1024
 
@@ -202,19 +202,7 @@ object RemoteRuleSourceRepository {
     }
 
     private fun downloadText(context: Context, url: String): String {
-        val connection = openRuleSourceConnection(context, url).apply {
-            connectTimeout = CONNECT_TIMEOUT_MILLIS
-            readTimeout = READ_TIMEOUT_MILLIS
-            requestMethod = "GET"
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            setRequestProperty("Accept", "text/plain,*/*;q=0.1")
-            setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-            setRequestProperty("Connection", "close")
-            setRequestProperty("Accept-Encoding", "identity")
-        }
-        
-        try {
+        return withRuleSourceConnectionRetry(context, url) { connection ->
             val responseCode = connection.responseCode
             
             if (responseCode !in 200..299) {
@@ -229,11 +217,7 @@ object RemoteRuleSourceRepository {
             if (content.isBlank()) {
                 throw IOException("规则源内容为空")
             }
-            return content
-        } catch (e: Exception) {
-            throw e
-        } finally {
-            connection.disconnect()
+            content
         }
     }
 
@@ -241,73 +225,98 @@ object RemoteRuleSourceRepository {
     private fun downloadToFile(context: Context, url: String, onProgress: ((bytesRead: Long, totalBytes: Long?) -> Unit)? = null): java.io.File {
         val tempFile = java.io.File.createTempFile("rulesync_", ".txt", context.cacheDir)
         
-        val connection = openRuleSourceConnection(context, url).apply {
+        try {
+            withRuleSourceConnectionRetry(context, url) { connection ->
+                val responseCode = connection.responseCode
+                
+                if (responseCode !in 200..299) {
+                    val errorText = runCatching {
+                        connection.errorStream?.readTextPrefix(200)
+                    }.getOrNull().orEmpty().ifBlank { "HTTP $responseCode" }
+                    throw IOException("规则源下载失败：HTTP $responseCode ${errorText.trim()}")
+                }
+                
+                val contentLength = connection.contentLengthLong.takeIf { it > 0L }
+                
+                // P0.5 优化：使用更大的缓冲区，减少 IO 操作
+                val buffer = ByteArray(256 * 1024) // 256KB 缓冲区
+                var bytesRead: Int
+                var totalBytes = 0L
+                var lastProgressAt = 0L
+                onProgress?.invoke(0L, contentLength)
+                tempFile.outputStream().use { outputStream ->
+                    connection.inputStream.use { inputStream ->
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            totalBytes += bytesRead
+                            val now = System.currentTimeMillis()
+                            if (now - lastProgressAt >= 500L || contentLength != null && totalBytes >= contentLength) {
+                                lastProgressAt = now
+                                onProgress?.invoke(totalBytes, contentLength)
+                            }
+                        }
+                    }
+                }
+                onProgress?.invoke(totalBytes, contentLength)
+                
+                if (totalBytes == 0L) {
+                    tempFile.delete()
+                    throw IOException("规则源内容为空")
+                }
+            }
+            return tempFile
+        } catch (e: Exception) {
+            tempFile.delete()
+            throw e
+        }
+    }
+
+    private fun openRuleSourceConnection(context: Context, url: String, preferNonVpnNetwork: Boolean = true): HttpURLConnection {
+        val parsedUrl = URL(url)
+        val connection = if (preferNonVpnNetwork) runCatching {
+            selectNonVpnNetwork(context)?.openConnection(parsedUrl) as? HttpURLConnection
+        }.getOrNull() ?: parsedUrl.openConnection() as HttpURLConnection else parsedUrl.openConnection() as HttpURLConnection
+        return connection.apply {
             connectTimeout = CONNECT_TIMEOUT_MILLIS
             readTimeout = READ_TIMEOUT_MILLIS
             requestMethod = "GET"
             instanceFollowRedirects = true
+            useCaches = false
             setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             setRequestProperty("Accept", "text/plain,*/*;q=0.1")
             setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
             setRequestProperty("Connection", "close")
             setRequestProperty("Accept-Encoding", "identity")
         }
-        
-        try {
-            val responseCode = connection.responseCode
-            
-            if (responseCode !in 200..299) {
-                val errorText = runCatching {
-                    connection.errorStream?.readTextPrefix(200)
-                }.getOrNull().orEmpty().ifBlank { "HTTP $responseCode" }
-                throw IOException("规则源下载失败：HTTP $responseCode ${errorText.trim()}")
-            }
-            
-            val contentLength = connection.contentLengthLong.takeIf { it > 0L }
-            
-            // P0.5 优化：使用更大的缓冲区，减少 IO 操作
-            val buffer = ByteArray(256 * 1024) // 256KB 缓冲区
-            var bytesRead: Int
-            var totalBytes = 0L
-            var lastProgressAt = 0L
-            onProgress?.invoke(0L, contentLength)
-            
-            connection.inputStream.use { inputStream ->
-                tempFile.outputStream().use { outputStream ->
-                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                        outputStream.write(buffer, 0, bytesRead)
-                        totalBytes += bytesRead
-                        val now = System.currentTimeMillis()
-                        if (now - lastProgressAt >= 500L || contentLength != null && totalBytes >= contentLength) {
-                            lastProgressAt = now
-                            onProgress?.invoke(totalBytes, contentLength)
-                        }
-                    }
-                    outputStream.flush()
-                }
-            }
-            onProgress?.invoke(totalBytes, contentLength)
-            
-            if (totalBytes == 0L) {
-                tempFile.delete()
-                throw IOException("规则源内容为空")
-            }
-            
-            return tempFile
-        } catch (e: Exception) {
-            tempFile.delete()
-            throw e
-        } finally {
-            connection.disconnect()
-        }
     }
 
-    private fun openRuleSourceConnection(context: Context, url: String): HttpURLConnection {
-        val parsedUrl = URL(url)
-        val connection = runCatching {
-            selectNonVpnNetwork(context)?.openConnection(parsedUrl) as? HttpURLConnection
-        }.getOrNull() ?: parsedUrl.openConnection() as HttpURLConnection
-        return connection
+    private fun <T> withRuleSourceConnectionRetry(context: Context, url: String, block: (HttpURLConnection) -> T): T {
+        var firstError: Throwable? = null
+        listOf(true, false).forEach { preferNonVpnNetwork ->
+            val connection = openRuleSourceConnection(context, url, preferNonVpnNetwork)
+            try {
+                return block(connection)
+            } catch (error: Throwable) {
+                firstError = error
+                val canRetryWithoutBoundNetwork = preferNonVpnNetwork && isNetworkBindPermissionError(error)
+                if (!canRetryWithoutBoundNetwork) throw error
+                LogRepository.append(
+                    context,
+                    "Rule source non-VPN network binding failed, retrying with default network: url=$url, error=${error.message ?: error.javaClass.simpleName}"
+                )
+            } finally {
+                connection.disconnect()
+            }
+        }
+        throw firstError ?: IOException("规则源连接失败")
+    }
+
+    private fun isNetworkBindPermissionError(error: Throwable): Boolean {
+        val message = error.message.orEmpty()
+        return message.contains("EPERM", ignoreCase = true) ||
+            message.contains("Operation not permitted", ignoreCase = true) ||
+            message.contains("Binding socket to network", ignoreCase = true) ||
+            error.cause?.let(::isNetworkBindPermissionError) == true
     }
 
     @Suppress("DEPRECATION")
