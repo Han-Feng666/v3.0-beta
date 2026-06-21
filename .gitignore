@@ -175,3 +175,4 @@ app/local.properties
 *.lz
 *.lzma
 *.iso
+${HOME}/
