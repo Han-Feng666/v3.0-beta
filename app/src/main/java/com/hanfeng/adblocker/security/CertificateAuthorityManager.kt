@@ -21,6 +21,7 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.OutputStream
 import java.math.BigInteger
 import java.security.KeyFactory
@@ -45,6 +46,7 @@ object CertificateAuthorityManager {
     private const val CERT_PUBLIC_FILE_NAME = "HanFeng.cer"
     private const val DOWNLOAD_SUBDIR = "HanFeng"
     private val legacyCertificateNames = setOf("HanFeng.cer")
+    private val legacyKeystoreNames = setOf("HanFeng-ca.p12")
     private val bcProvider by lazy(LazyThreadSafetyMode.NONE) { BouncyCastleProvider() }
     private val leafCertCache = ConcurrentHashMap<String, GeneratedLeafCertificate>(512, 0.75f, 16)
 
@@ -53,6 +55,7 @@ object CertificateAuthorityManager {
             val certDir = File(context.filesDir, CERT_DIR).apply { mkdirs() }
             val certFile = File(certDir, CERT_FILE_NAME)
             val publicCertFile = File(certDir, CERT_PUBLIC_FILE_NAME)
+            recoverCaFilesFromDownloadsIfNeeded(context, certFile, publicCertFile)
             val storedCertFileName = HttpsMitmRepository.getCertificateFileName(context)
             val storedKeystoreFileName = HttpsMitmRepository.getCaKeystoreFileName(context)
             val hasMatchingStoredMeta = storedCertFileName == CERT_PUBLIC_FILE_NAME && storedKeystoreFileName == CERT_FILE_NAME
@@ -61,8 +64,8 @@ object CertificateAuthorityManager {
                 val generated = generateCaCertificate()
                 storePkcs12(certFile, generated.keyPair, generated.certificate)
                 storePublicCertificate(publicCertFile, generated.certificate)
+                exportCaKeystoreToDownloads(context, certFile)
                 HttpsMitmRepository.clearCertificateExportPath(context)
-                // 证书已重新生成，标记需要用户重新安装
                 HttpsMitmRepository.markCertificateInstallRequested(context)
                 HttpsMitmRepository.clearCertificateInstalled(context)
             }
@@ -126,7 +129,9 @@ object CertificateAuthorityManager {
 
     fun ensureLeafCertificate(context: Context, hostName: String): Result<GeneratedLeafCertificate> {
         val normalizedHost = hostName.trim().lowercase()
-        require(normalizedHost.isNotBlank()) { "host is blank" }
+        if (normalizedHost.isBlank()) {
+            return Result.failure(IOException("host is blank"))
+        }
         leafCertCache[normalizedHost]?.let { return Result.success(it) }
         return runCatching {
             val certDir = File(context.filesDir, CERT_DIR).apply { mkdirs() }
@@ -216,17 +221,17 @@ object CertificateAuthorityManager {
         val certDir = File(context.filesDir, CERT_DIR)
         val caKeystoreName = HttpsMitmRepository.getCaKeystoreFileName(context) ?: CERT_FILE_NAME
         val caKeystoreFile = File(certDir, caKeystoreName)
-        check(caKeystoreFile.exists() && caKeystoreFile.length() > 0) {
-            "CA keystore file missing or empty: ${caKeystoreFile.absolutePath}"
+        if (!caKeystoreFile.exists() || caKeystoreFile.length() <= 0) {
+            throw IOException("CA keystore file missing or empty: ${caKeystoreFile.absolutePath}")
         }
         val keyStore = KeyStore.getInstance(KEYSTORE_TYPE)
         FileInputStream(caKeystoreFile).use { input ->
             keyStore.load(input, CERT_PASSWORD.toCharArray())
         }
         val privateKey = keyStore.getKey(CERT_ALIAS, CERT_PASSWORD.toCharArray()) as? PrivateKey
-            ?: error("CA keystore missing entry '$CERT_ALIAS'")
+            ?: throw IOException("CA keystore missing entry '$CERT_ALIAS'")
         val certificate = keyStore.getCertificate(CERT_ALIAS) as? X509Certificate
-            ?: error("CA keystore certificate missing for entry '$CERT_ALIAS'")
+            ?: throw IOException("CA keystore certificate missing for entry '$CERT_ALIAS'")
         return CaBundle(privateKey, certificate)
     }
 
@@ -264,6 +269,49 @@ object CertificateAuthorityManager {
                 cleanupFileNames = legacyCertificateNames
             )
         }.getOrNull()
+    }
+
+    private fun exportCaKeystoreToDownloads(context: Context, sourceFile: File): String? {
+        return runCatching {
+            writeToDownloadSubdir(
+                context = context,
+                fileName = CERT_FILE_NAME,
+                mimeType = "application/x-pkcs12",
+                bytes = sourceFile.readBytes(),
+                cleanupFileNames = legacyKeystoreNames
+            )
+        }.getOrNull()
+    }
+
+    private fun recoverCaFilesFromDownloadsIfNeeded(context: Context, certFile: File, publicCertFile: File) {
+        if (isValidCertificateFile(certFile) && isValidCertificateFile(publicCertFile)) return
+        val recoveredKeystore = recoverDownloadFile(context, CERT_FILE_NAME, certFile)
+        val recoveredPublicCert = recoverDownloadFile(context, "HanFeng.crt", publicCertFile)
+        if (recoveredKeystore || recoveredPublicCert) {
+            HttpsMitmRepository.saveCertificateMeta(context, CERT_ALIAS, CERT_PASSWORD, CERT_PUBLIC_FILE_NAME, CERT_FILE_NAME)
+        }
+    }
+
+    private fun recoverDownloadFile(context: Context, downloadName: String, targetFile: File): Boolean {
+        if (targetFile.exists() && targetFile.length() > 0) return true
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val relativePath = "Download/$DOWNLOAD_SUBDIR"
+                val targetUri = findExistingDownloadUris(context, downloadName, relativePath).firstOrNull() ?: return@runCatching false
+                context.contentResolver.openInputStream(targetUri)?.use { input ->
+                    FileOutputStream(targetFile).use { output -> input.copyTo(output) }
+                } ?: return@runCatching false
+                targetFile.length() > 0
+            } else {
+                val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val source = File(File(downloadDir, DOWNLOAD_SUBDIR), downloadName)
+                if (!source.exists() || source.length() <= 0) return@runCatching false
+                FileInputStream(source).use { input ->
+                    FileOutputStream(targetFile).use { output -> input.copyTo(output) }
+                }
+                targetFile.length() > 0
+            }
+        }.getOrDefault(false)
     }
 
     fun exportBinaryFileToDownloads(context: Context, fileName: String, mimeType: String, bytes: ByteArray, cleanupFileNames: Set<String> = emptySet()): String? {
@@ -311,7 +359,7 @@ object CertificateAuthorityManager {
                 )
                 ?: return "下载/$DOWNLOAD_SUBDIR/$fileName"
             val outputStream = resolver.openOutputStream(targetUri, "wt")
-                ?: error("Cannot open output stream for $fileName")
+                ?: throw IOException("Cannot open output stream for $fileName")
             outputStream.use { output ->
                 output.write(bytes)
             }

@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.view.View
 import android.widget.EditText
 import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
@@ -23,6 +24,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.HanFeng.R
 import com.HanFeng.data.AppSettingsRepository
+import com.HanFeng.data.FeatureSettingsRepository
+import com.HanFeng.core.network.RegexCache
 import com.HanFeng.data.HttpsMitmRepository
 import com.HanFeng.data.LogRepository
 import com.HanFeng.data.RuleRepositoryExport
@@ -42,6 +45,16 @@ class SettingsActivity : BaseActivity() {
 
     private lateinit var switchShizuku: Switch
     private lateinit var switchHideBackground: Switch
+    private lateinit var switchStealthMode: Switch
+    private lateinit var textStealthDesc: TextView
+    private lateinit var stealthSubLayout: LinearLayout
+    private lateinit var switchStealthStripParams: Switch
+    private lateinit var switchStealthHideReferer: Switch
+    private lateinit var switchStealthRemoveFingerprintHeaders: Switch
+    private lateinit var btnManageCustomTrackingParams: Button
+    private lateinit var textCustomTrackingParamsPreview: TextView
+    private lateinit var btnManageCustomTrackingHeaders: Button
+    private lateinit var textCustomTrackingHeadersPreview: TextView
     private lateinit var textShizukuStatus: TextView
     private lateinit var btnShizukuAdControl: Button
     private lateinit var btnCoexistSettings: Button
@@ -96,6 +109,16 @@ class SettingsActivity : BaseActivity() {
         settingsRoot = findViewById(R.id.settingsRoot)
         switchShizuku = findViewById(R.id.switchUseShizuku)
         switchHideBackground = findViewById(R.id.switchHideBackground)
+        switchStealthMode = findViewById(R.id.switchStealthMode)
+        textStealthDesc = findViewById(R.id.textStealthDesc)
+        stealthSubLayout = findViewById(R.id.stealthSubLayout)
+        switchStealthStripParams = findViewById(R.id.switchStealthStripParams)
+        switchStealthHideReferer = findViewById(R.id.switchStealthHideReferer)
+        switchStealthRemoveFingerprintHeaders = findViewById(R.id.switchStealthRemoveFingerprintHeaders)
+        btnManageCustomTrackingParams = findViewById(R.id.btnManageCustomTrackingParams)
+        textCustomTrackingParamsPreview = findViewById(R.id.textCustomTrackingParamsPreview)
+        btnManageCustomTrackingHeaders = findViewById(R.id.btnManageCustomTrackingHeaders)
+        textCustomTrackingHeadersPreview = findViewById(R.id.textCustomTrackingHeadersPreview)
         textShizukuStatus = findViewById(R.id.textShizukuStatus)
         btnShizukuAdControl = findViewById(R.id.btnShizukuAdControl)
         btnCoexistSettings = findViewById(R.id.btnCoexistSettings)
@@ -122,6 +145,11 @@ class SettingsActivity : BaseActivity() {
 
         switchShizuku.isChecked = AppSettingsRepository.isShizukuEnabled(this)
         switchHideBackground.isChecked = AppSettingsRepository.isHideBackgroundEnabled(this)
+        switchStealthMode.isChecked = FeatureSettingsRepository.isStealthModeEnabled(this)
+        stealthSubLayout.visibility = if (switchStealthMode.isChecked) View.VISIBLE else View.GONE
+        switchStealthStripParams.isChecked = FeatureSettingsRepository.isStealthStripTrackingParamsEnabled(this)
+        switchStealthHideReferer.isChecked = FeatureSettingsRepository.isStealthHideRefererEnabled(this)
+        switchStealthRemoveFingerprintHeaders.isChecked = FeatureSettingsRepository.isStealthRemoveFingerprintHeadersEnabled(this)
         updateShizukuActionState()
 
         switchShizuku.setOnCheckedChangeListener { _, isChecked ->
@@ -149,6 +177,26 @@ class SettingsActivity : BaseActivity() {
             applyHideBackgroundPolicy(false)
             showShortToast("隐藏后台设置已重置")
         }
+        switchStealthMode.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setStealthModeEnabled(this, isChecked)
+            stealthSubLayout.visibility = if (isChecked) View.VISIBLE else View.GONE
+        }
+        switchStealthStripParams.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setStealthStripTrackingParamsEnabled(this, isChecked)
+        }
+        switchStealthHideReferer.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setStealthHideRefererEnabled(this, isChecked)
+        }
+        switchStealthRemoveFingerprintHeaders.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setStealthRemoveFingerprintHeadersEnabled(this, isChecked)
+        }
+        btnManageCustomTrackingParams.setOnClickListener {
+            showCustomParamsDialog()
+        }
+        btnManageCustomTrackingHeaders.setOnClickListener {
+            showCustomHeadersDialog()
+        }
+        refreshCustomTrackingPreviews()
         btnShizukuAdControl.setOnClickListener {
             openShizukuAdControlCatalog()
         }
@@ -228,6 +276,7 @@ class SettingsActivity : BaseActivity() {
         super.onResume()
         syncShizukuSwitch()
         syncHideBackgroundSwitch()
+        syncStealthModeSwitch()
         updateShizukuActionState()
         refreshShizukuActionStateAsync(force = false)
         prewarmShizukuIfPossible()
@@ -307,6 +356,172 @@ class SettingsActivity : BaseActivity() {
             AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
             applyHideBackgroundPolicy(isChecked)
         }
+    }
+
+    private fun syncStealthModeSwitch() {
+        val enabled = FeatureSettingsRepository.isStealthModeEnabled(this)
+        stealthSubLayout.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (switchStealthMode.isChecked == enabled) {
+            syncStealthSubSwitches()
+            return
+        }
+        switchStealthMode.setOnCheckedChangeListener(null)
+        switchStealthMode.isChecked = enabled
+        switchStealthMode.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setStealthModeEnabled(this, isChecked)
+            stealthSubLayout.visibility = if (isChecked) View.VISIBLE else View.GONE
+        }
+        syncStealthSubSwitches()
+    }
+
+    private fun syncStealthSubSwitches() {
+        val stripParamsEnabled = FeatureSettingsRepository.isStealthStripTrackingParamsEnabled(this)
+        if (switchStealthStripParams.isChecked != stripParamsEnabled) {
+            switchStealthStripParams.setOnCheckedChangeListener(null)
+            switchStealthStripParams.isChecked = stripParamsEnabled
+            switchStealthStripParams.setOnCheckedChangeListener { _, isChecked ->
+                FeatureSettingsRepository.setStealthStripTrackingParamsEnabled(this, isChecked)
+            }
+        }
+        val hideRefererEnabled = FeatureSettingsRepository.isStealthHideRefererEnabled(this)
+        if (switchStealthHideReferer.isChecked != hideRefererEnabled) {
+            switchStealthHideReferer.setOnCheckedChangeListener(null)
+            switchStealthHideReferer.isChecked = hideRefererEnabled
+            switchStealthHideReferer.setOnCheckedChangeListener { _, isChecked ->
+                FeatureSettingsRepository.setStealthHideRefererEnabled(this, isChecked)
+            }
+        }
+        val removeHeadersEnabled = FeatureSettingsRepository.isStealthRemoveFingerprintHeadersEnabled(this)
+        if (switchStealthRemoveFingerprintHeaders.isChecked != removeHeadersEnabled) {
+            switchStealthRemoveFingerprintHeaders.setOnCheckedChangeListener(null)
+            switchStealthRemoveFingerprintHeaders.isChecked = removeHeadersEnabled
+            switchStealthRemoveFingerprintHeaders.setOnCheckedChangeListener { _, isChecked ->
+                FeatureSettingsRepository.setStealthRemoveFingerprintHeadersEnabled(this, isChecked)
+            }
+        }
+    }
+
+    private fun refreshCustomTrackingPreviews() {
+        val params = FeatureSettingsRepository.getCustomTrackingParams(this)
+        if (params.isNotEmpty()) {
+            textCustomTrackingParamsPreview.visibility = View.VISIBLE
+            textCustomTrackingParamsPreview.text = "当前自定义参数：${params.joinToString(", ")}"
+        } else {
+            textCustomTrackingParamsPreview.visibility = View.GONE
+        }
+        val headers = FeatureSettingsRepository.getCustomTrackingHeaders(this)
+        if (headers.isNotEmpty()) {
+            textCustomTrackingHeadersPreview.visibility = View.VISIBLE
+            textCustomTrackingHeadersPreview.text = "当前自定义头：${headers.joinToString(", ")}"
+        } else {
+            textCustomTrackingHeadersPreview.visibility = View.GONE
+        }
+    }
+
+    private fun showCustomParamsDialog() {
+        val currentParams = FeatureSettingsRepository.getCustomTrackingParams(this)
+        val items = currentParams.toMutableList()
+        val itemsArray = (items + "添加新参数...").toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("自定义追踪参数 ($items.size 个)")
+            .setItems(itemsArray) { _, which ->
+                if (which < items.size) {
+                    showEditCustomParamDialog(items[which])
+                } else {
+                    showAddCustomParamDialog()
+                }
+            }
+            .setNegativeButton("关闭", null)
+            .showSafely(this, "Show custom params dialog failed")
+    }
+
+    private fun showEditCustomParamDialog(param: String) {
+        AlertDialog.Builder(this)
+            .setTitle("编辑 / 删除: $param")
+            .setItems(arrayOf("删除此参数", "取消")) { _, which ->
+                if (which == 0) {
+                    FeatureSettingsRepository.removeCustomTrackingParam(this, param)
+                    refreshCustomTrackingPreviews()
+                    showShortToast("已移除: $param")
+                }
+            }
+            .showSafely(this, "Show edit custom param dialog failed")
+    }
+
+    private fun showAddCustomParamDialog() {
+        val input = EditText(this).apply {
+            hint = "输入追踪参数名，如: track_id"
+            setSingleLine()
+        }
+        AlertDialog.Builder(this)
+            .setTitle("添加自定义追踪参数")
+            .setView(input)
+            .setMessage("参数名仅使用小写字母、数字、下划线和连字符")
+            .setPositiveButton("添加") { _, _ ->
+                val text = input.text.toString().trim().lowercase()
+                if (text.isNotBlank() && text.matches(RegexCache.get("[a-z0-9_-]+"))) {
+                    FeatureSettingsRepository.addCustomTrackingParam(this, text)
+                    refreshCustomTrackingPreviews()
+                    showShortToast("已添加: $text")
+                } else {
+                    showShortToast("参数名格式无效")
+                }
+            }
+            .setNegativeButton("取消", null)
+            .showSafely(this, "Show add custom param dialog failed")
+    }
+
+    private fun showCustomHeadersDialog() {
+        val currentHeaders = FeatureSettingsRepository.getCustomTrackingHeaders(this)
+        val items = currentHeaders.toMutableList()
+        val itemsArray = (items + "添加新头...").toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("自定义追踪头 ($items.size 个)")
+            .setItems(itemsArray) { _, which ->
+                if (which < items.size) {
+                    showEditCustomHeaderDialog(items[which])
+                } else {
+                    showAddCustomHeaderDialog()
+                }
+            }
+            .setNegativeButton("关闭", null)
+            .showSafely(this, "Show custom headers dialog failed")
+    }
+
+    private fun showEditCustomHeaderDialog(header: String) {
+        AlertDialog.Builder(this)
+            .setTitle("编辑 / 删除: $header")
+            .setItems(arrayOf("删除此头", "取消")) { _, which ->
+                if (which == 0) {
+                    FeatureSettingsRepository.removeCustomTrackingHeader(this, header)
+                    refreshCustomTrackingPreviews()
+                    showShortToast("已移除: $header")
+                }
+            }
+            .showSafely(this, "Show edit custom header dialog failed")
+    }
+
+    private fun showAddCustomHeaderDialog() {
+        val input = EditText(this).apply {
+            hint = "输入请求头名，如: x-custom-tracker"
+            setSingleLine()
+        }
+        AlertDialog.Builder(this)
+            .setTitle("添加自定义追踪头")
+            .setView(input)
+            .setMessage("头名仅使用小写字母、数字、连字符")
+            .setPositiveButton("添加") { _, _ ->
+                val text = input.text.toString().trim().lowercase()
+                if (text.isNotBlank() && text.matches(RegexCache.get("[a-z0-9-]+"))) {
+                    FeatureSettingsRepository.addCustomTrackingHeader(this, text)
+                    refreshCustomTrackingPreviews()
+                    showShortToast("已添加: $text")
+                } else {
+                    showShortToast("头名格式无效")
+                }
+            }
+            .setNegativeButton("取消", null)
+            .showSafely(this, "Show add custom header dialog failed")
     }
 
     private fun updateShizukuActionState() {
@@ -540,7 +755,7 @@ class SettingsActivity : BaseActivity() {
                 .setTitle("暂无可治理项目")
                 .setMessage("当前没有可展示的治理目标。")
                 .setPositiveButton("我知道了", null)
-                .show()
+                .showSafely(this, "Show empty promo govern dialog failed")
             return
         }
         val labels = buildList {
@@ -558,7 +773,7 @@ class SettingsActivity : BaseActivity() {
                 }
             }
             .setNegativeButton("取消", null)
-            .show()
+            .showSafely(this, "Show promo govern target list dialog failed")
     }
 
     private fun openBatchGovernActionsForTargets(targets: List<PromoGovernTarget>) {
@@ -581,7 +796,7 @@ class SettingsActivity : BaseActivity() {
                 }
             }
             .setNegativeButton("取消", null)
-            .show()
+            .showSafely(this, "Show batch govern actions dialog failed")
     }
 
     private fun runBatchShizukuAdControl(targets: List<PromoGovernTarget>, mode: BatchAdControlMode) {

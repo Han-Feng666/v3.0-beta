@@ -1,13 +1,19 @@
 package com.HanFeng.data
 
 import android.content.Context
+import com.HanFeng.R
 import com.google.gson.Gson
+import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonWriter
 import com.google.gson.reflect.TypeToken
 import com.HanFeng.core.network.TrainingSampleExporter
 import com.HanFeng.model.BlockRule
 import com.HanFeng.model.RemoteRuleSourceConfig
 import com.HanFeng.model.RuleSource
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.InputStream
 import java.io.File
 import java.io.FileWriter
@@ -41,6 +47,10 @@ object RuleRepository {
     private const val SUSPICIOUS_SAMPLE_MAX_DECODE_ROUNDS = 2
     private const val RULES_FILE_NAME = "rules.json"
     private const val BUILTIN_AD_SEED_SOURCE_ID = "builtin-ad-seed"
+    private const val IMPORT_PARSE_BATCH_SIZE = 4_000
+    private const val LARGE_RULE_CACHE_THRESHOLD = 20_000
+    private val SIMPLE_MODIFIER_NAMES = setOf("important", "badfilter")
+    private val importScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // 白名单域名 - 这些域名被拦截会导致 APP 断网
     // 策略：只保护基础服务，不保护纯广告域名
     // 2026-06-06 优化：移除过度保护的泛域名，改为精确子域名保护
@@ -201,6 +211,7 @@ object RuleRepository {
     private val gson = Gson()
     private val timeFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
     private val cacheLock = Any()
+    private val fileWriteLock = Any()
     private val domainValidationRegex = Regex("[a-z0-9._-]+")
     private val alphanumericRegex = Regex("[^a-z0-9]")
     private val domainExtractRegex = Regex("([a-z0-9-]+(?:\\.[a-z0-9-]+)+)", RegexOption.IGNORE_CASE)
@@ -217,6 +228,7 @@ object RuleRepository {
     @Volatile private var cachedRuleCount: Int? = null
     @Volatile private var cachedBlockedDomains: Set<String>? = null
     @Volatile private var cachedRuleMap: Map<String, List<BlockRule>>? = null
+    @Volatile private var cachedSimpleDomainIndex: SimpleDomainIndex? = null
     @Volatile private var cachedRegexRules: List<BlockRule>? = null
     @Volatile private var cachedCosmeticRules: List<BlockRule>? = null
     @Volatile private var cachedIpCidrRules: List<BlockRule>? = null
@@ -229,7 +241,19 @@ object RuleRepository {
     @Volatile private var cachedKeywordRules: List<BlockRule>? = null
     @Volatile private var cachedWhitelistHits = ConcurrentHashMap<String, Boolean>()
     @Volatile private var cachedUnknownVendorSamples: Map<String, SuspiciousDomainRecord>? = null
+    @Volatile private var cachedUnknownVendorSamplesLoaded = false
+    // App-specific rule index: packageName → (domain → rules)
+    @Volatile private var cachedAppRuleIndex: Map<String, Map<String, List<BlockRule>>>? = null
+    // Universal rules (no appPackages): domain → rules
+    @Volatile private var cachedUniversalRuleMap: Map<String, List<BlockRule>>? = null
     @Volatile private var lastUnknownVendorSamplesPersistAt: Long = 0L
+
+    private data class SimpleDomainIndex(
+        val blocked: Set<String>,
+        val userOwnedBlocked: Set<String>,
+        val importantBlocked: Set<String>,
+        val exceptions: Set<String>
+    )
     private val adKeywords = listOf(
         "ad",
         "ads",
@@ -1521,10 +1545,22 @@ object RuleRepository {
         synchronized(cacheLock) {
             cachedRules?.let { return it }
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            val json = readRulesJson(context, prefs)
-            val type = object : TypeToken<List<BlockRule>>() {}.type
+            val file = rulesFile(context)
+            val loadedRules = try {
+                if (file.exists()) {
+                    readRulesFile(context, file)
+                } else {
+                    val json = readLegacyRulesJson(context, prefs)
+                    val type = object : TypeToken<List<BlockRule>>() {}.type
+                    gson.fromJson<List<BlockRule>>(json, type) ?: emptyList()
+                }
+            } catch (e: Exception) {
+                LogRepository.append(context, "RuleRepository.getRules load failed: ${e.message ?: e.javaClass.simpleName}")
+                cachedRules = emptyList()
+                return emptyList()
+            }
             var migrated = false
-            val rules = (gson.fromJson<List<BlockRule>>(json, type) ?: emptyList())
+            val rules = loadedRules
                 .map {
                     val stableId = it.id.trim().ifBlank {
                         migrated = true
@@ -1539,7 +1575,9 @@ object RuleRepository {
                 }
                 .sortedBy { it.domain }
             if (migrated) {
-                writeRulesFile(context, rules)
+                runCatching { writeRulesFile(context, rules) }.onFailure { e ->
+                    LogRepository.append(context, "RuleRepository.getRules migrate write failed: ${e.message ?: e.javaClass.simpleName}")
+                }
             }
             updateRuleCache(rules)
             return rules
@@ -1655,6 +1693,26 @@ object RuleRepository {
         saveRemoteRuleSources(context, filterRemoteRuleSources(context, normalizedSourceId))
     }
 
+    // 预置安全规则源 - 钓鱼/恶意域名拦截
+    private const val SECURITY_SOURCE_ID = "security-stevenblack"
+    private const val SECURITY_SOURCE_NAME = "StevenBlack 安全防护"
+    private const val SECURITY_SOURCE_URL = "https://cdn.jsdelivr.net/gh/StevenBlack/hosts@master/hosts"
+
+    fun ensureSecurityRuleSource(context: Context) {
+        val sources = getRemoteRuleSources(context)
+        if (sources.any { it.id == SECURITY_SOURCE_ID || it.url.equals(SECURITY_SOURCE_URL, ignoreCase = true) }) return
+        addRemoteRuleSource(
+            context,
+            RemoteRuleSourceConfig(
+                id = SECURITY_SOURCE_ID,
+                name = SECURITY_SOURCE_NAME,
+                url = SECURITY_SOURCE_URL,
+                enabled = true,
+                authorId = "stevenblack"
+            )
+        )
+    }
+
     fun isBuiltInRemoteRuleSource(sourceId: String): Boolean {
         return false
     }
@@ -1736,53 +1794,66 @@ object RuleRepository {
         val normalizedSourceId = normalizeRemoteSourceId(sourceId)
         onProgress?.invoke("正在读取现有规则...")
         val baseStart = System.currentTimeMillis()
-        val baseRules = buildRemoteSourceReplacementBaseRules(context, normalizedSourceId)
-        LogRepository.append(context, "replaceRulesForRemoteSourceStreaming [1/4]: base rules=${baseRules.size}, time=${System.currentTimeMillis() - baseStart}ms")
+        synchronized(fileWriteLock) {
+            val rewrite = beginStreamingRulesRewrite(context, excludeRemoteSourceId = normalizedSourceId)
+            LogRepository.append(context, "replaceRulesForRemoteSourceStreaming [1/4]: retained=${rewrite.ruleCount}, time=${System.currentTimeMillis() - baseStart}ms")
 
-        onProgress?.invoke("正在建立去重索引...")
-        val stateStart = System.currentTimeMillis()
-        val importState = buildImportedRuleState(baseRules)
-        LogRepository.append(context, "replaceRulesForRemoteSourceStreaming [2/4]: state keys=${importState.existingRuleKeys.size}, time=${System.currentTimeMillis() - stateStart}ms")
+            try {
+                onProgress?.invoke("正在解析规则文件...")
+                val parseStart = System.currentTimeMillis()
+                var addedCount = 0
+                var parsedBlockedCount = 0
+                var lineCount = 0
+                var parsedRuleCount = 0
+                var lastProgressAt = 0L
+                inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { rawLine ->
+                        lineCount += 1
+                        RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach { fragment ->
+                            val trimmed = fragment.trim()
+                            if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@forEach
+                            val simpleDomain = extractSimpleImportDomain(trimmed)
+                            if (simpleDomain != null && (allowWhitelistDomains || !isWhitelistedDomain(simpleDomain))) {
+                                parsedBlockedCount += 1
+                                parsedRuleCount += 1
+                                rewrite.writeSimpleRule(simpleDomain, RuleSource.IMPORTED, normalizedSourceId)
+                                addedCount += 1
+                            }
+                        }
+                        val now = System.currentTimeMillis()
+                        if (lineCount % 2000 == 0 || now - lastProgressAt >= 750L) {
+                            lastProgressAt = now
+                            onProgress?.invoke("正在解析并导入规则...\n已读取 ${lineCount} 行，识别 ${parsedRuleCount} 条，新增 ${addedCount} 条")
+                        }
+                    }
+                }
+                LogRepository.append(
+                    context,
+                    "replaceRulesForRemoteSourceStreaming [3/4]: fast parsed blocked=$parsedBlockedCount, added=$addedCount, time=${System.currentTimeMillis() - parseStart}ms"
+                )
 
-        try {
-            onProgress?.invoke("正在解析规则文件...")
-            val parseStart = System.currentTimeMillis()
-            val parsed = parseImportLinesStreaming(inputStream.bufferedReader().lineSequence())
-            LogRepository.append(
-                context,
-                "replaceRulesForRemoteSourceStreaming [3/4]: parsed blocked=${parsed.blockedRules.size}, exceptions=${parsed.exceptionRules.size}, badfilters=${parsed.badfilterRules.size}, time=${System.currentTimeMillis() - parseStart}ms"
-            )
+                onProgress?.invoke("正在保存规则到本地...")
+                val saveStart = System.currentTimeMillis()
+                val finalCount = finishStreamingRulesRewrite(context, rewrite)
+                LogRepository.append(context, "replaceRulesForRemoteSourceStreaming [4/4]: saved final=$finalCount, save time=${System.currentTimeMillis() - saveStart}ms")
 
-            onProgress?.invoke("正在整理规则并去重...")
-            val collectStart = System.currentTimeMillis()
-            val added = collectImportedBlockedRules(
-                context = context,
-                blockedRules = parsed.blockedRules,
-                existingRuleKeys = importState.existingRuleKeys,
-                source = RuleSource.IMPORTED,
-                allowWhitelistDomains = allowWhitelistDomains,
-                remoteSourceId = normalizedSourceId,
-                useVendorHints = false,
-                identityRemoteSourceId = normalizedSourceId
-            )
-            LogRepository.append(context, "replaceRulesForRemoteSourceStreaming [4/5]: collected added=${added.size}, time=${System.currentTimeMillis() - collectStart}ms")
-
-            onProgress?.invoke("正在保存规则到本地...")
-            val saveStart = System.currentTimeMillis()
-            saveImportedRules(context, baseRules + added, parsed.exceptionRules)
-            LogRepository.append(context, "replaceRulesForRemoteSourceStreaming [5/5]: saved final=${baseRules.size + added.size}, time=${System.currentTimeMillis() - saveStart}ms")
-
-            val totalTime = System.currentTimeMillis() - startTime
-            LogRepository.append(
-                context,
-                "replaceRulesForRemoteSourceStreaming: source=$sourceId, added=${added.size}, exceptions=${parsed.exceptionRules.size}, badfilters=${parsed.badfilterRules.size}, time=${totalTime}ms"
-            )
-            return added.size
-        } catch (e: Exception) {
-            LogRepository.append(context, "规则源解析失败：${e.message ?: e.javaClass.simpleName}")
-            throw e
-        } finally {
-            inputStream.close()
+                val totalTime = System.currentTimeMillis() - startTime
+                LogRepository.append(
+                    context,
+                    "replaceRulesForRemoteSourceStreaming: source=$sourceId, added=$addedCount, time=${totalTime}ms"
+                )
+                return addedCount
+            } catch (e: Exception) {
+                abortStreamingRulesRewrite(rewrite)
+                LogRepository.append(context, "规则源解析失败：${e.message ?: e.javaClass.simpleName}")
+                throw e
+            } catch (e: OutOfMemoryError) {
+                abortStreamingRulesRewrite(rewrite)
+                LogRepository.append(context, "规则源解析内存不足：${e.message ?: e.javaClass.simpleName}")
+                throw e
+            } finally {
+                inputStream.close()
+            }
         }
     }
 
@@ -1868,38 +1939,166 @@ object RuleRepository {
         onProgress: ((String) -> Unit)? = null
     ): Int {
         val startTime = System.currentTimeMillis()
-
-        onProgress?.invoke("正在解析规则文件...")
-        val parseOnlyStart = System.currentTimeMillis()
-        val parsed = inputStream.bufferedReader().use { reader ->
-            parseImportLinesStreaming(reader.lineSequence()) { lineCount, ruleCount ->
-                onProgress?.invoke("正在解析规则文件...\n已读取 ${lineCount} 行，识别 ${ruleCount} 条")
-            }
-        }
-        LogRepository.append(
-            context,
-            "ImportRulesStreaming [1/4]: parsed blocked=${parsed.blockedRules.size}, exceptions=${parsed.exceptionRules.size}, badfilter=${parsed.badfilterRules.size}, time=${System.currentTimeMillis() - parseOnlyStart}ms"
-        )
-
+        prepareForRuleImport(context, "local rule file streaming import")
         onProgress?.invoke("正在读取现有规则...")
         val currentStart = System.currentTimeMillis()
-        val current = getRules(context).toMutableList()
-        LogRepository.append(context, "ImportRulesStreaming [2/4]: current=${current.size}, time=${System.currentTimeMillis() - currentStart}ms")
+        synchronized(fileWriteLock) {
+            val rewrite = beginStreamingRulesRewrite(context, excludeRemoteSourceId = null)
+            LogRepository.append(context, "ImportRulesStreaming [1/4]: current=${rewrite.ruleCount}, time=${System.currentTimeMillis() - currentStart}ms")
 
-        onProgress?.invoke("正在整理规则并去重...")
-        val buildStart = System.currentTimeMillis()
-        val finalRules = buildImportedRules(context, current, parsed, source, allowWhitelistDomains)
-        LogRepository.append(context, "ImportRulesStreaming [3/4]: finalRules=${finalRules.size}, time=${System.currentTimeMillis() - buildStart}ms")
+            try {
+                onProgress?.invoke("正在解析并导入规则...")
+                val parseStart = System.currentTimeMillis()
+                var addedCount = 0
+                var parsedBlockedCount = 0
+                var lineCount = 0
+                var parsedRuleCount = 0
+                var lastProgressAt = 0L
+                inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { rawLine ->
+                        lineCount += 1
+                        RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach { fragment ->
+                            val trimmed = fragment.trim()
+                            if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@forEach
+                            val simpleDomain = extractSimpleImportDomain(trimmed)
+                            if (simpleDomain != null && (allowWhitelistDomains || !isWhitelistedDomain(simpleDomain))) {
+                                parsedBlockedCount += 1
+                                parsedRuleCount += 1
+                                rewrite.writeSimpleRule(simpleDomain, source, null)
+                                addedCount += 1
+                            }
+                        }
+                        val now = System.currentTimeMillis()
+                        if (lineCount % 2000 == 0 || now - lastProgressAt >= 750L) {
+                            lastProgressAt = now
+                            onProgress?.invoke("正在解析并导入规则...\n已读取 ${lineCount} 行，识别 ${parsedRuleCount} 条，新增 ${addedCount} 条")
+                        }
+                    }
+                }
+                LogRepository.append(context, "ImportRulesStreaming [2/4]: fast parsed blocked=$parsedBlockedCount, added=$addedCount, time=${System.currentTimeMillis() - parseStart}ms")
 
-        onProgress?.invoke("正在保存规则到本地...")
-        val saveStart = System.currentTimeMillis()
-        save(context, finalRules)
-        LogRepository.append(context, "ImportRulesStreaming [4/4]: save time=${System.currentTimeMillis() - saveStart}ms")
-        
-        val elapsed = System.currentTimeMillis() - startTime
-        LogRepository.append(context, "ImportRulesStreaming completed: finalRules=${finalRules.size} TOTAL time=${elapsed}ms")
-        
-        return finalRules.size
+                onProgress?.invoke("正在保存规则到本地...")
+                val saveStart = System.currentTimeMillis()
+                val finalCount = finishStreamingRulesRewrite(context, rewrite)
+                LogRepository.append(context, "ImportRulesStreaming [4/4]: final=$finalCount, save time=${System.currentTimeMillis() - saveStart}ms")
+
+                val elapsed = System.currentTimeMillis() - startTime
+                LogRepository.append(context, "ImportRulesStreaming completed: finalRules=$finalCount, added=$addedCount TOTAL time=${elapsed}ms")
+
+                return addedCount
+            } catch (e: Exception) {
+                abortStreamingRulesRewrite(rewrite)
+                throw e
+            } catch (e: OutOfMemoryError) {
+                abortStreamingRulesRewrite(rewrite)
+                throw e
+            } finally {
+                inputStream.close()
+            }
+        }
+    }
+
+    fun scheduleBackgroundAdvancedImport(
+        context: Context,
+        sourceLabel: String,
+        source: RuleSource = RuleSource.IMPORTED,
+        remoteSourceId: String? = null,
+        allowWhitelistDomains: Boolean = false,
+        deleteFileWhenDone: File? = null,
+        openInputStream: () -> InputStream?
+    ) {
+        val appContext = context.applicationContext
+        importScope.launch {
+            val startTime = System.currentTimeMillis()
+            runCatching {
+                val stream = openInputStream() ?: throw IllegalStateException("无法重新打开规则内容")
+                stream.use { input ->
+                    importAdvancedRulesInBackground(
+                        context = appContext,
+                        inputStream = input,
+                        source = source,
+                        remoteSourceId = remoteSourceId,
+                        allowWhitelistDomains = allowWhitelistDomains
+                    )
+                }
+            }.onSuccess { added ->
+                LogRepository.append(
+                    appContext,
+                    "Background advanced rule import completed: source=$sourceLabel, added=$added, time=${System.currentTimeMillis() - startTime}ms"
+                )
+            }.onFailure { error ->
+                LogRepository.append(
+                    appContext,
+                    "Background advanced rule import failed: source=$sourceLabel, error=${error.message ?: error.javaClass.simpleName}, time=${System.currentTimeMillis() - startTime}ms"
+                )
+            }
+            deleteFileWhenDone?.let { file -> runCatching { file.delete() } }
+        }
+    }
+
+    private fun importAdvancedRulesInBackground(
+        context: Context,
+        inputStream: InputStream,
+        source: RuleSource,
+        remoteSourceId: String?,
+        allowWhitelistDomains: Boolean
+    ): Int {
+        var addedCount = 0
+        var parsedCount = 0
+        var lineCount = 0
+        var lineContext = RuleParsingSupport.LineContext()
+        var lastLogAt = System.currentTimeMillis()
+
+        synchronized(fileWriteLock) {
+            val rewrite = beginStreamingRulesRewrite(context, excludeRemoteSourceId = null)
+            try {
+                inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { rawLine ->
+                        lineCount += 1
+                        RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach { fragment ->
+                            val trimmed = fragment.trim()
+                            if (trimmed.startsWith("#pkg=", ignoreCase = true)) {
+                                lineContext = RuleParsingSupport.parseRuleLineContext(trimmed)
+                                return@forEach
+                            }
+                            if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@forEach
+                            if (extractSimpleImportDomain(trimmed) != null) return@forEach
+
+                            val parsedLineRules = parseRuleLine(fragment, lineContext).ifEmpty {
+                                listOfNotNull(parseUnsupportedImportRule(fragment, lineContext))
+                            }
+                            parsedLineRules.forEach { parsedRule ->
+                                if (parsedRule.isBadfilter) return@forEach
+                                if (!allowWhitelistDomains && !parsedRule.isException && isWhitelistedDomain(parsedRule.domain)) return@forEach
+                                rewrite.writeRule(buildBlockRuleFromParsedRule(
+                                    context = context,
+                                    parsedRule = parsedRule,
+                                    source = source,
+                                    remoteSourceId = remoteSourceId,
+                                    useVendorHints = false
+                                ))
+                                parsedCount += 1
+                                addedCount += 1
+                            }
+                        }
+                        val now = System.currentTimeMillis()
+                        if (lineCount % 5000 == 0 || now - lastLogAt >= 5000L) {
+                            lastLogAt = now
+                            LogRepository.append(context, "Background advanced rule import progress: added=$addedCount, parsed=$parsedCount, lines=$lineCount, memory=${runtimeMemorySnapshot()}")
+                        }
+                    }
+                }
+                val finalCount = finishStreamingRulesRewrite(context, rewrite)
+                LogRepository.append(context, "Background advanced rule import completed: added=$addedCount, parsed=$parsedCount, lines=$lineCount, final=$finalCount, memory=${runtimeMemorySnapshot()}")
+                return addedCount
+            } catch (e: Exception) {
+                abortStreamingRulesRewrite(rewrite)
+                throw e
+            } catch (e: OutOfMemoryError) {
+                abortStreamingRulesRewrite(rewrite)
+                throw e
+            }
+        }
     }
     
     // 检测可能影响正常网络功能的规则（精准识别，只提醒真正的正常服务域名）
@@ -2047,7 +2246,7 @@ object RuleRepository {
 
     private data class ImportedRuleCollections(
         val mergedRules: List<BlockRule>,
-        val exceptionRules: List<ParsedRule>
+        val exceptionRules: Collection<ParsedRule>
     )
 
     private fun buildImportedRuleState(current: List<BlockRule>): ImportedRuleState {
@@ -2055,6 +2254,66 @@ object RuleRepository {
             currentByDomain = buildCurrentRuleDomainMap(current),
             existingRuleKeys = current.mapTo(linkedSetOf()) { buildRuleIdentityKey(it) }
         )
+    }
+
+    private fun buildSimpleRuleDomainSet(rules: List<BlockRule>): MutableSet<String> {
+        return rules.asSequence()
+            .filter { it.regexPattern == null && it.cosmeticSelector == null && it.ipCidr == null }
+            .mapTo(linkedSetOf()) { it.domain }
+    }
+
+    private fun buildCompactImportedRule(domain: String, source: RuleSource, remoteSourceId: String?): BlockRule {
+        return BlockRule(
+            id = UUID.randomUUID().toString(),
+            domain = domain,
+            vendor = DEFAULT_VENDOR,
+            source = source,
+            remoteSourceId = remoteSourceId
+        )
+    }
+
+    private fun extractSimpleImportDomain(line: String): String? {
+        val normalizedLine = RuleParsingSupport.stripYamlListPrefix(RuleParsingSupport.unwrapRuleWrapper(line)).trim()
+        if (normalizedLine.isBlank()) return null
+        if (normalizedLine.startsWith("@@") || normalizedLine.contains("##") || normalizedLine.contains("#@#")) return null
+        if (normalizedLine.contains('$')) return null
+        val directDomainLine = normalizedLine
+
+        if (directDomainLine.startsWith("||")) {
+            val domainPart = directDomainLine.removePrefix("||")
+                .substringBefore('^')
+                .substringBefore('/')
+                .trim()
+            return sanitizeDomain(normalizeDomainToken(domainPart))
+        }
+
+        val parts = directDomainLine.split(splitWhitespaceRegex).filter { it.isNotBlank() }
+        if (parts.size >= 2) {
+            val ip = parts[0]
+            if (ip == "0.0.0.0" || ip == "127.0.0.1" || ip == "::" || ip == "::1") {
+                return sanitizeDomain(normalizeDomainToken(parts[1]))
+            }
+        }
+
+        listOf("address=/", "server=/", "local=/").firstOrNull { prefix ->
+            directDomainLine.startsWith(prefix, ignoreCase = true)
+        }?.let { prefix ->
+            return sanitizeDomain(normalizeDomainToken(directDomainLine.substring(prefix.length).substringBefore('/').trim()))
+        }
+
+        if (directDomainLine.startsWith("bogus-nxdomain=", ignoreCase = true)) {
+            return sanitizeDomain(normalizeDomainToken(directDomainLine.substringAfter('=').trim()))
+        }
+
+        val commaParts = directDomainLine.split(',').map { it.trim() }
+        if (commaParts.size >= 2) {
+            val type = commaParts[0].uppercase(Locale.US)
+            if (type in setOf("DOMAIN", "DOMAIN-SUFFIX", "HOST", "HOST-SUFFIX")) {
+                return sanitizeDomain(normalizeDomainToken(commaParts[1]))
+            }
+        }
+
+        return sanitizeDomain(normalizeDomainToken(directDomainLine))
     }
 
     private fun addNormalizedRules(
@@ -2115,7 +2374,7 @@ object RuleRepository {
 
     private fun collectImportedBlockedRules(
         context: Context,
-        blockedRules: List<ParsedRule>,
+        blockedRules: Collection<ParsedRule>,
         existingRuleKeys: MutableSet<String>,
         source: RuleSource,
         allowWhitelistDomains: Boolean,
@@ -2142,7 +2401,7 @@ object RuleRepository {
     private fun saveImportedRules(
         context: Context,
         rules: List<BlockRule>,
-        exceptionRules: List<ParsedRule>
+        exceptionRules: Collection<ParsedRule>
     ) {
         // 优化：跳过排序提升性能（规则顺序不影响匹配）
         // 仅当规则数量较少时才排序，减少 CPU 开销
@@ -2164,7 +2423,7 @@ object RuleRepository {
 
     private fun applyBadfilterScopes(
         currentByDomain: MutableMap<String, BlockRule>,
-        badfilterRules: List<ParsedRule>
+        badfilterRules: Collection<ParsedRule>
     ) {
         badfilterRules.forEach { badfilter ->
             val existing = currentByDomain[badfilter.domain] ?: return@forEach
@@ -2177,7 +2436,7 @@ object RuleRepository {
         current: MutableList<BlockRule>,
         currentByDomain: MutableMap<String, BlockRule>,
         existingRuleKeys: MutableSet<String>,
-        blockedRules: List<ParsedRule>,
+        blockedRules: Collection<ParsedRule>,
         source: RuleSource,
         allowWhitelistDomains: Boolean
     ) {
@@ -2209,7 +2468,7 @@ object RuleRepository {
 
     private fun applyExceptionScopes(
         currentByDomain: MutableMap<String, BlockRule>,
-        exceptionRules: List<ParsedRule>
+        exceptionRules: Collection<ParsedRule>
     ) {
         if (exceptionRules.isEmpty() || currentByDomain.isEmpty()) return
         val exceptionsByDomain = exceptionRules.groupBy { it.domain }
@@ -2248,7 +2507,7 @@ object RuleRepository {
     private fun buildImportedRuleCollections(
         current: List<BlockRule>,
         currentByDomain: MutableMap<String, BlockRule>,
-        exceptionRules: List<ParsedRule>
+        exceptionRules: Collection<ParsedRule>
     ): ImportedRuleCollections {
         return ImportedRuleCollections(
             mergedRules = mergeImportedRuleCollections(current, currentByDomain),
@@ -2285,7 +2544,7 @@ object RuleRepository {
     )
 
     private fun forEachImportableBlockedRule(
-        blockedRules: List<ParsedRule>,
+        blockedRules: Collection<ParsedRule>,
         allowWhitelistDomains: Boolean,
         action: (ParsedRule) -> Unit
     ) {
@@ -2628,9 +2887,18 @@ object RuleRepository {
         sourcePort: Int? = null
     ): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
-        val ruleMap = getRuleMap(context)
-        val matchingRules = buildDomainCandidates(normalized)
-            .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
+        val candidates = buildDomainCandidates(normalized).toList()
+        val simpleIndex = getSimpleDomainIndex(context)
+        val simpleImportantBlock = candidates.any { it in simpleIndex.importantBlocked }
+        if (simpleImportantBlock) return true
+        val simpleUserOwnedBlock = candidates.any { it in simpleIndex.userOwnedBlocked }
+        if (isCoreTrafficProtectedDomain(normalized) && !simpleUserOwnedBlock) {
+            val hasSimpleOnly = candidates.any { it in simpleIndex.blocked || it in simpleIndex.exceptions }
+            if (hasSimpleOnly && getRuleMap(context).isEmpty() && getRegexRules(context).isEmpty() && getKeywordRules(context).isEmpty()) return false
+        }
+        getRuleMap(context)  // triggers buildAppRuleIndex
+        val matchingRules = candidates.asSequence()
+            .flatMap { candidate -> getFilteredRulesForApp(context, candidate, appName).asSequence() }
             .filter {
                 it.source != RuleSource.UNSUPPORTED &&
                 ruleMatches(it, qType, appName) &&
@@ -2639,38 +2907,39 @@ object RuleRepository {
             }
             .toList()
         val lowerDomain = normalized.lowercase()
-        val hasImportantBlock = matchingRules.any(::isImportantBlockingRule) ||
-            getRegexRules(context).any { rule ->
-                isImportantBlockingRule(rule) && matchesRegexRule(rule, normalized)
-            } ||
-            getKeywordRules(context).any { rule ->
-                if (!isImportantBlockingRule(rule)) return@any false
-                val keyword = rule.keywordPattern?.lowercase() ?: return@any false
-                lowerDomain.contains(keyword)
-            }
+
+        // 合并正则规则扫描：一次遍历得出 important / userOwned / general 三类结果
+        var regexImportant = false
+        var regexUserOwned = false
+        var regexGeneral = false
+        for (rule in getFilteredRegexRules(context, appName)) {
+            if (rule.source == RuleSource.UNSUPPORTED) continue
+            if (!matchesRegexRule(rule, normalized)) continue
+            if (isImportantBlockingRule(rule)) { regexImportant = true; break }
+            if (isUserOwnedBlockingRule(rule)) regexUserOwned = true
+            if (!rule.exceptionRule) regexGeneral = true
+        }
+
+        // 合并关键词规则扫描：一次遍历得出 important / userOwned / general 三类结果
+        var keywordImportant = false
+        var keywordUserOwned = false
+        var keywordGeneral = false
+        for (rule in getFilteredKeywordRules(context, appName)) {
+            val keyword = rule.keywordPattern?.lowercase() ?: continue
+            if (!lowerDomain.contains(keyword)) continue
+            if (rule.source == RuleSource.UNSUPPORTED) continue
+            if (isImportantBlockingRule(rule)) { keywordImportant = true; break }
+            if (isUserOwnedBlockingRule(rule)) keywordUserOwned = true
+            if (!rule.exceptionRule) keywordGeneral = true
+        }
+
+        val hasImportantBlock = simpleImportantBlock || matchingRules.any(::isImportantBlockingRule) || regexImportant || keywordImportant
         if (hasImportantBlock) return true
-        val hasUserOwnedBlock = matchingRules.any(::isUserOwnedBlockingRule) ||
-            getRegexRules(context).any { rule ->
-                isUserOwnedBlockingRule(rule) && matchesRegexRule(rule, normalized)
-            } ||
-            getKeywordRules(context).any { rule ->
-                if (!isUserOwnedBlockingRule(rule)) return@any false
-                val keyword = rule.keywordPattern?.lowercase() ?: return@any false
-                lowerDomain.contains(keyword)
-            }
+        val hasUserOwnedBlock = simpleUserOwnedBlock || matchingRules.any(::isUserOwnedBlockingRule) || regexUserOwned || keywordUserOwned
         if (isCoreTrafficProtectedDomain(normalized) && !hasUserOwnedBlock) return false
-        if (!hasUserOwnedBlock && matchingRules.any { it.exceptionRule }) return false
+        if (!hasUserOwnedBlock && (candidates.any { it in simpleIndex.exceptions } || matchingRules.any { it.exceptionRule })) return false
         if (hasUserOwnedBlock) return true
-        val matched = matchingRules.any { !it.exceptionRule } ||
-            getRegexRules(context).any { rule ->
-                if (rule.exceptionRule) return@any false
-                matchesRegexRule(rule, normalized)
-            } ||
-            getKeywordRules(context).any { rule ->
-                if (rule.exceptionRule) return@any false
-                val keyword = rule.keywordPattern?.lowercase() ?: return@any false
-                lowerDomain.contains(keyword)
-            }
+        val matched = candidates.any { it in simpleIndex.blocked } || matchingRules.any { !it.exceptionRule } || regexGeneral || keywordGeneral
         if (matched) return true
         if (isWhitelistedDomain(normalized)) return false
         return false
@@ -2679,28 +2948,36 @@ object RuleRepository {
     // 性能优化：快速拦截检查（跳过关键词规则，仅匹配精确规则和正则规则）
     fun isBlockedFast(context: Context, domain: String, qType: Int? = null): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
-        val ruleMap = getRuleMap(context)
-        val matchingRules = buildDomainCandidates(normalized)
-            .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
+        val candidates = buildDomainCandidates(normalized).toList()
+        val simpleIndex = getSimpleDomainIndex(context)
+        val simpleImportantBlock = candidates.any { it in simpleIndex.importantBlocked }
+        if (simpleImportantBlock) return true
+        val simpleUserOwnedBlock = candidates.any { it in simpleIndex.userOwnedBlocked }
+        getRuleMap(context)  // triggers buildAppRuleIndex
+        val matchingRules = candidates.asSequence()
+            .flatMap { candidate -> getFilteredRulesForApp(context, candidate, null).asSequence() }
             .filter { it.source != RuleSource.UNSUPPORTED && ruleMatches(it, qType, null) && it.destinationPorts.isEmpty() && it.sourcePorts.isEmpty() }
             .toList()
-        val hasUserOwnedBlock = matchingRules.any(::isUserOwnedBlockingRule) ||
-            getRegexRules(context).any { rule ->
-                isUserOwnedBlockingRule(rule) && matchesRegexRule(rule, normalized)
-            }
-        val hasImportantBlock = matchingRules.any(::isImportantBlockingRule) ||
-            getRegexRules(context).any { rule ->
-                isImportantBlockingRule(rule) && matchesRegexRule(rule, normalized)
-            }
+
+        // 合并正则规则扫描：一次遍历得出三类结果
+        var regexImportant = false
+        var regexUserOwned = false
+        var regexGeneral = false
+        for (rule in getRegexRules(context)) {
+            if (rule.source == RuleSource.UNSUPPORTED) continue
+            if (!matchesRegexRule(rule, normalized)) continue
+            if (isImportantBlockingRule(rule)) { regexImportant = true; break }
+            if (isUserOwnedBlockingRule(rule)) regexUserOwned = true
+            if (!rule.exceptionRule) regexGeneral = true
+        }
+
+        val hasUserOwnedBlock = simpleUserOwnedBlock || matchingRules.any(::isUserOwnedBlockingRule) || regexUserOwned
+        val hasImportantBlock = simpleImportantBlock || matchingRules.any(::isImportantBlockingRule) || regexImportant
         if (hasImportantBlock) return true
         if (isCoreTrafficProtectedDomain(normalized) && !hasUserOwnedBlock) return false
-        if (!hasUserOwnedBlock && matchingRules.any { it.exceptionRule }) return false
+        if (!hasUserOwnedBlock && (candidates.any { it in simpleIndex.exceptions } || matchingRules.any { it.exceptionRule })) return false
         if (hasUserOwnedBlock) return true
-        val matched = matchingRules.any { !it.exceptionRule } ||
-            getRegexRules(context).any { rule ->
-                if (rule.exceptionRule) return@any false
-                matchesRegexRule(rule, normalized)
-            }
+        val matched = candidates.any { it in simpleIndex.blocked } || matchingRules.any { !it.exceptionRule } || regexGeneral
         if (matched) return true
         if (isWhitelistedDomain(normalized)) return false
         return false
@@ -2717,12 +2994,17 @@ object RuleRepository {
         requestType: String? = null
     ): Boolean {
         val normalizedHost = sanitizeDomain(host) ?: return false
-        val ruleMap = getRuleMap(context)
+        val candidates = buildDomainCandidates(normalizedHost).toList()
+        val simpleIndex = getSimpleDomainIndex(context)
+        val simpleImportantBlock = candidates.any { it in simpleIndex.importantBlocked }
+        if (simpleImportantBlock) return true
+        val simpleUserOwnedBlock = candidates.any { it in simpleIndex.userOwnedBlocked }
+        getRuleMap(context)  // triggers buildAppRuleIndex
         val fullUrl = "$host$path".lowercase()
         val effectiveRequestType = requestType?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
             ?: inferRequestTypeFromPath(path)
-        val matchingRules = buildDomainCandidates(normalizedHost)
-            .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
+        val matchingRules = candidates.asSequence()
+            .flatMap { candidate -> getFilteredRulesForApp(context, candidate, appName).asSequence() }
             .filter { rule ->
                 if (rule.source == RuleSource.UNSUPPORTED) return@filter false
                 if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@filter false
@@ -2740,14 +3022,14 @@ object RuleRepository {
                 rule.appPackages.isEmpty() || matchesAppPackage(rule.appPackages, appName)
             }
             .toList()
-        val hasUserOwnedBlock = matchingRules.any(::isUserOwnedBlockingRule) || getRegexRules(context).any { rule ->
+        val hasUserOwnedBlock = simpleUserOwnedBlock || matchingRules.any(::isUserOwnedBlockingRule) || getFilteredRegexRules(context, appName).any { rule ->
             if (!isUserOwnedBlockingRule(rule)) return@any false
             if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
             if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
             if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@any false
             matchesRegexRule(rule, fullUrl)
         }
-        val hasImportantBlock = matchingRules.any(::isImportantBlockingRule) || getRegexRules(context).any { rule ->
+        val hasImportantBlock = simpleImportantBlock || matchingRules.any(::isImportantBlockingRule) || getFilteredRegexRules(context, appName).any { rule ->
             if (!isImportantBlockingRule(rule)) return@any false
             if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
             if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
@@ -2756,7 +3038,7 @@ object RuleRepository {
         }
         if (hasImportantBlock) return true
         if (isCoreTrafficProtectedDomain(normalizedHost) && !hasUserOwnedBlock) return false
-        val hasExceptionMatch = matchingRules.any { it.exceptionRule } || getRegexRules(context).any { rule ->
+        val hasExceptionMatch = candidates.any { it in simpleIndex.exceptions } || matchingRules.any { it.exceptionRule } || getFilteredRegexRules(context, appName).any { rule ->
             if (rule.source == RuleSource.UNSUPPORTED) return@any false
             if (!rule.exceptionRule) return@any false
             if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
@@ -2766,7 +3048,7 @@ object RuleRepository {
         }
         if (!hasUserOwnedBlock && hasExceptionMatch) return false
         if (hasUserOwnedBlock) return true
-        val matched = matchingRules.any { !it.exceptionRule } || getRegexRules(context).any { rule ->
+        val matched = candidates.any { it in simpleIndex.blocked } || matchingRules.any { !it.exceptionRule } || getFilteredRegexRules(context, appName).any { rule ->
             if (rule.source == RuleSource.UNSUPPORTED) return@any false
             if (rule.exceptionRule) return@any false
             if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
@@ -2804,11 +3086,13 @@ object RuleRepository {
     ): BlockRule? {
         val normalizedIp = sanitizeIpLiteral(ip) ?: return null
         val address = runCatching { InetAddress.getByName(normalizedIp) }.getOrNull() ?: return null
-        return (cachedIpCidrRules ?: getRules(context).filter { !it.ipCidr.isNullOrBlank() })
+        val ipRules = cachedIpCidrRules ?: getRules(context).filter { !it.ipCidr.isNullOrBlank() }.also { cachedIpCidrRules = it }
+        val pkg = extractPackageName(appName)
+        return ipRules
             .firstOrNull { rule ->
                 rule.source != RuleSource.UNSUPPORTED &&
                     !rule.exceptionRule &&
-                    matchesAppPackage(rule.appPackages, appName) &&
+                    (rule.appPackages.isEmpty() || (pkg != null && pkg in rule.appPackages)) &&
                     matchesPortScope(rule.destinationPorts, destinationPort) &&
                     matchesPortScope(rule.sourcePorts, sourcePort) &&
                     matchesIpCidr(address, rule.ipCidr)
@@ -2822,11 +3106,15 @@ object RuleRepository {
         sourcePort: Int? = null
     ): BlockRule? {
         if (destinationPort == null && sourcePort == null) return null
-        return (cachedPortOnlyRules ?: getRules(context).filter { it.domain == "*" && it.ipCidr.isNullOrBlank() })
+        val portRules = cachedPortOnlyRules ?: getRules(context)
+            .filter { it.domain == "*" && it.ipCidr.isNullOrBlank() }
+            .also { cachedPortOnlyRules = it }
+        val pkg = extractPackageName(appName)
+        return portRules
             .firstOrNull { rule ->
                 rule.source != RuleSource.UNSUPPORTED &&
                     !rule.exceptionRule &&
-                    matchesAppPackage(rule.appPackages, appName) &&
+                    (rule.appPackages.isEmpty() || (pkg != null && pkg in rule.appPackages)) &&
                     matchesPortScope(rule.destinationPorts, destinationPort) &&
                     matchesPortScope(rule.sourcePorts, sourcePort)
             }
@@ -2834,14 +3122,16 @@ object RuleRepository {
 
     fun hasIpRules(context: Context): Boolean {
         cachedIpCidrRules?.let { return it.isNotEmpty() }
-        getRules(context)
-        return cachedIpCidrRules?.isNotEmpty() == true
+        val rules = getRules(context).filter { !it.ipCidr.isNullOrBlank() }
+        cachedIpCidrRules = rules
+        return rules.isNotEmpty()
     }
 
     fun hasPortOnlyRules(context: Context): Boolean {
         cachedPortOnlyRules?.let { return it.isNotEmpty() }
-        getRules(context)
-        return cachedPortOnlyRules?.isNotEmpty() == true
+        val rules = getRules(context).filter { it.domain == "*" && it.ipCidr.isNullOrBlank() }
+        cachedPortOnlyRules = rules
+        return rules.isNotEmpty()
     }
     
     fun isWhitelistedDomain(domain: String): Boolean {
@@ -2864,17 +3154,17 @@ object RuleRepository {
 
     fun isGameCoreDomain(domain: String): Boolean {
         val normalized = sanitizeDomain(domain)?.lowercase() ?: return false
-        return RuleProtectionSupport.matchesExactOrSubdomain(normalized, gameCoreDomains)
+        return gameCoreTrie.contains(normalized)
     }
 
     fun isSocialCoreDomain(domain: String): Boolean {
         val normalized = sanitizeDomain(domain)?.lowercase() ?: return false
-        return RuleProtectionSupport.matchesExactOrSubdomain(normalized, socialCoreDomains)
+        return socialCoreTrie.contains(normalized)
     }
 
     fun isMediaCoreDomain(domain: String): Boolean {
         val normalized = sanitizeDomain(domain)?.lowercase() ?: return false
-        return RuleProtectionSupport.matchesExactOrSubdomain(normalized, mediaCoreDomains)
+        return mediaCoreTrie.contains(normalized)
     }
 
     fun shouldProtectMediaTraffic(domain: String): Boolean {
@@ -2886,7 +3176,7 @@ object RuleRepository {
 
     fun isBusinessCoreDomain(domain: String): Boolean {
         val normalized = sanitizeDomain(domain)?.lowercase() ?: return false
-        return RuleProtectionSupport.matchesExactOrSubdomain(normalized, businessCoreDomains)
+        return businessCoreTrie.contains(normalized)
     }
 
     fun shouldProtectBusinessTraffic(domain: String): Boolean {
@@ -2897,23 +3187,21 @@ object RuleRepository {
     }
 
     private fun checkDomainWhitelist(lowerDomain: String): Boolean {
-        if (whitelistDomains.contains(lowerDomain)) return true
-        if (whitelistSuffixRoots.any { lowerDomain.endsWith(it) }) {
-            // Large protected roots still need to let only high-confidence ad/tracking subdomains fall through.
+        if (whitelistTrie.contains(lowerDomain)) {
             if (looksLikeWhitelistedRootAdSubdomain(lowerDomain)) {
                 return false
             }
             return true
         }
         if (lowerDomain.contains("umeng.com") || lowerDomain.contains("umengcloud.com")) {
-            if (umengWhitelistSubDomains.contains(lowerDomain) || umengWhitelistSubDomains.any { lowerDomain.endsWith(".$it") }) {
+            if (umengTrie.contains(lowerDomain)) {
                 return true
             }
         }
-        if (qqWhitelistSubDomains.contains(lowerDomain) || qqWhitelistSubDomains.any { lowerDomain.endsWith(".$it") }) {
+        if (qqTrie.contains(lowerDomain)) {
             return true
         }
-        if (neteaseWhitelistSubDomains.contains(lowerDomain) || neteaseWhitelistSubDomains.any { lowerDomain.endsWith(".$it") }) {
+        if (neteaseTrie.contains(lowerDomain)) {
             return true
         }
         return false
@@ -2938,6 +3226,28 @@ object RuleRepository {
         whitelistDomains.map { ".$it" }.toSet()
     }
 
+    // 域名后缀 Trie - 替代 endsWith 线性扫描，查询从 O(N) 降为 O(L)
+    private val whitelistTrie by lazy { DomainSuffixTrie.fromDomains(whitelistDomains) }
+    private val gameCoreTrie by lazy { DomainSuffixTrie.fromDomains(gameCoreDomains) }
+    private val socialCoreTrie by lazy { DomainSuffixTrie.fromDomains(socialCoreDomains) }
+    private val mediaCoreTrie by lazy { DomainSuffixTrie.fromDomains(mediaCoreDomains) }
+    private val businessCoreTrie by lazy { DomainSuffixTrie.fromDomains(businessCoreDomains) }
+    private val novelContentApiTrie by lazy { DomainSuffixTrie.fromDomains(novelContentApiDomains) }
+    private val umengTrie by lazy { DomainSuffixTrie.fromDomains(umengWhitelistSubDomains) }
+    private val qqTrie by lazy { DomainSuffixTrie.fromDomains(qqWhitelistSubDomains) }
+    private val neteaseTrie by lazy { DomainSuffixTrie.fromDomains(neteaseWhitelistSubDomains) }
+
+    // 合并保护域名 Trie - isCoreTrafficProtectedDomain 一次查询替代多次独立扫描
+    private val protectedDomainTrie by lazy {
+        DomainSuffixTrie().also { trie ->
+            trie.insertAll(whitelistDomains)
+            trie.insertAll(gameCoreDomains)
+            trie.insertAll(socialCoreDomains)
+            trie.insertAll(mediaCoreDomains)
+            trie.insertAll(businessCoreDomains)
+        }
+    }
+
     fun findMatchingRule(
         context: Context,
         domain: String,
@@ -2947,9 +3257,11 @@ object RuleRepository {
         sourcePort: Int? = null
     ): BlockRule? {
         val normalized = sanitizeDomain(domain) ?: return null
-        val ruleMap = getRuleMap(context)
-        val domainMatch = buildDomainCandidates(normalized)
-            .flatMap { candidate -> ruleMap[candidate].orEmpty().asSequence() }
+        val candidates = buildDomainCandidates(normalized).toList()
+        val simpleIndex = getSimpleDomainIndex(context)
+        getRuleMap(context)  // triggers buildAppRuleIndex
+        val domainMatch = candidates.asSequence()
+            .flatMap { candidate -> getFilteredRulesForApp(context, candidate, appName).asSequence() }
             .filter {
                 it.source != RuleSource.UNSUPPORTED &&
                     ruleMatches(it, qType, appName) &&
@@ -2959,7 +3271,16 @@ object RuleRepository {
             }
             .firstOrNull()
         val regexMatch = getRegexRules(context).firstOrNull { it.source != RuleSource.UNSUPPORTED && !it.exceptionRule && matchesRegexRule(it, normalized) }
-        val match = domainMatch ?: regexMatch
+        val simpleMatch = candidates.firstOrNull { it in simpleIndex.blocked }?.let { matchedDomain ->
+            BlockRule(
+                id = "simple-index-$matchedDomain",
+                domain = matchedDomain,
+                vendor = classifyVendorSimple(context, matchedDomain) ?: DEFAULT_VENDOR,
+                source = if (matchedDomain in simpleIndex.userOwnedBlocked) RuleSource.IMPORTED else RuleSource.REFERENCE,
+                important = matchedDomain in simpleIndex.importantBlocked
+            )
+        }
+        val match = domainMatch ?: regexMatch ?: simpleMatch
         if (isCoreTrafficProtectedDomain(normalized) && match?.let(::isUserOwnedBlockingRule) != true) return null
         return match
     }
@@ -3183,20 +3504,107 @@ object RuleRepository {
     }
 
     fun deduplicateRules(context: Context): Int {
+        val targetFile = rulesFile(context)
+        if (!targetFile.exists()) {
+            return deduplicateRulesInMemory(context)
+        }
+        val tempFile = File(context.filesDir, "$RULES_FILE_NAME.dedup.tmp")
+        val seen = HashSet<Long>()
+        var keptCount = 0
+        var removedCount = 0
+        var indexEnabled = true
+        try {
+            tempFile.bufferedWriter(Charsets.UTF_8).use { writer ->
+                JsonWriter(writer).use { jsonWriter ->
+                    targetFile.bufferedReader(Charsets.UTF_8).use { reader ->
+                        JsonReader(reader).use { jsonReader ->
+                            jsonReader.beginArray()
+                            jsonWriter.beginArray()
+                            while (jsonReader.hasNext()) {
+                                val rule = gson.fromJson<BlockRule>(jsonReader, BlockRule::class.java) ?: continue
+                                val normalized = normalizeRuleForSave(rule)
+                                val duplicate = if (indexEnabled) {
+                                    try {
+                                        !seen.add(buildDeduplicationKeyHash(normalized))
+                                    } catch (error: OutOfMemoryError) {
+                                        seen.clear()
+                                        indexEnabled = false
+                                        LogRepository.append(context, "Deduplicate rules disabled in-memory index after OOM; kept remaining rules to avoid crash")
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                                if (duplicate) {
+                                    removedCount += 1
+                                } else {
+                                    gson.toJson(normalized, BlockRule::class.java, jsonWriter)
+                                    keptCount += 1
+                                    if (keptCount % 1_000 == 0) jsonWriter.flush()
+                                }
+                            }
+                            jsonReader.endArray()
+                            jsonWriter.endArray()
+                        }
+                    }
+                }
+            }
+            if (removedCount > 0) {
+                if (!tempFile.renameTo(targetFile)) {
+                    tempFile.copyTo(targetFile, overwrite = true)
+                    tempFile.delete()
+                }
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .remove(KEY_RULES)
+                    .putInt(KEY_RULE_COUNT, keptCount)
+                    .apply()
+                clearCaches()
+                cachedRuleCount = keptCount
+            } else {
+                tempFile.delete()
+            }
+            return removedCount
+        } catch (e: Exception) {
+            runCatching { tempFile.delete() }
+            throw e
+        } catch (e: OutOfMemoryError) {
+            runCatching { tempFile.delete() }
+            throw e
+        }
+    }
+
+    private fun deduplicateRulesInMemory(context: Context): Int {
         val rules = getRules(context)
         val seen = mutableSetOf<String>()
-        val toRemove = mutableSetOf<String>()
+        val deduplicated = ArrayList<BlockRule>(rules.size)
+        var removedCount = 0
         rules.forEach { rule ->
-            val key = "${rule.domain}|${rule.vendor}|${rule.source}|${rule.keywordPattern}|${rule.regexPattern}|${rule.cosmeticSelector}|${rule.cosmeticException}"
-            if (!seen.add(key)) {
-                toRemove += rule.id
+            val key = buildDeduplicationKey(rule)
+            if (seen.add(key)) {
+                deduplicated += rule
+            } else {
+                removedCount += 1
             }
         }
-        if (toRemove.isNotEmpty()) {
-            removeByIds(context, toRemove)
+        if (removedCount > 0) {
+            writeRulesFile(context, deduplicated)
             clearCaches()
         }
-        return toRemove.size
+        return removedCount
+    }
+
+    private fun buildDeduplicationKeyHash(rule: BlockRule): Long {
+        var hash = -0x340d631b7bdddcdbL
+        buildDeduplicationKey(rule).forEach { char ->
+            hash = hash xor char.code.toLong()
+            hash *= 0x100000001b3L
+        }
+        return hash
+    }
+
+    private fun buildDeduplicationKey(rule: BlockRule): String {
+        return "${rule.domain}|${rule.vendor}|${rule.source}|${rule.keywordPattern}|${rule.regexPattern}|${rule.cosmeticSelector}|${rule.cosmeticException}"
     }
 
     fun filterNonAds(context: Context): List<BlockRule> {
@@ -3898,7 +4306,7 @@ object RuleRepository {
 
     fun isNovelContentDomain(domain: String): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
-        return RuleProtectionSupport.matchesExactOrSubdomain(normalized, novelContentApiDomains)
+        return novelContentApiTrie.contains(normalized)
     }
 
     fun shouldForceNovelQuicBlock(domain: String, appName: String?, vendor: String): Boolean {
@@ -4123,7 +4531,7 @@ object RuleRepository {
     }
 
     private fun parseImportLines(content: String): ParsedRules {
-        return parseImportLines(content.lineSequence())
+        return parseImportLinesStreaming(content.lineSequence())
     }
 
     private fun parseImportLinesStreaming(
@@ -4171,10 +4579,83 @@ object RuleRepository {
         }
         onProgress?.invoke(lineCount, parsedRuleCount)
         return ParsedRules(
-            blockedRules = parsedRules.blocked.values.toList(),
-            exceptionRules = parsedRules.exceptions.values.toList(),
-            badfilterRules = parsedRules.badfilters.values.toList()
+            blockedRules = parsedRules.blocked.values.asListView(),
+            exceptionRules = parsedRules.exceptions.values.asListView(),
+            badfilterRules = parsedRules.badfilters.values.asListView()
         )
+    }
+
+    private fun <T> Collection<T>.asListView(): List<T> {
+        return if (this is List<T>) this else ArrayList(this)
+    }
+
+    private fun parseImportLinesStreamingBatched(
+        lines: Sequence<String>,
+        batchSize: Int = IMPORT_PARSE_BATCH_SIZE,
+        onProgress: ((lineCount: Int, parsedRuleCount: Int) -> Unit)? = null,
+        onBatch: (ParsedRules) -> Unit
+    ) {
+        var parsedRules = ParsedRuleBuckets()
+        var lineContext = RuleParsingSupport.LineContext()
+        var lineCount = 0
+        var parsedRuleCount = 0
+        var pendingRuleCount = 0
+        var lastProgressAt = 0L
+
+        fun flushBatch() {
+            if (pendingRuleCount <= 0) return
+            onBatch(
+                ParsedRules(
+                    blockedRules = parsedRules.blocked.values.asListView(),
+                    exceptionRules = parsedRules.exceptions.values.asListView(),
+                    badfilterRules = parsedRules.badfilters.values.asListView()
+                )
+            )
+            parsedRules = ParsedRuleBuckets()
+            pendingRuleCount = 0
+        }
+
+        lines.forEach { rawLine ->
+            lineCount += 1
+            RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach { fragment ->
+                val trimmed = fragment.trim()
+                if (trimmed.startsWith("#pkg=", ignoreCase = true)) {
+                    lineContext = RuleParsingSupport.parseRuleLineContext(trimmed)
+                    return@forEach
+                }
+                if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) {
+                    return@forEach
+                }
+                parseFastImportRule(trimmed, lineContext)?.let { parsedRule ->
+                    mergeParsedImportRule(parsedRules, parsedRule)
+                    parsedRuleCount += 1
+                    pendingRuleCount += 1
+                    if (pendingRuleCount >= batchSize) flushBatch()
+                    return@forEach
+                }
+                val parsedLineRules = parseRuleLine(fragment, lineContext)
+                parsedLineRules.forEach { parsedRule ->
+                    mergeParsedImportRule(parsedRules, parsedRule)
+                    parsedRuleCount += 1
+                    pendingRuleCount += 1
+                }
+                if (parsedLineRules.isEmpty()) {
+                    parseUnsupportedImportRule(fragment, lineContext)?.let { parsedRule ->
+                        mergeParsedImportRule(parsedRules, parsedRule)
+                        parsedRuleCount += 1
+                        pendingRuleCount += 1
+                    }
+                }
+                if (pendingRuleCount >= batchSize) flushBatch()
+            }
+            val now = System.currentTimeMillis()
+            if (onProgress != null && (lineCount % 2000 == 0 || now - lastProgressAt >= 750L)) {
+                lastProgressAt = now
+                onProgress.invoke(lineCount, parsedRuleCount)
+            }
+        }
+        flushBatch()
+        onProgress?.invoke(lineCount, parsedRuleCount)
     }
 
     private fun parseUnsupportedImportRule(rawLine: String, lineContext: RuleParsingSupport.LineContext): ParsedRule? {
@@ -4230,9 +4711,9 @@ object RuleRepository {
         }
 
         return ParsedRules(
-            blockedRules = parsedRules.blocked.values.toList(),
-            exceptionRules = parsedRules.exceptions.values.toList(),
-            badfilterRules = parsedRules.badfilters.values.toList()
+            blockedRules = parsedRules.blocked.values.asListView(),
+            exceptionRules = parsedRules.exceptions.values.asListView(),
+            badfilterRules = parsedRules.badfilters.values.asListView()
         )
     }
 
@@ -4269,6 +4750,13 @@ object RuleRepository {
         val domainPart = body.substringBefore('^').substringBefore('/').substringBefore('$').trim()
         val domain = sanitizeDomain(normalizeDomainToken(domainPart)) ?: return null
         val modifierPart = line.substringAfter('$', missingDelimiterValue = "")
+        if (modifierPart.isNotBlank()) {
+            val hasComplexModifier = modifierPart.split(',').any { token ->
+                val name = token.trim().removePrefix("~").substringBefore('=')
+                name.isNotBlank() && name !in SIMPLE_MODIFIER_NAMES
+            }
+            if (hasComplexModifier) return null
+        }
         return ParsedRule(
             domain = domain,
             isException = isException,
@@ -4413,10 +4901,69 @@ object RuleRepository {
         }
     }
 
+    private fun parseStandardAdBlockRule(line: String, lineContext: RuleParsingSupport.LineContext): List<ParsedRule> {
+        val isException = line.startsWith("@@")
+        val working = if (isException) line.removePrefix("@@") else line
+
+        val candidate = extractDomainCandidate(working) ?: return emptyList()
+        val (patternPart, modifierPart) = candidate
+        val modifierInfo = parseModifierInfo(modifierPart)
+        if (modifierInfo.invalid || modifierInfo.unsupportedModifiers.isNotEmpty()) return emptyList()
+        if (!canSafelyApplyModifierContext(patternPart, modifierInfo)) return emptyList()
+
+        val domains = parseDomainsFromPattern(patternPart)
+        val keywordPattern = if (patternPart.contains('*')) {
+            extractKeywordPattern(patternPart)
+        } else {
+            null
+        }
+        val pathPattern = extractPathPattern(patternPart) ?: modifierInfo.pathPattern
+
+        return domains.map { domain ->
+            ParsedRule(
+                domain = domain,
+                isException = isException,
+                isBadfilter = modifierInfo.badfilter,
+                dnsTypes = modifierInfo.dnsTypes,
+                excludedDnsTypes = modifierInfo.excludedDnsTypes,
+                thirdParty = modifierInfo.thirdParty,
+                firstParty = modifierInfo.firstParty,
+                important = modifierInfo.important,
+                redirect = modifierInfo.redirect,
+                domainConstraints = modifierInfo.domainConstraints,
+                excludedDomainConstraints = modifierInfo.excludedDomainConstraints,
+                denyallow = modifierInfo.denyallow,
+                urlblock = modifierInfo.urlblock,
+                requestTypes = modifierInfo.requestTypes,
+                appPackages = modifierInfo.appPackages,
+                destinationPorts = modifierInfo.destinationPorts,
+                sourcePorts = modifierInfo.sourcePorts,
+                keywordPattern = keywordPattern,
+                pathPattern = pathPattern,
+                ipCidr = null,
+                regexPattern = null,
+                cosmeticSelector = null,
+                removeParams = modifierInfo.removeParams,
+                removeParamRegexes = modifierInfo.removeParamRegexes,
+                removeRequestHeaders = modifierInfo.removeRequestHeaders,
+                setRequestHeaders = modifierInfo.setRequestHeaders,
+                replaceRules = modifierInfo.replaceRules,
+                cspValue = modifierInfo.cspValue,
+                redirectResource = modifierInfo.redirectResource,
+                jsInjectRules = modifierInfo.jsinject?.let { setOf(it) }.orEmpty(),
+                vendorHints = lineContext.vendorHints
+            )
+        }
+    }
+
     private fun parseRuleLine(rawLine: String, lineContext: RuleParsingSupport.LineContext = RuleParsingSupport.LineContext()): List<ParsedRule> {
         val line = RuleParsingSupport.stripInlineRuleComment(normalizeMessyRuleLine(rawLine))
         if (line.isBlank() || line.startsWith("#") || line.startsWith("!")) return emptyList()
         val normalizedLine = RuleParsingSupport.stripYamlListPrefix(RuleParsingSupport.unwrapRuleWrapper(line))
+
+        if (normalizedLine.startsWith("||") || normalizedLine.startsWith("@@||")) {
+            return parseStandardAdBlockRule(line, lineContext)
+        }
         
         parseCompositeRule(normalizedLine, lineContext)?.let { return it }
         parseCosmeticRule(normalizedLine)?.let { return listOf(it.withVendorHints(lineContext.vendorHints)) }
@@ -5881,36 +6428,94 @@ object RuleRepository {
 
     private fun save(context: Context, rules: List<BlockRule>) {
         val startTime = System.currentTimeMillis()
-        
-        // 优化：大规则集跳过排序，减少 CPU 开销
-        val normalizedRules = if (rules.size <= 1000) {
-            rules.map { copyBlockRule(it, vendor = normalizeVendorName(it.vendor)) }.sortedBy { it.domain }
-        } else {
-            // 大规则集不排序，仅标准化 vendor 名称
-            rules.map { copyBlockRule(it, vendor = normalizeVendorName(it.vendor)) }
-        }
-        
+        val normalizedRules = normalizeRulesForSave(rules)
+
         val serializeStart = System.currentTimeMillis()
-        writeRulesFile(context, normalizedRules)
+        synchronized(fileWriteLock) {
+            writeRulesFile(context, normalizedRules)
+        }
         val serializeTime = System.currentTimeMillis() - serializeStart
         
-        updateRuleCache(normalizedRules)
+        updateRuleCacheAfterSave(context, normalizedRules)
         synchronized(dnsBlockDecisionLock) {
             dnsBlockDecisionCache.clear()
         }
         val totalTime = System.currentTimeMillis() - startTime
-        LogRepository.append(context, "RuleRepository.save: rules=${normalizedRules.size} serializeTime=${serializeTime}ms totalTime=${totalTime}ms")
+        LogRepository.append(context, "RuleRepository.save: rules=${normalizedRules.size} serializeTime=${serializeTime}ms totalTime=${totalTime}ms memory=${runtimeMemorySnapshot()}")
+    }
+
+    private fun updateRuleCacheAfterSave(context: Context, rules: List<BlockRule>) {
+        if (rules.size >= LARGE_RULE_CACHE_THRESHOLD) {
+            clearCaches()
+            cachedRuleCount = rules.size
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putInt(KEY_RULE_COUNT, rules.size)
+                .apply()
+            LogRepository.append(context, "RuleRepository.save: large rule set cached as count only, rules=${rules.size}")
+            return
+        }
+        updateRuleCache(rules)
+    }
+
+    private fun normalizeRulesForSave(rules: List<BlockRule>): List<BlockRule> {
+        val normalized = rules.mapRulesPreservingInstances { rule ->
+            normalizeRuleForSave(rule)
+        }
+        return if (normalized.size <= 1000) normalized.sortedBy { it.domain } else normalized
+    }
+
+    private fun normalizeRuleForSave(rule: BlockRule): BlockRule {
+        val stableId = rule.id.trim().ifBlank { UUID.randomUUID().toString() }
+        val vendor = normalizeVendorName(rule.vendor)
+        val source = if (rule.source == RuleSource.REFERENCE) RuleSource.IMPORTED else rule.source
+        return if (stableId == rule.id && vendor == rule.vendor && source == rule.source) {
+            rule
+        } else {
+            copyBlockRule(rule, id = stableId, vendor = vendor, source = source)
+        }
+    }
+
+    private inline fun List<BlockRule>.mapRulesPreservingInstances(transform: (BlockRule) -> BlockRule): List<BlockRule> {
+        var mapped: ArrayList<BlockRule>? = null
+        forEachIndexed { index, rule ->
+            val next = transform(rule)
+            val target = mapped
+            when {
+                target != null -> target += next
+                next !== rule -> {
+                    mapped = ArrayList<BlockRule>(size).apply {
+                        addAll(this@mapRulesPreservingInstances.subList(0, index))
+                        add(next)
+                    }
+                }
+            }
+        }
+        return mapped ?: this
     }
 
     private fun rulesFile(context: Context): File {
         return File(context.filesDir, RULES_FILE_NAME)
     }
 
-    private fun readRulesJson(context: Context, prefs: android.content.SharedPreferences): String {
-        val file = rulesFile(context)
-        if (file.exists()) {
-            return file.bufferedReader(Charsets.UTF_8).use { it.readText() }
+    private fun readRulesFile(context: Context, file: File): List<BlockRule> {
+        val startTime = System.currentTimeMillis()
+        return file.bufferedReader(Charsets.UTF_8).use { reader ->
+            JsonReader(reader).use { jsonReader ->
+                val rules = mutableListOf<BlockRule>()
+                jsonReader.beginArray()
+                while (jsonReader.hasNext()) {
+                    gson.fromJson<BlockRule>(jsonReader, BlockRule::class.java)?.let(rules::add)
+                }
+                jsonReader.endArray()
+                LogRepository.append(context, "RuleRepository.readRulesFile: rules=${rules.size}, time=${System.currentTimeMillis() - startTime}ms")
+                rules
+            }
         }
+    }
+
+    private fun readLegacyRulesJson(context: Context, prefs: android.content.SharedPreferences): String {
+        val file = rulesFile(context)
         val legacyJson = prefs.getString(KEY_RULES, "[]") ?: "[]"
         if (legacyJson != "[]") {
             runCatching {
@@ -5919,7 +6524,7 @@ object RuleRepository {
                 LogRepository.append(context, "规则存储已迁移到文件：${file.name}")
             }
         } else {
-            val seedRules = buildBuiltInAdSeedRules()
+            val seedRules = buildBuiltInAdSeedRules(context)
             writeRulesFile(context, seedRules)
             LogRepository.append(context, "Initialized built-in ad seed rules: count=${seedRules.size}")
             return gson.toJson(seedRules)
@@ -5927,18 +6532,31 @@ object RuleRepository {
         return legacyJson
     }
 
-    private fun buildBuiltInAdSeedRules(): List<BlockRule> {
-        return geositeAdSeedDomains.mapNotNull { rawDomain ->
-            sanitizeDomain(rawDomain)?.let { domain ->
-                BlockRule(
-                    id = "builtin-ad-seed-$domain",
-                    domain = domain,
-                    vendor = GENERIC_AD_VENDOR,
-                    source = RuleSource.IMPORTED,
-                    remoteSourceId = BUILTIN_AD_SEED_SOURCE_ID
-                )
+    private fun buildBuiltInAdSeedRules(context: Context): List<BlockRule> {
+        val domains = linkedSetOf<String>()
+        runCatching {
+            context.resources.openRawResource(R.raw.hanfeng_builtin_rules).bufferedReader(Charsets.UTF_8).useLines { lines ->
+                lines.forEach { rawLine ->
+                    RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach { fragment ->
+                        val trimmed = fragment.trim()
+                        if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@forEach
+                        extractSimpleImportDomain(trimmed)?.let(domains::add)
+                    }
+                }
             }
-        }.distinctBy { it.domain }
+        }.onFailure { error ->
+            LogRepository.append(context, "Load built-in rule resource failed: ${error.message ?: error.javaClass.simpleName}")
+        }
+        geositeAdSeedDomains.mapNotNullTo(domains) { sanitizeDomain(it) }
+        return domains.map { domain ->
+            BlockRule(
+                id = "builtin-ad-seed-$domain",
+                domain = domain,
+                vendor = GENERIC_AD_VENDOR,
+                source = RuleSource.IMPORTED,
+                remoteSourceId = BUILTIN_AD_SEED_SOURCE_ID
+            )
+        }
     }
 
     private fun writeRulesJson(context: Context, json: String, ruleCount: Int) {
@@ -5977,11 +6595,99 @@ object RuleRepository {
             .apply()
     }
 
+    private class StreamingRulesRewrite(
+        val context: Context,
+        val tempFile: File,
+        val targetFile: File,
+        val jsonWriter: JsonWriter,
+        var ruleCount: Int
+    ) {
+        fun writeRule(rule: BlockRule) {
+            gson.toJson(normalizeRuleForSave(rule), BlockRule::class.java, jsonWriter)
+            ruleCount += 1
+            if (ruleCount % 1_000 == 0) jsonWriter.flush()
+        }
+
+        fun writeSimpleRule(domain: String, source: RuleSource, remoteSourceId: String?) {
+            writeRule(buildCompactImportedRule(domain, source, remoteSourceId))
+        }
+    }
+
+    private fun beginStreamingRulesRewrite(
+        context: Context,
+        excludeRemoteSourceId: String?
+    ): StreamingRulesRewrite {
+        val targetFile = rulesFile(context)
+        val tempFile = File(context.filesDir, "$RULES_FILE_NAME.streaming.tmp")
+        val jsonWriter = JsonWriter(tempFile.bufferedWriter(Charsets.UTF_8))
+        var ruleCount = 0
+        try {
+            jsonWriter.beginArray()
+            fun keepAndWrite(rule: BlockRule) {
+                val normalized = normalizeRuleForSave(rule)
+                if (!excludeRemoteSourceId.isNullOrBlank() && hasRemoteSourceId(normalized, excludeRemoteSourceId)) return
+                gson.toJson(normalized, BlockRule::class.java, jsonWriter)
+                ruleCount += 1
+                if (ruleCount % 1_000 == 0) jsonWriter.flush()
+            }
+
+            if (targetFile.exists()) {
+                targetFile.bufferedReader(Charsets.UTF_8).use { reader ->
+                    JsonReader(reader).use { jsonReader ->
+                        jsonReader.beginArray()
+                        while (jsonReader.hasNext()) {
+                            gson.fromJson<BlockRule>(jsonReader, BlockRule::class.java)?.let(::keepAndWrite)
+                        }
+                        jsonReader.endArray()
+                    }
+                }
+            } else {
+                getRules(context).forEach(::keepAndWrite)
+            }
+            return StreamingRulesRewrite(context, tempFile, targetFile, jsonWriter, ruleCount)
+        } catch (e: Exception) {
+            runCatching { jsonWriter.close() }
+            runCatching { tempFile.delete() }
+            throw e
+        } catch (e: OutOfMemoryError) {
+            runCatching { jsonWriter.close() }
+            runCatching { tempFile.delete() }
+            throw e
+        }
+    }
+
+    private fun finishStreamingRulesRewrite(context: Context, rewrite: StreamingRulesRewrite): Int {
+        rewrite.jsonWriter.endArray()
+        rewrite.jsonWriter.close()
+        if (!rewrite.tempFile.renameTo(rewrite.targetFile)) {
+            rewrite.tempFile.copyTo(rewrite.targetFile, overwrite = true)
+            rewrite.tempFile.delete()
+        }
+        clearCaches()
+        cachedRuleCount = rewrite.ruleCount
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_RULES)
+            .putInt(KEY_RULE_COUNT, rewrite.ruleCount)
+            .apply()
+        synchronized(dnsBlockDecisionLock) {
+            dnsBlockDecisionCache.clear()
+        }
+        LogRepository.append(context, "RuleRepository.streamingSave: rules=${rewrite.ruleCount} memory=${runtimeMemorySnapshot()}")
+        return rewrite.ruleCount
+    }
+
+    private fun abortStreamingRulesRewrite(rewrite: StreamingRulesRewrite) {
+        runCatching { rewrite.jsonWriter.close() }
+        runCatching { rewrite.tempFile.delete() }
+    }
+
     private fun clearCaches() {
         cachedRules = null
         cachedRuleCount = null
         cachedBlockedDomains = null
         cachedRuleMap = null
+        cachedSimpleDomainIndex = null
         cachedRegexRules = null
         cachedCosmeticRules = null
         cachedIpCidrRules = null
@@ -5990,6 +6696,39 @@ object RuleRepository {
         cachedRuleInventory = null
         cachedCompiledRegexRules = emptyMap()
         cachedWhitelistHits.clear()
+        cachedAppRuleIndex = null
+        cachedUniversalRuleMap = null
+    }
+
+    fun prepareForRuleImport(context: Context, reason: String) {
+        synchronized(cacheLock) {
+            cachedBlockedDomains = null
+            cachedRuleMap = null
+            cachedSimpleDomainIndex = null
+            cachedRegexRules = null
+            cachedCosmeticRules = null
+            cachedIpCidrRules = null
+            cachedPortOnlyRules = null
+            cachedKeywordRules = null
+            cachedRuleInventory = null
+            cachedAppRuleIndex = null
+            cachedUniversalRuleMap = null
+            cachedCompiledRegexRules = emptyMap()
+            cachedVendorMap.clear()
+            cachedWhitelistHits.clear()
+        }
+        System.gc()
+        LogRepository.append(context, "RuleRepository.prepareForRuleImport: reason=$reason, memory=${runtimeMemorySnapshot()}")
+    }
+
+    fun runtimeMemorySnapshot(): String {
+        val runtime = Runtime.getRuntime()
+        val used = runtime.totalMemory() - runtime.freeMemory()
+        return "used=${formatMemoryBytes(used)}, free=${formatMemoryBytes(runtime.freeMemory())}, total=${formatMemoryBytes(runtime.totalMemory())}, max=${formatMemoryBytes(runtime.maxMemory())}"
+    }
+
+    private fun formatMemoryBytes(bytes: Long): String {
+        return String.format(Locale.US, "%.1fMB", bytes / 1024.0 / 1024.0)
     }
 
     private fun readCustomVendorMap(context: Context): Map<String, String> {
@@ -6017,25 +6756,36 @@ object RuleRepository {
 
     private fun readUnknownVendorSamples(context: Context): Map<String, SuspiciousDomainRecord> {
         cachedUnknownVendorSamples?.let { return it }
-        val prefsValue = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_UNKNOWN_VENDOR_SAMPLES, "{}") ?: "{}"
-        runCatching {
-            val type = object : TypeToken<Map<String, SuspiciousDomainRecord>>() {}.type
-            gson.fromJson<Map<String, SuspiciousDomainRecord>>(prefsValue, type)
-        }.getOrNull()?.let { parsed ->
-            return parsed.filterValues { it.count > 0 }.also { cachedUnknownVendorSamples = it }
+        if (cachedUnknownVendorSamplesLoaded) return emptyMap()
+        synchronized(cacheLock) {
+            cachedUnknownVendorSamples?.let { return it }
+            if (cachedUnknownVendorSamplesLoaded) return emptyMap()
+            val prefsValue = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_UNKNOWN_VENDOR_SAMPLES, "{}") ?: "{}"
+            runCatching {
+                val type = object : TypeToken<Map<String, SuspiciousDomainRecord>>() {}.type
+                gson.fromJson<Map<String, SuspiciousDomainRecord>>(prefsValue, type)
+            }.getOrNull()?.let { parsed ->
+                val filtered = parsed.filterValues { it.count > 0 }
+                cachedUnknownVendorSamples = filtered
+                cachedUnknownVendorSamplesLoaded = true
+                return filtered
+            }
+            val legacyType = object : TypeToken<Map<String, Int>>() {}.type
+            val legacy = gson.fromJson<Map<String, Int>>(prefsValue, legacyType) ?: emptyMap()
+            val migrated = legacy.mapValues { SuspiciousDomainRecord(count = it.value, lastSeenAt = 0L) }
+            if (migrated.isNotEmpty()) {
+                saveUnknownVendorSamples(context, migrated, force = true)
+            } else {
+                cachedUnknownVendorSamples = emptyMap()
+                cachedUnknownVendorSamplesLoaded = true
+            }
+            return migrated
         }
-        val legacyType = object : TypeToken<Map<String, Int>>() {}.type
-        val legacy = gson.fromJson<Map<String, Int>>(prefsValue, legacyType) ?: emptyMap()
-        val migrated = legacy.mapValues { SuspiciousDomainRecord(count = it.value, lastSeenAt = 0L) }
-        if (migrated.isNotEmpty()) {
-            saveUnknownVendorSamples(context, migrated, force = true)
-        }
-        cachedUnknownVendorSamples = migrated
-        return migrated
     }
 
     private fun saveUnknownVendorSamples(context: Context, samples: Map<String, SuspiciousDomainRecord>, force: Boolean = false) {
         cachedUnknownVendorSamples = samples
+        cachedUnknownVendorSamplesLoaded = true
         val now = System.currentTimeMillis()
         if (!force && now - lastUnknownVendorSamplesPersistAt < SUSPICIOUS_SAMPLE_PERSIST_DEBOUNCE_MILLIS) {
             return
@@ -6077,33 +6827,147 @@ object RuleRepository {
 
     private fun getBlockedDomainSet(context: Context): Set<String> {
         cachedBlockedDomains?.let { return it }
-        return getRules(context).mapTo(linkedSetOf(), BlockRule::domain)
+        synchronized(cacheLock) {
+            cachedBlockedDomains?.let { return it }
+            val domains = getRules(context).filterNot { it.exceptionRule }.mapTo(linkedSetOf(), BlockRule::domain)
+            cachedBlockedDomains = domains
+            return domains
+        }
     }
 
     private fun getRuleMap(context: Context): Map<String, List<BlockRule>> {
         cachedRuleMap?.let { return it }
         synchronized(cacheLock) {
             cachedRuleMap?.let { return it }
-            getRules(context)
-            return cachedRuleMap ?: emptyMap()
+            val rules = getRules(context)
+            val nonSimpleRules = rules.asSequence()
+                .filterNot(::isSimpleDomainRule)
+                .toList()
+            cachedRuleMap = nonSimpleRules.groupBy { it.domain }
+            // 同步构建 App-Specific 规则索引和通用规则映射
+            buildAppRuleIndex(nonSimpleRules)
+            return cachedRuleMap!!
         }
+    }
+
+    private fun buildAppRuleIndex(rules: List<BlockRule>) {
+        val appIndex = mutableMapOf<String, MutableMap<String, MutableList<BlockRule>>>()
+        val universal = mutableMapOf<String, MutableList<BlockRule>>()
+        for (rule in rules) {
+            if (rule.appPackages.isEmpty()) {
+                universal.getOrPut(rule.domain) { mutableListOf() }.add(rule)
+            } else {
+                for (pkg in rule.appPackages) {
+                    appIndex.getOrPut(pkg) { mutableMapOf() }
+                        .getOrPut(rule.domain) { mutableListOf() }
+                        .add(rule)
+                }
+            }
+        }
+        cachedUniversalRuleMap = universal.mapValues { (_, v) -> v.toList() }
+        cachedAppRuleIndex = appIndex.mapValues { (_, v) -> v.mapValues { (_, rules) -> rules.toList() } }
+    }
+
+    private fun getFilteredRulesForApp(context: Context, domain: String, appName: String?): List<BlockRule> {
+        val universal = cachedUniversalRuleMap?.get(domain).orEmpty()
+        if (appName == null) return universal
+        val pkg = extractPackageName(appName) ?: return universal
+        val appRules = cachedAppRuleIndex?.get(pkg)?.get(domain).orEmpty()
+        return universal + appRules
+    }
+
+    private fun getSimpleDomainIndex(context: Context): SimpleDomainIndex {
+        cachedSimpleDomainIndex?.let { return it }
+        synchronized(cacheLock) {
+            cachedSimpleDomainIndex?.let { return it }
+            val blocked = linkedSetOf<String>()
+            val userOwnedBlocked = linkedSetOf<String>()
+            val importantBlocked = linkedSetOf<String>()
+            val exceptions = linkedSetOf<String>()
+            getRules(context).asSequence()
+                .filter(::isSimpleDomainRule)
+                .forEach { rule ->
+                    if (rule.exceptionRule) {
+                        exceptions += rule.domain
+                    } else {
+                        blocked += rule.domain
+                        if (isUserOwnedBlockingRule(rule)) userOwnedBlocked += rule.domain
+                        if (isImportantBlockingRule(rule)) importantBlocked += rule.domain
+                    }
+                }
+            val index = SimpleDomainIndex(
+                blocked = blocked,
+                userOwnedBlocked = userOwnedBlocked,
+                importantBlocked = importantBlocked,
+                exceptions = exceptions
+            )
+            cachedSimpleDomainIndex = index
+            return index
+        }
+    }
+
+    private fun isSimpleDomainRule(rule: BlockRule): Boolean {
+        return rule.source != RuleSource.UNSUPPORTED &&
+            rule.dnsTypes == null &&
+            rule.excludedDnsTypes == null &&
+            !rule.thirdParty &&
+            !rule.firstParty &&
+            !rule.redirect &&
+            rule.domainConstraints.isNullOrEmpty() &&
+            rule.excludedDomainConstraints.isEmpty() &&
+            rule.denyallow.isEmpty() &&
+            !rule.urlblock &&
+            rule.requestTypes.isEmpty() &&
+            rule.appPackages.isEmpty() &&
+            rule.destinationPorts.isEmpty() &&
+            rule.sourcePorts.isEmpty() &&
+            rule.keywordPattern.isNullOrBlank() &&
+            rule.pathPattern.isNullOrBlank() &&
+            rule.ipCidr.isNullOrBlank() &&
+            rule.regexPattern.isNullOrBlank() &&
+            rule.cosmeticSelector.isNullOrBlank() &&
+            !rule.cosmeticException &&
+            rule.removeParams.isEmpty() &&
+            rule.removeParamRegexes.isEmpty() &&
+            rule.removeRequestHeaders.isEmpty() &&
+            rule.setRequestHeaders.isEmpty() &&
+            rule.replaceRules.isEmpty() &&
+            rule.cspValue.isNullOrBlank() &&
+            rule.redirectResource.isNullOrBlank() &&
+            rule.jsInjectRules.isEmpty()
     }
 
     private fun getRegexRules(context: Context): List<BlockRule> {
         cachedRegexRules?.let { return it }
         synchronized(cacheLock) {
             cachedRegexRules?.let { return it }
-            getRules(context)
-            return cachedRegexRules ?: emptyList()
+            val rules = getRules(context).filter { !it.regexPattern.isNullOrBlank() }
+            cachedRegexRules = rules
+            return rules
         }
+    }
+
+    private fun getFilteredRegexRules(context: Context, appName: String?): List<BlockRule> {
+        val all = getRegexRules(context)
+        if (appName == null) return all
+        val pkg = extractPackageName(appName) ?: return all
+        return all.filter { it.appPackages.isEmpty() || pkg in it.appPackages }
+    }
+
+    private fun getFilteredKeywordRules(context: Context, appName: String?): List<BlockRule> {
+        val all = getKeywordRules(context)
+        if (appName == null) return all
+        val pkg = extractPackageName(appName) ?: return all
+        return all.filter { it.appPackages.isEmpty() || pkg in it.appPackages }
     }
 
     private fun getCosmeticRules(context: Context): List<BlockRule> {
         cachedCosmeticRules?.let { return it }
         synchronized(cacheLock) {
             cachedCosmeticRules?.let { return it }
-            getRules(context)
-            return cachedCosmeticRules ?: emptyList()
+            val rules = getRules(context).filter { !it.cosmeticSelector.isNullOrBlank() }
+            cachedCosmeticRules = rules
+            return rules
         }
     }
 
@@ -6111,8 +6975,9 @@ object RuleRepository {
         cachedKeywordRules?.let { return it }
         synchronized(cacheLock) {
             cachedKeywordRules?.let { return it }
-            getRules(context)
-            return cachedKeywordRules ?: emptyList()
+            val rules = getRules(context).filter { !it.keywordPattern.isNullOrBlank() }
+            cachedKeywordRules = rules
+            return rules
         }
     }
 
@@ -6127,19 +6992,19 @@ object RuleRepository {
 
     private fun updateRuleCache(rules: List<BlockRule>) {
         cachedRules = rules
-        cachedBlockedDomains = rules.filterNot { it.exceptionRule }.mapTo(linkedSetOf(), BlockRule::domain)
-        cachedRuleMap = rules.groupBy { it.domain }
-        cachedRegexRules = rules.filter { !it.regexPattern.isNullOrBlank() }
-        cachedCosmeticRules = rules.filter { !it.cosmeticSelector.isNullOrBlank() }
-        cachedIpCidrRules = rules.filter { !it.ipCidr.isNullOrBlank() }
-        cachedPortOnlyRules = rules.filter {
-            it.domain == "*" && it.ipCidr.isNullOrBlank() &&
-                (it.destinationPorts.isNotEmpty() || it.sourcePorts.isNotEmpty())
-        }
-        cachedKeywordRules = rules.filter { !it.keywordPattern.isNullOrBlank() }
+        cachedBlockedDomains = null
+        cachedSimpleDomainIndex = null
+        cachedRuleMap = null
+        cachedRegexRules = null
+        cachedCosmeticRules = null
+        cachedIpCidrRules = null
+        cachedPortOnlyRules = null
+        cachedKeywordRules = null
         cachedCompiledRegexRules = emptyMap()
         cachedVendorMap.clear()
         cachedRuleInventory = null
+        cachedAppRuleIndex = null
+        cachedUniversalRuleMap = null
     }
 
     private fun ruleMatches(
@@ -6458,7 +7323,7 @@ object RuleRepository {
 
     private fun applyCosmeticExceptionRules(
         rules: List<BlockRule>,
-        exceptionRules: List<ParsedRule>
+        exceptionRules: Collection<ParsedRule>
     ): List<BlockRule> {
         if (rules.isEmpty() || exceptionRules.isEmpty()) return rules
         val cosmeticExceptions = exceptionRules.filter { !it.cosmeticSelector.isNullOrBlank() }

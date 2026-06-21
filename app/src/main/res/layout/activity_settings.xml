@@ -113,6 +113,146 @@
                     android:layout_height="wrap_content" />
             </LinearLayout>
 
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                android:background="@drawable/bg_panel"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="隐身模式（反追踪）"
+                    android:textColor="@color/hf_text_primary"
+                    android:textSize="16sp" />
+
+                <Switch
+                    android:id="@+id/switchStealthMode"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/textStealthDesc"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="-8dp"
+                android:layout_marginBottom="16dp"
+                android:text="开启后自动移除 URL 追踪参数，隐藏 Referer，净化浏览器指纹头"
+                android:textColor="@color/hf_text_secondary"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:id="@+id/stealthSubLayout"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="16dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="剥离 URL 追踪参数"
+                        android:textColor="@color/hf_text_secondary"
+                        android:textSize="14sp" />
+
+                    <Switch
+                        android:id="@+id/switchStealthStripParams"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="隐藏 Referer"
+                        android:textColor="@color/hf_text_secondary"
+                        android:textSize="14sp" />
+
+                    <Switch
+                        android:id="@+id/switchStealthHideReferer"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="16dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="移除浏览器指纹头"
+                        android:textColor="@color/hf_text_secondary"
+                        android:textSize="14sp" />
+
+                    <Switch
+                        android:id="@+id/switchStealthRemoveFingerprintHeaders"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnManageCustomTrackingParams"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:text="管理自定义追踪参数"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/textCustomTrackingParamsPreview"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="12dp"
+                    android:textColor="@color/hf_text_secondary"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
+                <Button
+                    android:id="@+id/btnManageCustomTrackingHeaders"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:text="管理自定义追踪头"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/textCustomTrackingHeadersPreview"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="16dp"
+                    android:textColor="@color/hf_text_secondary"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
+            </LinearLayout>
+
             <Button
                 android:id="@+id/btnResetHideBackground"
                 android:layout_width="match_parent"
@@ -154,7 +294,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="12dp"
-                android:text="导出日志" />
+                android:text="导出日志和崩溃报告" />
 
             <Button
                 android:id="@+id/btnExportRules"

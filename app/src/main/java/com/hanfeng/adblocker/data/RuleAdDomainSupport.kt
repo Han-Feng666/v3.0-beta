@@ -1,5 +1,7 @@
 package com.HanFeng.data
 
+import com.HanFeng.core.network.RegexCache
+
 object RuleAdDomainSupport {
     private val alphanumericAdPattern = Regex("[0-9]+.*ad|ad.*[0-9]+")
 
@@ -43,7 +45,7 @@ object RuleAdDomainSupport {
 
     fun looksLikePushRecommendationAdDomain(domain: String): Boolean {
         val lower = domain.lowercase()
-        val normalizedTokens = lower.replace(Regex("[^a-z0-9]"), "")
+        val normalizedTokens = lower.replace(RegexCache.get("[^a-z0-9]"), "")
         val pushSignals = listOf("push", "pushad", "adpush", "notify", "notification", "message", "msg", "inbox")
         val recommendationSignals = listOf("recommend", "recommendation", "feed", "stream", "timeline", "discover")
         val adSignals = listOf(
@@ -74,7 +76,7 @@ object RuleAdDomainSupport {
     ): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
         val lower = normalized.lowercase()
-        val normalizedTokens = lower.replace(Regex("[^a-z0-9]"), "")
+        val normalizedTokens = lower.replace(RegexCache.get("[^a-z0-9]"), "")
         val normalizedVendor = normalizeVendorName(vendor.ifBlank { defaultVendor })
         if (highConfidenceAdSdkDomains.any { normalized == it || normalized.endsWith(".$it") }) {
             return true
@@ -203,7 +205,7 @@ object RuleAdDomainSupport {
         looksLikeAdSdkInfraDomain: (String) -> Boolean
     ): Boolean {
         val lower = domain.lowercase()
-        val normalizedTokens = lower.replace(Regex("[^a-z0-9]"), "")
+        val normalizedTokens = lower.replace(RegexCache.get("[^a-z0-9]"), "")
         val labels = lower.split('.', '-', '_').filter { it.isNotBlank() }
         if (isLowValueSuspiciousSampleDomain(lower)) return false
         val baseMatch = adKeywords.any { keyword ->

@@ -18,25 +18,57 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
     override fun ping(): Boolean = true
 
     override fun blockPackageNotifications(packageName: String): Boolean {
-        return runAppOpsBatch(
+        val notificationDisabled = runShellCommandWithFallback(
+            listOf(
+                listOf("cmd", "notification", "set_enabled", packageName, "0"),
+                listOf("cmd", "notification", "set_enabled", packageName, "false")
+            )
+        )
+        val channelsBlocked = blockAllNotificationChannels(packageName)
+        val settingsBlocked = runShellCommandWithFallback(
+            listOf(
+                listOf("settings", "put", "secure", "${packageName}_notification", "0")
+            )
+        )
+        val appOpsBlocked = runAppOpsBatch(
             packageName,
             modes = listOf(
                 "POST_NOTIFICATION" to "ignore",
+                "VIBRATE" to "ignore",
                 "RUN_ANY_IN_BACKGROUND" to "ignore",
+                "RUN_IN_BACKGROUND" to "ignore",
+                "START_FOREGROUND" to "ignore",
                 "WAKE_LOCK" to "ignore"
             )
         )
+        return notificationDisabled || channelsBlocked || settingsBlocked || appOpsBlocked
     }
 
     override fun allowPackageNotifications(packageName: String): Boolean {
-        return runAppOpsBatch(
+        val notificationEnabled = runShellCommandWithFallback(
+            listOf(
+                listOf("cmd", "notification", "set_enabled", packageName, "1"),
+                listOf("cmd", "notification", "set_enabled", packageName, "true")
+            )
+        )
+        val channelsRestored = restoreAllNotificationChannels(packageName)
+        val settingsRestored = runShellCommandWithFallback(
+            listOf(
+                listOf("settings", "put", "secure", "${packageName}_notification", "1")
+            )
+        )
+        val appOpsAllowed = runAppOpsBatch(
             packageName,
             modes = listOf(
                 "POST_NOTIFICATION" to "allow",
+                "VIBRATE" to "allow",
                 "RUN_ANY_IN_BACKGROUND" to "allow",
+                "RUN_IN_BACKGROUND" to "allow",
+                "START_FOREGROUND" to "allow",
                 "WAKE_LOCK" to "allow"
             )
         )
+        return notificationEnabled || channelsRestored || settingsRestored || appOpsAllowed
     }
 
     override fun disablePackage(packageName: String): Boolean {
@@ -179,6 +211,51 @@ class ShizukuAdControlUserService() : IAdControlService.Stub() {
 
     override fun destroy() {
         System.exit(0)
+    }
+
+    private fun blockAllNotificationChannels(packageName: String): Boolean {
+        val listResult = runCommand(listOf("cmd", "notification", "list", packageName))
+        if (!listResult.success) return false
+        val channelIds = parseNotificationChannelIds(listResult.summary)
+        if (channelIds.isEmpty()) return false
+        var anyBlocked = false
+        channelIds.forEach { channelId ->
+            val blockResult = runCommand(listOf("cmd", "notification", "set_importance", packageName, channelId, "0"))
+            if (blockResult.success) anyBlocked = true
+        }
+        return anyBlocked
+    }
+
+    private fun restoreAllNotificationChannels(packageName: String): Boolean {
+        val listResult = runCommand(listOf("cmd", "notification", "list", packageName))
+        if (!listResult.success) return false
+        val channelIds = parseNotificationChannelIds(listResult.summary)
+        if (channelIds.isEmpty()) {
+            return runShellCommandWithFallback(
+                listOf(
+                    listOf("cmd", "notification", "set_enabled", packageName, "1"),
+                    listOf("cmd", "notification", "set_enabled", packageName, "true")
+                )
+            )
+        }
+        var anyRestored = false
+        channelIds.forEach { channelId ->
+            val restoreResult = runCommand(listOf("cmd", "notification", "set_importance", packageName, channelId, "3"))
+            if (restoreResult.success) anyRestored = true
+        }
+        return anyRestored
+    }
+
+    private fun parseNotificationChannelIds(summary: String): List<String> {
+        val channelIds = mutableListOf<String>()
+        val regex = Regex("id=([^\\s,}]+)")
+        regex.findAll(summary).forEach { match ->
+            val id = match.groupValues.getOrNull(1)?.trim() ?: return@forEach
+            if (id.isNotBlank() && id != "miscellaneous") {
+                channelIds.add(id)
+            }
+        }
+        return channelIds.distinct()
     }
 
     private fun runShellCommandWithFallback(commands: List<List<String>>): Boolean {

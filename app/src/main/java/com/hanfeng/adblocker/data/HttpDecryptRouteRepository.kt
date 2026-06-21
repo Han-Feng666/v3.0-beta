@@ -9,24 +9,28 @@ object HttpDecryptRouteRepository {
     private const val KEY_ROUTES = "routes"
     private const val MAX_ROUTE_COUNT = 256
     private val gson = Gson()
+    @Volatile private var cachedRoutes: List<RouteEntry>? = null
+    private val cacheLock = Any()
 
     fun getRoutes(context: Context): List<RouteEntry> {
         pruneExpired(context)
-        val type = object : TypeToken<List<RouteEntry>>() {}.type
-        val json = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_ROUTES, "[]") ?: "[]"
-        return gson.fromJson<List<RouteEntry>>(json, type)
-            ?.mapNotNull(::sanitizeRouteEntry)
-            ?.filter { it.ip.isNotBlank() && it.prefixLength in 0..128 }
-            ?.sortedBy { it.ip }
-            ?: emptyList()
+        cachedRoutes?.let { return it }
+        synchronized(cacheLock) {
+            cachedRoutes?.let { return it }
+            val loaded = readRoutesFromPrefs(context)
+            cachedRoutes = loaded
+            return loaded
+        }
     }
 
     fun upsertRoutes(context: Context, routes: List<RouteEntry>): Boolean {
         if (routes.isEmpty()) return false
         val now = System.currentTimeMillis()
-        val current = getRoutes(context)
-            .filter { it.expiresAt > now }
-            .associateByTo(linkedMapOf()) { routeKey(it.ip, it.prefixLength) }
+        val current = synchronized(cacheLock) {
+            (cachedRoutes ?: readRoutesFromPrefs(context))
+                .filter { it.expiresAt > now }
+                .associateByTo(linkedMapOf()) { routeKey(it.ip, it.prefixLength) }
+        }
         var changed = false
         routes.forEach { route ->
             if (route.ip.isBlank() || route.prefixLength !in 0..128 || route.expiresAt <= now) return@forEach
@@ -47,15 +51,17 @@ object HttpDecryptRouteRepository {
     }
 
     fun pruneExpired(context: Context): Boolean {
-        val type = object : TypeToken<List<RouteEntry>>() {}.type
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val json = prefs.getString(KEY_ROUTES, "[]") ?: "[]"
-        val current = gson.fromJson<List<RouteEntry>>(json, type)
-            ?.mapNotNull(::sanitizeRouteEntry)
-            ?: emptyList()
         val now = System.currentTimeMillis()
+        val current = synchronized(cacheLock) {
+            cachedRoutes ?: readRoutesFromPrefs(context)
+        }
         val filtered = current.filter { it.expiresAt > now && it.ip.isNotBlank() && it.prefixLength in 0..128 }
-        if (filtered.size == current.size) return false
+        if (filtered.size == current.size) {
+            synchronized(cacheLock) {
+                if (cachedRoutes == null) cachedRoutes = current
+            }
+            return false
+        }
         save(context, filtered.sortedBy { it.ip })
         return true
     }
@@ -65,10 +71,27 @@ object HttpDecryptRouteRepository {
     }
 
     private fun save(context: Context, routes: List<RouteEntry>) {
+        val normalized = routes
+            .mapNotNull(::sanitizeRouteEntry)
+            .filter { it.ip.isNotBlank() && it.prefixLength in 0..128 }
+            .sortedBy { it.ip }
+        synchronized(cacheLock) {
+            cachedRoutes = normalized
+        }
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_ROUTES, gson.toJson(routes))
+            .putString(KEY_ROUTES, gson.toJson(normalized))
             .apply()
+    }
+
+    private fun readRoutesFromPrefs(context: Context): List<RouteEntry> {
+        val type = object : TypeToken<List<RouteEntry>>() {}.type
+        val json = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_ROUTES, "[]") ?: "[]"
+        return gson.fromJson<List<RouteEntry>>(json, type)
+            ?.mapNotNull(::sanitizeRouteEntry)
+            ?.filter { it.ip.isNotBlank() && it.prefixLength in 0..128 }
+            ?.sortedBy { it.ip }
+            ?: emptyList()
     }
 
     private fun sanitizeRouteEntry(route: RouteEntry?): RouteEntry? {

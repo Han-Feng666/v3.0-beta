@@ -73,7 +73,12 @@ class RemoteRuleSourcesActivity : BaseActivity() {
                 RuleRepository.getRemoteRuleSources(applicationContext)
             }
             if (requestVersion != loadSourcesVersion || isFinishing || isDestroyed) return@launch
-            allSources = sources
+            allSources = sources.map { source ->
+                if (source.lastError?.isNotBlank() == true) {
+                    RuleRepository.updateRemoteRuleSource(applicationContext, source.copy(lastError = null))
+                    source.copy(lastError = null)
+                } else source
+            }
             applyFilter(binding.searchInput.text?.toString().orEmpty())
         }
     }
@@ -255,8 +260,8 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             .setView(container)
             .setPositiveButton(if (source == null) "添加" else "保存", null)
             .setNegativeButton("取消", null)
-            .show()
-            .also { dialog ->
+            .showSafely(this, "Show remote source editor dialog failed")
+            ?.also { dialog ->
                 dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                     val name = nameInput.text?.toString().orEmpty().trim()
                     val url = urlInput.text?.toString().orEmpty().trim()

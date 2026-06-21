@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.core.content.FileProvider
 import com.HanFeng.security.CertificateAuthorityManager
+import com.HanFeng.model.RuleSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,10 +49,26 @@ object LogRepository {
         "HTTP/2 client rewrite buffering ",
         "HTTP/2 payload suppressed ",
         "HTTP/2 frame filtering tail-preserved ",
+        "HTTP/2 request payload rewritten host=",
         "HTTPS request host=",
         "HTTPS response passthrough host=",
+        "HTTPS response neutralized host=",
         "Accepted local HTTPS bridge client host=",
-        "Connected local HTTPS bridge socket flow="
+        "Connected local HTTPS bridge socket flow=",
+        "Blocked DNS domain=",
+        "Passed DNS domain=",
+        "Blocked HTTP connection domain=",
+        "Passed HTTP connection domain=",
+        "Passed HTTPS SYN domain=",
+        "Blocked HTTPS connection at SYN domain=",
+        "TUN debug rate",
+        "Skip suspicious sample:",
+        "MITM full-capture circuit opened for",
+        "Enabled MITM app full-capture routes",
+        "Enabled global MITM full-capture routes",
+        "Skipped MITM full-capture routes",
+        "Scheduled VPN reload",
+        "Reloaded VPN for new HTTP decrypt routes"
     )
     private val blockedDomainPattern = Pattern.compile("Blocked [^\\n]* domain=([^\\s]+)")
     private val passedDomainPattern = Pattern.compile("Passed [^\\n]* domain=([^\\s]+)")
@@ -139,12 +156,14 @@ object LogRepository {
         }
     }
 
-    fun exportZip(context: Context): android.net.Uri {
-        val shareDir = File(context.cacheDir, "shared")
-        shareDir.mkdirs()
-        val zipFile = File(shareDir, LOG_EXPORT_FILE)
-        FileOutputStream(zipFile).use { output -> output.write(buildZipBytes(context)) }
-        return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zipFile)
+    fun exportZip(context: Context): android.net.Uri? {
+        return runCatching {
+            val shareDir = File(context.cacheDir, "shared")
+            shareDir.mkdirs()
+            val zipFile = File(shareDir, LOG_EXPORT_FILE)
+            FileOutputStream(zipFile).use { output -> output.write(buildZipBytes(context)) }
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zipFile)
+        }.getOrNull()
     }
 
     fun exportZipToDownloads(context: Context): String? {
@@ -237,6 +256,17 @@ object LogRepository {
                 zip.putNextEntry(ZipEntry(String.format(Locale.US, "%s", "suspicious-domains.txt")))
                 zip.write(suspiciousDomainReport.toByteArray())
                 zip.closeEntry()
+                val crashDir = File(context.filesDir, "crashes")
+                val crashFiles = crashDir.listFiles()?.filter {
+                    it.name.startsWith("crash_") && it.name.endsWith(".txt")
+                } ?: emptyList()
+                crashFiles.forEach { file ->
+                    zip.putNextEntry(ZipEntry("crashes/${file.name}"))
+                    file.inputStream().use { input ->
+                        input.copyTo(zip, bufferSize = 256 * 1024)
+                    }
+                    zip.closeEntry()
+                }
             }
             byteStream.toByteArray()
         }
@@ -273,7 +303,6 @@ object LogRepository {
 
     fun toggleDomainDecision(context: Context, domain: String, currentType: DomainDecisionType) {
         val newType = if (currentType == DomainDecisionType.BLOCKED) DomainDecisionType.ALLOWED else DomainDecisionType.BLOCKED
-        val timestamp = System.currentTimeMillis()
         val message = if (newType == DomainDecisionType.BLOCKED) {
             "Blocked request host=$domain via manual-toggle app=user"
         } else {
@@ -281,5 +310,21 @@ object LogRepository {
         }
         append(context, "[DecisionToggle] 域名 $domain 已从 ${if (currentType == DomainDecisionType.BLOCKED) "拦截" else "放行"} 切换为 ${if (newType == DomainDecisionType.BLOCKED) "拦截" else "放行"}")
         append(context, message)
+
+        if (newType == DomainDecisionType.BLOCKED) {
+            val rule = RuleRepository.addRule(context, domain, RuleSource.MANUAL)
+            if (rule != null) {
+                append(context, "已同步添加拦截规则: $domain")
+            }
+        } else {
+            val rules = RuleRepository.getRules(context)
+            val manualIds = rules.filter {
+                it.domain.equals(domain, ignoreCase = true) && it.source == RuleSource.MANUAL
+            }.map { it.id }.toSet()
+            if (manualIds.isNotEmpty()) {
+                val removed = RuleRepository.removeRulesByIds(context, manualIds)
+                append(context, "已同步移除 $removed 条拦截规则")
+            }
+        }
     }
 }

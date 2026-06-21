@@ -233,12 +233,7 @@ class ImpactNormalNetworkActivity : BaseActivity() {
             }.getOrNull()
             
             if (dialog != null) {
-                runCatching {
-                    dialog.show()
-                }.onFailure { e ->
-                    LogRepository.append(this@ImpactNormalNetworkActivity, "Dialog show failed: ${e.message ?: e.javaClass.simpleName}")
-                    Toast.makeText(this@ImpactNormalNetworkActivity, "对话框显示失败，请重试", Toast.LENGTH_SHORT).show()
-                }
+                dialog.showSafely(this@ImpactNormalNetworkActivity, "Show delete confirmation dialog failed")
             } else {
                 LogRepository.append(this@ImpactNormalNetworkActivity, "Dialog builder failed")
                 Toast.makeText(this@ImpactNormalNetworkActivity, "无法显示确认对话框", Toast.LENGTH_SHORT).show()

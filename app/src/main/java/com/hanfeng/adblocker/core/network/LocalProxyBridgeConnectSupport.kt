@@ -20,7 +20,9 @@ object LocalProxyBridgeConnectSupport {
         output.flush()
         val methodReply = ByteArray(2)
         input.readFully(methodReply)
-        check(methodReply[0].toInt() == 0x05 && methodReply[1].toInt() == 0x00) { "SOCKS5 method negotiation failed" }
+        if (methodReply[0].toInt() != 0x05 || methodReply[1].toInt() != 0x00) {
+            throw IOException("SOCKS5 method negotiation failed")
+        }
         val addressType = if (request.version == 6) 0x04 else 0x01
         val connectRequest = ByteArray(4 + request.destinationAddress.size + 2)
         connectRequest[0] = 0x05
@@ -35,7 +37,9 @@ object LocalProxyBridgeConnectSupport {
         output.flush()
         val header = ByteArray(4)
         input.readFully(header)
-        check(header[0].toInt() == 0x05 && header[1].toInt() == 0x00) { "SOCKS5 connect failed code=${header[1].toInt() and 0xFF}" }
+        if (header[0].toInt() != 0x05 || header[1].toInt() != 0x00) {
+            throw IOException("SOCKS5 connect failed code=${header[1].toInt() and 0xFF}")
+        }
         val addressLength = when (header[3].toInt() and 0xFF) {
             0x01 -> 4
             0x04 -> 16
@@ -105,8 +109,8 @@ object LocalProxyBridgeConnectSupport {
         val responseBytes = input.readUntilHeaderTerminator(8192)
         val responseText = responseBytes.toString(Charsets.US_ASCII)
         val statusLine = responseText.lineSequence().firstOrNull()?.trim().orEmpty()
-        check(statusLine.startsWith("HTTP/1.1 200") || statusLine.startsWith("HTTP/1.0 200")) {
-            "HTTP CONNECT failed status=${statusLine.ifBlank { "unknown" }}"
+        if (!statusLine.startsWith("HTTP/1.1 200") && !statusLine.startsWith("HTTP/1.0 200")) {
+            throw IOException("HTTP CONNECT failed status=${statusLine.ifBlank { "unknown" }}")
         }
     }
 

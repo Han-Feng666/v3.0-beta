@@ -12,6 +12,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.content.res.Configuration
+import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
@@ -31,6 +32,8 @@ import com.HanFeng.data.RuleRepository
 import com.HanFeng.data.ShizukuRepository
 import com.HanFeng.databinding.ActivityMainBinding
 import com.HanFeng.security.CertificateAuthorityManager
+import com.HanFeng.adblocker.compat.DeviceCompatibilityHelper
+import com.HanFeng.adblocker.compat.DeviceCompatibilityHelper.RomType
 import com.HanFeng.ui.SuspiciousDomainsActivity
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +46,8 @@ class MainActivity : BaseActivity() {
         private const val PERMISSION_PREFS = "permission_flow"
         private const val KEY_FIRST_LAUNCH_CHECK_DONE = "first_launch_check_done"
         private const val KEY_LAST_SUSPICIOUS_PROMPT_AT = "last_suspicious_prompt_at"
+        private const val KEY_BATTERY_OPT_PROMPT_AT = "last_battery_opt_prompt_at"
+        private const val BATTERY_OPT_PROMPT_COOLDOWN = 7L * 24L * 60L * 60L * 1000L
         const val EXTRA_AUTO_REMOVE_FROM_RECENTS = "extra_auto_remove_from_recents"
     }
 
@@ -79,19 +84,24 @@ class MainActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
+        runCatching {
+            (application as? com.HanFeng.HanFengApp)?.writeStartupLog("MainActivity.onCreate start")
+        }
+        runCatching {
+            Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
+        }
+        runCatching {
+            (application as? com.HanFeng.HanFengApp)?.writeStartupLog("Shizuku listener attached")
+        }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setupMainContent(savedInstanceState)
         requestNotificationPermissionIfNeeded()
-        scheduleRemoteRuleSync()
         scheduleSuspiciousDomainPrompt()
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
+        runCatching {
+            (application as? com.HanFeng.HanFengApp)?.writeStartupLog("MainActivity.onCreate complete")
+        }
     }
 
     override fun onResume() {
@@ -99,6 +109,12 @@ class MainActivity : BaseActivity() {
         syncMitmCertificateStateIfNeeded()
         ensureVpnServiceMatchesUserIntent()
         refreshHomeStatus()
+        checkAndPromptBatteryOptimization()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
     }
 
     private fun ensureVpnServiceMatchesUserIntent() {
@@ -123,9 +139,11 @@ class MainActivity : BaseActivity() {
             resources.configuration.smallestScreenWidthDp >= 600
         val pager = binding.root.findViewById<androidx.viewpager2.widget.ViewPager2?>(R.id.pager)
         if (!isTabletLandscape) {
+            pager?.isSaveEnabled = false
+            pager?.adapter = null
             pager?.adapter = MainPagerAdapter(this)
             pager?.offscreenPageLimit = 1
-            pager?.currentItem = 1
+            pager?.setCurrentItem(1, false)
             return
         }
         if (savedInstanceState != null) return
@@ -199,6 +217,11 @@ class MainActivity : BaseActivity() {
     private fun scheduleRemoteRuleSync() {
         binding.root.post {
             lifecycleScope.launch {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        RuleRepository.ensureSecurityRuleSource(applicationContext)
+                    }
+                }
                 if (!RemoteRuleSourceRepository.shouldSyncOnAppLaunch(applicationContext)) {
                     return@launch
                 }
@@ -219,6 +242,67 @@ class MainActivity : BaseActivity() {
                 }
             }
         }
+    }
+
+    private fun checkAndPromptBatteryOptimization() {
+        if (isFinishing || isDestroyed || batteryOptimizationPromptShown) return
+        if (DeviceCompatibilityHelper.isIgnoringBatteryOptimizations(this)) return
+        val prefs = getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE)
+        val lastPromptAt = prefs.getLong(KEY_BATTERY_OPT_PROMPT_AT, 0L)
+        val now = System.currentTimeMillis()
+        if (lastPromptAt > 0L && now - lastPromptAt < BATTERY_OPT_PROMPT_COOLDOWN) return
+        batteryOptimizationPromptShown = true
+        val romType = DeviceCompatibilityHelper.detectRomType()
+        val isChineseRom = DeviceCompatibilityHelper.isChineseRom()
+        val brand = Build.BRAND.take(1).uppercase() + Build.BRAND.drop(1)
+        runCatching {
+            MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_HanFeng_Dialog)
+                .setTitle("保持后台运行")
+                .setMessage(
+                    buildString {
+                        append("为确保广告拦截持续生效，建议关闭 $brand 对此应用的电池优化限制。")
+                        if (isChineseRom) {
+                            append("\n\n国产手机通常还需要：")
+                            append("\n- 允许自启动")
+                            append("\n- 锁定后台任务")
+                            append("\n- 关闭省电策略")
+                        }
+                    }
+                )
+                .setPositiveButton("关闭电池优化") { _, _ ->
+                    rememberBatteryOptimizationPrompt(now)
+                    batteryOptimizationPromptShown = false
+                    DeviceCompatibilityHelper.requestBatteryOptimizationExemption(this@MainActivity)
+                }
+                .setNeutralButton("自启动设置") { _, _ ->
+                    rememberBatteryOptimizationPrompt(now)
+                    batteryOptimizationPromptShown = false
+                    val opened = DeviceCompatibilityHelper.openAutoStartSettings(this@MainActivity)
+                    if (!opened) {
+                        showShortToast("无法打开自启动设置，请手动到系统设置中设置")
+                    }
+                }
+                .setNegativeButton("稍后") { _, _ ->
+                    rememberBatteryOptimizationPrompt(now)
+                    batteryOptimizationPromptShown = false
+                }
+                .create()
+                .also { dialog ->
+                    if (romType == RomType.SAMSUNG || romType == RomType.GOOGLE || romType == RomType.STOCK_ANDROID) {
+                        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)?.visibility = View.GONE
+                    }
+                }
+                .showSafely(this, "Show battery optimization dialog failed")
+        }.onFailure {
+            batteryOptimizationPromptShown = false
+        }
+    }
+
+    private fun rememberBatteryOptimizationPrompt(timestamp: Long) {
+        getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_BATTERY_OPT_PROMPT_AT, timestamp)
+            .apply()
     }
 
     private fun scheduleSuspiciousDomainPrompt() {
@@ -428,7 +512,10 @@ class MainActivity : BaseActivity() {
     }
 
     fun shareLogs() {
-        val uri = LogRepository.exportZip(this)
+        val uri = LogRepository.exportZip(this) ?: run {
+            showShortToast("日志导出失败")
+            return
+        }
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "application/zip"
             putExtra(Intent.EXTRA_STREAM, uri)
@@ -570,6 +657,7 @@ class MainActivity : BaseActivity() {
 
     private var pendingHttpDecryptEnableAfterPermission = false
     private var pendingHttpDecryptCompletion: ((Boolean) -> Unit)? = null
+    private var batteryOptimizationPromptShown = false
     private val storagePermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (pendingHttpDecryptEnableAfterPermission) {
             val completion = pendingHttpDecryptCompletion

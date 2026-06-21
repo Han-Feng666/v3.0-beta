@@ -5,6 +5,10 @@ object RuleProtectionSupport {
         return protectedDomains.contains(domain) || protectedDomains.any { domain.endsWith(".$it") }
     }
 
+    fun matchesExactOrSubdomain(domain: String, trie: DomainSuffixTrie): Boolean {
+        return trie.contains(domain)
+    }
+
     fun isSensitiveAuthDomain(
         domain: String,
         sanitizeDomain: (String) -> String?,

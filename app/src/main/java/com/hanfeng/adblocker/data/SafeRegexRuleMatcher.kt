@@ -24,7 +24,14 @@ object SafeRegexRuleMatcher {
         }
         val cached = cacheState.compiledPatterns[safePattern]
         if (cached != null) {
-            return MatchResult(cached.matcher(value).find(), cacheState)
+            val matched = safeFind(cached, value)
+            if (matched == null) {
+                return MatchResult(
+                    matched = false,
+                    cacheState = cacheState.copy(invalidPatterns = cacheState.invalidPatterns + safePattern)
+                )
+            }
+            return MatchResult(matched, cacheState)
         }
         val compiled = runCatching {
             Pattern.compile(safePattern, Pattern.CASE_INSENSITIVE)
@@ -36,9 +43,23 @@ object SafeRegexRuleMatcher {
             )
         }
         val nextState = cacheState.copy(compiledPatterns = cacheState.compiledPatterns + (safePattern to compiled))
-        return MatchResult(
-            matched = compiled.matcher(value).find(),
-            cacheState = nextState
-        )
+        val matched = safeFind(compiled, value)
+        if (matched == null) {
+            return MatchResult(
+                matched = false,
+                cacheState = nextState.copy(invalidPatterns = nextState.invalidPatterns + safePattern)
+            )
+        }
+        return MatchResult(matched = matched, cacheState = nextState)
+    }
+
+    private fun safeFind(pattern: Pattern, value: String): Boolean? {
+        return try {
+            pattern.matcher(value).find()
+        } catch (_: StackOverflowError) {
+            null
+        } catch (_: OutOfMemoryError) {
+            null
+        }
     }
 }

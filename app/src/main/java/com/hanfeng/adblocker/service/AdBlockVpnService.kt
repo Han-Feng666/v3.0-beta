@@ -32,6 +32,7 @@ import com.HanFeng.core.network.NetworkRuntimeSettingsStore
 import com.HanFeng.core.network.DnsRuntimeSupport
 import com.HanFeng.core.network.BridgeSocketSupport
 import com.HanFeng.core.network.BridgeSessionSupport
+import com.HanFeng.core.network.DnsOverHttpsClient
 import com.HanFeng.core.network.DecisionLogSupport
 import com.HanFeng.core.network.BridgeFlowStateSupport
 import com.HanFeng.core.network.BridgeFailureSupport
@@ -48,7 +49,6 @@ import com.HanFeng.core.network.ServerAckStateSupport
 import com.HanFeng.core.network.TcpSyntheticFlowEngine
 import com.HanFeng.core.network.TunPacketWriter
 import com.HanFeng.core.network.TrafficDecisionEngine
-import com.HanFeng.core.network.ThermalThrottleManager
 import com.HanFeng.core.network.UpstreamDnsSupport
 import com.HanFeng.core.network.MitmLearningEngine
 import com.HanFeng.core.network.ProcNetResolver
@@ -93,6 +93,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.LinkedBlockingQueue
 import kotlin.math.min
 
 class AdBlockVpnService : VpnService() {
@@ -113,7 +114,7 @@ class AdBlockVpnService : VpnService() {
     private val ownerUidFailureCache = ConcurrentHashMap<String, Long>(512)
     private val appLabelCache = ConcurrentHashMap<Int, String>(128)
     private val vendorHintCache = ConcurrentHashMap<String, String>(512)
-    private val dnsResponseCache = LinkedHashMap<String, DnsRuntimeSupport.CachedDnsResponse>(256, 0.75f, true)
+    private val dnsResponseCache = LinkedHashMap<String, DnsRuntimeSupport.CachedDnsResponse>(2048, 0.75f, true)
     private val decisionLogCache = LinkedHashMap<String, Long>(256, 0.75f, true)
     private val adIpTargetCache = LinkedHashMap<String, AdIpTarget>(1024, 0.75f, true)
     private val httpDecryptIpCache = LinkedHashMap<String, HttpDecryptTarget>(512, 0.75f, true)
@@ -152,6 +153,55 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var lastRouteCachePruneCheckAt = 0L
     @Volatile private var lastUnderlyingNetworkRefreshAt = 0L
     @Volatile private var tunOutputStream: FileOutputStream? = null
+
+    // DNS Async Worker — 将阻塞的 DNS 上游查询从主线程剥离
+    private val dnsTaskIn = LinkedBlockingQueue<DnsAsyncTask>(512)
+    private val dnsResultOut = LinkedBlockingQueue<DnsAsyncResult>(512)
+    @Volatile private var dnsWorkerActive = false
+    private var dnsWorkerThread: Thread? = null
+
+    private fun startDnsWorker(): Thread {
+        val thread = Thread({
+            android.os.Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+            while (dnsWorkerActive && isRunning) {
+                try {
+                    val task = dnsTaskIn.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    if (task != null && task.generation == activeTunGeneration) {
+                        val result = processDnsTaskAsync(task)
+                        if (result != null) {
+                            dnsResultOut.offer(result)
+                        }
+                    }
+                } catch (_: InterruptedException) {
+                    break
+                } catch (error: Exception) {
+                    LogRepository.append(this@AdBlockVpnService,
+                        "DnsWorker error: ${error.message ?: error.javaClass.simpleName}")
+                }
+            }
+        }, "DnsWorker").apply { isDaemon = true }
+        dnsWorkerThread = thread
+        return thread
+    }
+
+    private data class DnsAsyncTask(
+        val generation: Long,
+        val payload: ByteArray,
+        val info: com.HanFeng.model.PacketInfo,
+        val question: DnsQuestion
+    )
+
+    private data class DnsAsyncResult(
+        val generation: Long,
+        val info: com.HanFeng.model.PacketInfo,
+        val question: DnsQuestion,
+        val domainContext: DomainDecisionContext,
+        val upstreamResult: UpstreamDnsSupport.UpstreamDnsResult?,
+        val staleResponse: ByteArray?,
+        val failureResponse: ByteArray?,
+        val protectedQuestion: Boolean,
+        val shouldUseActiveMitmRouting: Boolean
+    )
     private val blockedIpNetworks by lazy(LazyThreadSafetyMode.NONE) { loadBlockedIpNetworks() }
     private val upstreamFallbackDnsHosts = listOf(
         "223.5.5.5",
@@ -201,7 +251,6 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var forceEncryptedDnsFallbackEnabled = true
     @Volatile private var mitmLearningModeEnabled = false
     @Volatile private var procNetOwnerFallbackEnabled = false
-    @Volatile private var thermalThrottleSnapshot = ThermalThrottleManager.Snapshot()
     @Volatile private var mitmCertificateInstalled = false
     @Volatile private var shizukuConnectionOwnerReady = false
     @Volatile private var shizukuAdControlReady = false
@@ -434,30 +483,11 @@ class AdBlockVpnService : VpnService() {
             whitelistCount = WhitelistRepository.getPackages(this).size,
             dynamicDecryptRouteCount = HttpsDecryptRouteRepository.getRoutes(this).size
         )
-        ThermalThrottleManager.start(this, scope) { snapshot ->
-            applyThermalThrottle(snapshot)
-        }
     }
 
-    private fun applyThermalThrottle(snapshot: ThermalThrottleManager.Snapshot) {
-        val previousHttpDecrypt = httpDecryptEnabled
-        thermalThrottleSnapshot = snapshot
-        applyThermalRuntimeOverrides(snapshot)
-        LogRepository.append(
-            this,
-            "Thermal throttle applied level=${snapshot.level} httpDecrypt=$httpDecryptEnabled mitmLearning=$mitmLearningModeEnabled responseLimit=${snapshot.responseBodyLimitBytes}"
-        )
-        refreshForegroundNotification()
-        if (previousHttpDecrypt != httpDecryptEnabled && isRunning) {
-            scheduleVpnReload(delayMillis = 800L)
-        }
-    }
-
-    private fun applyThermalRuntimeOverrides(snapshot: ThermalThrottleManager.Snapshot = thermalThrottleSnapshot) {
-        val configuredMitmLearning = FeatureSettingsRepository.isMitmLearningModeEnabled(this)
-        val configuredHttpDecrypt = FeatureSettingsRepository.isHttpDecryptEnabled(this)
-        mitmLearningModeEnabled = configuredMitmLearning && snapshot.level == ThermalThrottleManager.Level.NORMAL
-        httpDecryptEnabled = configuredHttpDecrypt && snapshot.level != ThermalThrottleManager.Level.HEAVY
+    private fun applyRuntimeSettingsFlags() {
+        mitmLearningModeEnabled = FeatureSettingsRepository.isMitmLearningModeEnabled(this)
+        httpDecryptEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(this)
     }
 
     private fun handlePacketLoopFailure(tunGeneration: Long, error: Throwable) {
@@ -572,8 +602,6 @@ class AdBlockVpnService : VpnService() {
         isRunning = false
         notifyRuntimeStatusChanged()
         startInProgress = false
-        ThermalThrottleManager.stop()
-        thermalThrottleSnapshot = ThermalThrottleManager.Snapshot()
         cancelPendingRuntimeJobs()
         cancelPacketLoop()
         activeTunGeneration += 1L
@@ -699,17 +727,17 @@ class AdBlockVpnService : VpnService() {
         localProxyTargetAppCache.clear()
         appLabelCache.clear()
         vendorHintCache.clear()
-        dnsResponseCache.clear()
-        decisionLogCache.clear()
-        adIpTargetCache.clear()
-        httpDecryptIpCache.clear()
-        httpsDecryptIpCache.clear()
-        quicRouteCache.clear()
-        httpsProxyFlowCache.clear()
+        synchronized(dnsResponseCache) { dnsResponseCache.clear() }
+        synchronized(decisionLogCache) { decisionLogCache.clear() }
+        synchronized(adIpTargetCache) { adIpTargetCache.clear() }
+        synchronized(httpDecryptIpCache) { httpDecryptIpCache.clear() }
+        synchronized(httpsDecryptIpCache) { httpsDecryptIpCache.clear() }
+        synchronized(quicRouteCache) { quicRouteCache.clear() }
+        synchronized(httpsProxyFlowCache) { httpsProxyFlowCache.clear() }
         FlowCacheSupport.clear(httpsBridgeSocketCache) { it.close() }
-        localProxyTcpFlowCache.clear()
+        synchronized(localProxyTcpFlowCache) { localProxyTcpFlowCache.clear() }
         FlowCacheSupport.clear(localProxyBridgeSocketCache) { it.close() }
-        passthroughTcpFlowCache.clear()
+        synchronized(passthroughTcpFlowCache) { passthroughTcpFlowCache.clear() }
         FlowCacheSupport.clear(passthroughTcpSocketCache) { it.close() }
         FlowCacheSupport.clear(passthroughUdpSessionCache) { it.close() }
         upstreamServerStates.clear()
@@ -877,7 +905,8 @@ class AdBlockVpnService : VpnService() {
                 }
             }
             if (appliedCount == 0) {
-                throw IllegalStateException("No ${fullCaptureMode.name.lowercase()} target apps could be applied")
+                LogRepository.append(this, "No ${fullCaptureMode.name.lowercase()} target apps applied, falling back to targeted mode")
+                return
             }
             logDecisionOnce(
                 key = "vpn-allowed-${fullCaptureMode.name.lowercase()}-apps:$appliedCount",
@@ -1121,6 +1150,11 @@ class AdBlockVpnService : VpnService() {
 
     private fun runPacketLoop(tunGeneration: Long) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+        // Start DNS async worker
+        dnsWorkerActive = true
+        dnsTaskIn.clear()
+        dnsResultOut.clear()
+        startDnsWorker().start()
         val descriptor = vpnInterface ?: return
         FileInputStream(descriptor.fileDescriptor).use { input ->
             FileOutputStream(descriptor.fileDescriptor).use { output ->
@@ -1131,6 +1165,8 @@ class AdBlockVpnService : VpnService() {
                 while (scope.isActive && isRunning) {
                     val length = input.read(buffer)
                     if (length <= 0) {
+                        // Drain pending async DNS results even during idle
+                        drainDnsAsyncResults(output, tunGeneration)
                         Thread.sleep(20L)
                         continue
                     }
@@ -1140,6 +1176,8 @@ class AdBlockVpnService : VpnService() {
                     }
                     runCatching {
                         handlePacket(buffer, length, output)
+                        // 每次包处理后消费已完成的异步 DNS 结果
+                        drainDnsAsyncResults(output, tunGeneration)
                     }.onFailure { error ->
                         LogRepository.append(this, "Packet handling failed: ${error.message ?: error.javaClass.simpleName}")
                     }
@@ -1149,6 +1187,11 @@ class AdBlockVpnService : VpnService() {
                 }
             }
         }
+        // Stop DNS worker
+        dnsWorkerActive = false
+        dnsWorkerThread?.interrupt()
+        dnsTaskIn.clear()
+        dnsResultOut.clear()
     }
 
     private fun recordTunPacketForDiagnostics(packet: ByteArray, length: Int, tunGeneration: Long): Boolean {
@@ -1286,9 +1329,28 @@ class AdBlockVpnService : VpnService() {
             handleCriticalStartupDnsQuery(info, question, output)
             return true
         }
-        handleManagedDnsQuery(info, question, output)
+        // Fast path: 响应缓存命中 → 主线程直接回复，无需阻塞
+        val cachedResponse = readCachedDnsResponse(question, info.payload)
+        if (cachedResponse != null) {
+            output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
+            val cachedApp = readCachedAppName(buildCacheKeys(info))
+                ?: readCachedDomainApp(normalizeDomain(question.domain))
+                ?: "未知应用"
+            StatsRepository.recordRequest(this, classifyVendorCached(question.domain, cachedApp), cachedApp)
+            return true
+        }
+        // Slow path: 缓存未命中 → 派发到异步 Worker，主线程继续处理后续包
+        dnsTaskIn.offer(DnsAsyncTask(
+            generation = activeTunGeneration,
+            payload = info.payload.copyOf(),
+            info = info.copy(payload = info.payload.copyOf()),
+            question = question
+        ))
         return true
     }
+
+    // 异步路径用：worker 调用 queryUpstreamDns 等全部阻塞逻辑
+    // 主线程消费队列结果写入 TUN，见 drainDnsAsyncResults / handleDnsAsyncResult
 
     private fun handlePassThroughDnsQuery(
         info: com.HanFeng.model.PacketInfo,
@@ -1430,6 +1492,162 @@ class AdBlockVpnService : VpnService() {
         if (handleBlockedDnsAliasTargets(info, question, appName, vendor, aliasTargets, output)) return
         
         // 写入 DNS 缓存并放行
+        cacheDnsResponse(question, upstreamResponse)
+        output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
+    }
+
+    // DNS Async Worker — 在后台线程执行 DNS 查询，主线程仅提交任务和消费结果
+    private fun processDnsTaskAsync(task: DnsAsyncTask): DnsAsyncResult? {
+        val info = task.info
+        val question = task.question
+        val domainContext = resolveDomainDecisionContext(
+            domain = question.domain,
+            info = info,
+            qType = question.qType
+        )
+        val appName = domainContext.appName
+        val vendor = domainContext.vendor
+
+        val protectedQuestion = (isProtectedTrafficDomain(question.domain) &&
+            !shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)) ||
+            RuleRepository.isWhitelistedDomain(question.domain) ||
+            RuleRepository.isSensitiveAuthDomain(question.domain)
+
+        if (domainContext.matchedRule != null && !protectedQuestion) {
+            val sinkhole = DnsMessageParser.buildSinkholeResponse(task.payload, question)
+            if (sinkhole != null) {
+                dnsResultOut.offer(DnsAsyncResult(
+                    generation = task.generation,
+                    info = info,
+                    question = question,
+                    domainContext = domainContext,
+                    upstreamResult = null,
+                    staleResponse = sinkhole,
+                    failureResponse = null,
+                    protectedQuestion = protectedQuestion,
+                    shouldUseActiveMitmRouting = false
+                ))
+            }
+            return null
+        }
+
+        if (!protectedQuestion && shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)) {
+            val sinkhole = DnsMessageParser.buildSinkholeResponse(task.payload, question)
+            if (sinkhole != null) {
+                dnsResultOut.offer(DnsAsyncResult(
+                    generation = task.generation,
+                    info = info,
+                    question = question,
+                    domainContext = domainContext,
+                    upstreamResult = null,
+                    staleResponse = sinkhole,
+                    failureResponse = null,
+                    protectedQuestion = protectedQuestion,
+                    shouldUseActiveMitmRouting = false
+                ))
+            }
+            return null
+        }
+
+        val staleResp = readStaleCachedDnsResponse(question, task.payload)
+        val failureResp = DnsMessageParser.buildServerFailureResponse(task.payload, question)
+        val upstreamResult = queryUpstreamDns(task.payload)
+
+        return DnsAsyncResult(
+            generation = task.generation,
+            info = info,
+            question = question,
+            domainContext = domainContext,
+            upstreamResult = upstreamResult,
+            staleResponse = staleResp,
+            failureResponse = failureResp,
+            protectedQuestion = protectedQuestion,
+            shouldUseActiveMitmRouting = shouldUseActiveMitmRouting()
+        )
+    }
+
+    // Main thread: 消费 DNS 异步结果，写入 TUN 输出
+    private fun drainDnsAsyncResults(output: FileOutputStream, tunGeneration: Long) {
+        while (true) {
+            val result = dnsResultOut.poll() ?: break
+            if (result.generation != tunGeneration) continue
+            handleDnsAsyncResult(result, output)
+        }
+    }
+
+    private fun handleDnsAsyncResult(result: DnsAsyncResult, output: FileOutputStream) {
+        val info = result.info
+        val question = result.question
+        val domainContext = result.domainContext
+        val appName = domainContext.appName
+        val vendor = domainContext.vendor
+        val protectedQuestion = result.protectedQuestion
+
+        UserAdFeedbackManager.recordNetworkActivity(
+            this,
+            UserAdFeedbackManager.NetworkActivity(
+                appName = appName,
+                host = question.domain,
+                protocol = "DNS",
+                source = "dns_query",
+                score = if (RuleRepository.looksLikeAdDomain(question.domain)) 5 else 0
+            )
+        )
+
+        // Blocked cases handled inline in processDnsTaskAsync, result was already queued
+        if (result.staleResponse != null && result.upstreamResult == null) {
+            // Sinkhole — blocked response
+            output.write(PacketCodec.buildUdpResponse(info, result.staleResponse))
+            StatsRepository.recordBlockedDns(this, vendor, appName, 512, source = StatsRepository.BlockSource.DNS_RULE)
+            logDecisionOnce(
+                key = "dns-block-async:${question.domain}:${question.qType}:${appName}",
+                message = "Blocked DNS (async) domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
+                minIntervalMillis = 20_000L
+            )
+            return
+        }
+
+        // Cache hit — handled in dispatch path, shouldn't reach here
+        val upstreamResponse = result.upstreamResult?.response
+            ?: result.staleResponse
+            ?: result.failureResponse
+            ?: return
+
+        val aliasTargets = DnsMessageParser.extractAliasTargets(upstreamResponse, question)
+        val addresses = DnsMessageParser.extractAnswerAddresses(upstreamResponse, question)
+
+        if (result.shouldUseActiveMitmRouting && addresses.isNotEmpty() && !protectedQuestion) {
+            rememberQuicTargets(question, upstreamResponse, appName, vendor)
+            rememberHttpDecryptTargets(question, upstreamResponse, appName, vendor)
+            rememberHttpsDecryptTargets(question, upstreamResponse, appName, vendor)
+            rememberAdIpTargets(question, upstreamResponse, appName, vendor)
+            maybeApplyMitmLearningSignals(
+                appName = appName,
+                domain = question.domain,
+                addresses = addresses,
+                signalType = MitmLearningEngine.SignalType.DNS_UNKNOWN
+            )
+        }
+        if (result.shouldUseActiveMitmRouting && aliasTargets.isNotEmpty() && !protectedQuestion) {
+            rememberHttpDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
+            rememberHttpsDecryptAliasTargets(question, aliasTargets, upstreamResponse, appName)
+            rememberQuicAliasTargets(question, aliasTargets, upstreamResponse, appName)
+            rememberAdIpTargetsForAliases(question, aliasTargets, upstreamResponse, appName)
+        } else if (addresses.isNotEmpty() && !protectedQuestion) {
+            rememberAdIpTargets(question, upstreamResponse, appName, vendor)
+        } else if (aliasTargets.isNotEmpty() && !protectedQuestion) {
+            rememberAdIpTargetsForAliases(question, aliasTargets, upstreamResponse, appName)
+        }
+
+        StatsRepository.recordRequest(this, vendor, appName)
+        logDecisionOnce(
+            key = "dns-pass-async:${question.domain}:${question.qType}:${appName}",
+            message = "Passed DNS (async) domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
+            minIntervalMillis = 30_000L
+        )
+
+        if (handleBlockedDnsAliasTargets(info, question, appName, vendor, aliasTargets, output)) return
+
         cacheDnsResponse(question, upstreamResponse)
         output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
     }
@@ -7451,6 +7669,9 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun queryUpstreamDns(payload: ByteArray): UpstreamDnsSupport.UpstreamDnsResult? {
+        val dohResult = queryUpstreamDnsOverHttps(payload)
+        if (dohResult != null) return dohResult
+
         return UpstreamDnsSupport.queryUpstreamDns(
             payload = payload,
             servers = resolveDnsServers(),
@@ -7466,6 +7687,25 @@ class AdBlockVpnService : VpnService() {
                 )
             }
         )
+    }
+
+    private fun queryUpstreamDnsOverHttps(payload: ByteArray): UpstreamDnsSupport.UpstreamDnsResult? {
+        for (dohUrl in DnsOverHttpsClient.DOH_SERVERS) {
+            val result = DnsOverHttpsClient.query(this, payload, dohUrl)
+            if (result != null) {
+                val serverHost = runCatching { java.net.URL(dohUrl).host }.getOrDefault(dohUrl)
+                logDecisionOnce(
+                    key = "doh-success:$dohUrl",
+                    message = "DoH query succeeded via $serverHost",
+                    minIntervalMillis = 120_000L
+                )
+                return UpstreamDnsSupport.UpstreamDnsResult(
+                    server = java.net.InetAddress.getLoopbackAddress(),
+                    response = result.response
+                )
+            }
+        }
+        return null
     }
 
     private fun acquireDnsSocket(server: InetAddress): DatagramSocket? {
@@ -7689,22 +7929,23 @@ class AdBlockVpnService : VpnService() {
             performHttpDecryptRouteReload("forced")
             return
         }
-        if (elapsed >= HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS) {
+        if (!forceImmediate && elapsed >= HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS) {
             performHttpDecryptRouteReload("immediate")
             return
         }
         if (pendingRouteReloadJob?.isActive == true) return
-        val delayMillis = if (forceImmediate) {
-            (HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS - elapsed).coerceAtLeast(80L)
+        val baseDelayMillis = if (forceImmediate) {
+            (HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS - elapsed).coerceAtLeast(HTTP_DECRYPT_ROUTE_BATCH_WINDOW_MILLIS)
         } else {
-            HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS - elapsed
+            (HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS - elapsed).coerceAtLeast(HTTP_DECRYPT_ROUTE_BATCH_WINDOW_MILLIS)
         }
+        val delayMillis = maxOf(baseDelayMillis, HTTP_DECRYPT_ROUTE_BATCH_WINDOW_MILLIS)
         pendingRouteReloadJob = scope.launch {
             delay(delayMillis)
             if (!isRunning || !httpDecryptEnabled || !FeatureSettingsRepository.isAdBlockEnabled(this@AdBlockVpnService)) {
                 return@launch
             }
-            performHttpDecryptRouteReload(if (forceImmediate) "forced-scheduled" else "scheduled")
+            performHttpDecryptRouteReload(if (forceImmediate) "forced-batched" else "scheduled-batched")
         }
         logDecisionOnce(
             key = if (forceImmediate) "vpn-reload-http-decrypt-routes-forced-scheduled" else "vpn-reload-http-decrypt-routes-scheduled",
@@ -8068,7 +8309,7 @@ class AdBlockVpnService : VpnService() {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(selectedPackage, 0)).toString()
         }.getOrDefault(selectedPackage)
         val appLabel = if (label == selectedPackage) selectedPackage else "$label ($selectedPackage)"
-        if (appLabelCache.size > 512) appLabelCache.clear()
+        if (appLabelCache.size > 2048) appLabelCache.clear()
         appLabelCache[uid] = appLabel
         return appLabel
     }
@@ -8141,9 +8382,9 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun cacheAppName(cacheKeys: AppResolveCacheKeys, domainInfo: NormalizedDomainInfo, appName: String) {
-        if (appNameCache.size > 2048) appNameCache.clear()
-        if (sourcePortAppCache.size > 1024) sourcePortAppCache.clear()
-        if (domainAppCache.size > 1024) domainAppCache.clear()
+        if (appNameCache.size > 4096) appNameCache.clear()
+        if (sourcePortAppCache.size > 2048) sourcePortAppCache.clear()
+        if (domainAppCache.size > 2048) domainAppCache.clear()
         appNameCache[cacheKeys.flowKey] = appName
         appNameCache[cacheKeys.portKey] = appName
         sourcePortAppCache[cacheKeys.sourcePortKey] = appName
@@ -8152,13 +8393,13 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun cacheOwnerUid(cacheKeys: AppResolveCacheKeys, uid: Int) {
-        if (ownerUidCache.size > 2048) ownerUidCache.clear()
+        if (ownerUidCache.size > 4096) ownerUidCache.clear()
         ownerUidCache[cacheKeys.flowKey] = uid
         ownerUidCache[cacheKeys.sourcePortKey] = uid
     }
 
     private fun cacheOwnerUidFailure(cacheKeys: AppResolveCacheKeys) {
-        if (ownerUidFailureCache.size > 2048) ownerUidFailureCache.clear()
+        if (ownerUidFailureCache.size > 4096) ownerUidFailureCache.clear()
         val expiresAt = System.currentTimeMillis() + OWNER_UID_FAILURE_TTL_MILLIS
         ownerUidFailureCache[cacheKeys.flowKey] = expiresAt
         ownerUidFailureCache[cacheKeys.sourcePortKey] = expiresAt
@@ -8199,7 +8440,7 @@ class AdBlockVpnService : VpnService() {
         val cacheKey = "${domainInfo.normalized}|$normalizedApp"
         vendorHintCache[cacheKey]?.let { return it }
         val resolved = RuleRepository.classifyVendorFromHints(this, domain, appName)
-        if (vendorHintCache.size > 2048) vendorHintCache.clear()
+        if (vendorHintCache.size > 4096) vendorHintCache.clear()
         vendorHintCache[cacheKey] = resolved
         return resolved
     }
@@ -8353,22 +8594,12 @@ class AdBlockVpnService : VpnService() {
 
     private fun notificationModeText(): String {
         val localProxyText = localProxyNotificationText()
-        val thermalText = thermalNotificationText()
         return when {
-            isWaitingForReacquire() -> appendModeSuffix("当前模式：VPN 被系统替换，正在自动恢复", localProxyText, thermalText)
-            !isRunning -> appendModeSuffix("当前模式：已关闭", localProxyText, thermalText)
-            httpDecryptEnabled && mitmCertificateInstalled -> appendModeSuffix("当前模式：MITM + DNS 拦截", localProxyText, thermalText)
-            httpDecryptEnabled -> appendModeSuffix("当前模式：DNS/IP 拦截，MITM 等待证书安装", localProxyText, thermalText)
-            else -> appendModeSuffix("当前模式：DNS 拦截", localProxyText, thermalText)
-        }
-    }
-
-    private fun thermalNotificationText(): String? {
-        val snapshot = ThermalThrottleManager.snapshot()
-        return when (snapshot.level) {
-            ThermalThrottleManager.Level.NORMAL -> null
-            ThermalThrottleManager.Level.LIGHT -> "过热保护：轻度降级"
-            ThermalThrottleManager.Level.HEAVY -> "过热保护：仅 DNS 拦截"
+            isWaitingForReacquire() -> appendModeSuffix("当前模式：VPN 被系统替换，正在自动恢复", localProxyText)
+            !isRunning -> appendModeSuffix("当前模式：已关闭", localProxyText)
+            httpDecryptEnabled && mitmCertificateInstalled -> appendModeSuffix("当前模式：MITM + DNS 拦截", localProxyText)
+            httpDecryptEnabled -> appendModeSuffix("当前模式：DNS/IP 拦截，MITM 等待证书安装", localProxyText)
+            else -> appendModeSuffix("当前模式：DNS 拦截", localProxyText)
         }
     }
 
@@ -8430,7 +8661,7 @@ class AdBlockVpnService : VpnService() {
         localProxyCoexistConfig = flags.localProxyConfig
         localProxyTargetPackages = flags.localProxyTargetPackages
         lightweightPassThroughMode = flags.lightweightPassThroughMode
-        applyThermalRuntimeOverrides()
+        applyRuntimeSettingsFlags()
         
         // SSL Pinning 绕过
         sslPinningBypasser = SslPinningBypasser(this)
@@ -8669,6 +8900,7 @@ class AdBlockVpnService : VpnService() {
         private const val TCP_SEGMENT_PAYLOAD_SIZE = 1400
         private const val HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS = 75_000L
         private const val HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS = 45_000L
+        private const val HTTP_DECRYPT_ROUTE_BATCH_WINDOW_MILLIS = 15_000L
         private const val UNDERLYING_NETWORK_REFRESH_MIN_INTERVAL_MILLIS = 1_500L
         private const val FOREGROUND_NOTIFICATION_REFRESH_MIN_INTERVAL_MILLIS = 3_000L
         private const val OWNER_UID_FAILURE_TTL_MILLIS = 60_000L

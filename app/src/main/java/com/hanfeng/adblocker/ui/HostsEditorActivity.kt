@@ -71,11 +71,12 @@ class HostsEditorActivity : BaseActivity() {
     }
 
     private fun showResult(title: String, summary: String) {
+        if (isFinishing || isDestroyed) return
         AlertDialog.Builder(this)
             .setTitle(title)
             .setMessage(summary.ifBlank { "没有服务反馈。" })
             .setPositiveButton("确定", null)
-            .show()
+            .showSafely(this, "Show hosts sync result dialog failed")
     }
 
     private val Int.dp: Int

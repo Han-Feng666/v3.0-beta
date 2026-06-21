@@ -58,14 +58,14 @@ import java.util.UUID
 
 class RulesFragment : Fragment(R.layout.fragment_rules) {
     private companion object {
-        const val LARGE_RULE_FILE_THRESHOLD_BYTES = 2L * 1024L * 1024L
+        const val LARGE_RULE_FILE_THRESHOLD_BYTES = 512L * 1024L
     }
 
-    private class RuleFileTooLargeException : java.io.IOException("规则文件超过 2MB，将自动使用大文件模式导入")
+    private class RuleFileTooLargeException : java.io.IOException("规则文件较大，将自动使用低内存模式导入")
 
     private var mainActivity: MainActivity? = null
     private var _binding: FragmentRulesBinding? = null
-    private val binding get() = _binding!!
+    private val binding get() = _binding ?: throw IllegalStateException("FragmentRulesBinding accessed after onDestroyView")
     private val expandedGroups = mutableSetOf<String>()
     private val selectedIds = mutableSetOf<String>()
     private var selectionMode = false
@@ -76,7 +76,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private var pendingRefreshJob: Job? = null
     private var cachedRulesRef: List<BlockRule> = emptyList()
     private var cachedRulesSignature: Int = 0
-    private var cachedGroupedRules = linkedMapOf<String, List<CachedRuleEntry>>()
+    private var cachedGroupedRules = linkedMapOf<String, List<BlockRule>>()
     private val selectedRulesById = linkedMapOf<String, BlockRule>()
     private val remoteTimeFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
@@ -192,7 +192,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             onGroupClick = { vendor -> toggleGroup(vendor) },
             onGroupLongPress = { vendor ->
                 val ctx = context ?: return@RuleListAdapter
-                val rules = getGroupedRules(ctx)[vendor].orEmpty().map { it.rule }
+                val rules = getGroupedRules(ctx)[vendor].orEmpty()
                 enterSelection(rules)
             },
             onDomainClick = { item ->
@@ -311,23 +311,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         _binding = null
     }
 
-    private fun getGroupedRules(context: Context): LinkedHashMap<String, List<CachedRuleEntry>> {
+    private fun getGroupedRules(context: Context): LinkedHashMap<String, List<BlockRule>> {
         val rules = RuleRepository.getRules(context)
         val signature = buildRuleSnapshotSignature(rules)
         if (rules !== cachedRulesRef || signature != cachedRulesSignature) {
             cachedRulesRef = rules
             cachedRulesSignature = signature
-            cachedGroupedRules = LinkedHashMap(
-                rules.groupBy({ it.vendor }) { rule ->
-                    CachedRuleEntry(
-                        rule = rule,
-                        domainLower = rule.domain.lowercase(),
-                        vendorLower = rule.vendor.lowercase(),
-                        keywordLower = rule.keywordPattern?.lowercase(),
-                        regexLower = rule.regexPattern?.lowercase()
-                    )
-                }
-            )
+            cachedGroupedRules = LinkedHashMap(rules.groupBy { it.vendor })
         }
         return cachedGroupedRules
     }
@@ -431,7 +421,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         LogRepository.append(ctx, "Imported $imported manual batch rules")
         showShortToast("已导入 $imported 条规则")
         invalidateRuleListCache()
-        refreshListSoon()
+        refreshListSoon(800L)
         reloadVpnIfRunning(true)
     }
 
@@ -843,7 +833,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 updateProgressDialog(progress, "正在刷新规则列表...")
                 reloadVpnIfRunning(results.any { it.success })
                 invalidateRuleListCache()
-                refreshList()
+                refreshListSoon(800L)
                 dismissProgressDialog(progress)
                 if (manual && isAdded) {
                     val successCount = results.count { result -> result.success }
@@ -969,43 +959,53 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val currentSelectionMode = selectionMode
         val query = searchQuery.lowercase()
         viewLifecycleOwner.lifecycleScope.launch {
-            val state = withContext(Dispatchers.Default) {
-                val grouped = getGroupedRules(appContext)
-                val items = buildList {
-                    grouped.forEach { (vendor, groupRules) ->
-                        val vendorLower = groupRules.firstOrNull()?.vendorLower ?: vendor.lowercase()
-                        val matchesVendor = query.isEmpty() || vendorLower.contains(query)
-                        val filteredRules = if (query.isEmpty()) {
-                            groupRules
-                        } else {
-                            groupRules.filter {
-                                it.domainLower.contains(query) ||
-                                    it.vendorLower.contains(query) ||
-                                    it.keywordLower?.contains(query) == true ||
-                                    it.regexLower?.contains(query) == true
-                            }
-                        }
-                        if (filteredRules.isNotEmpty() || matchesVendor) {
-                            val autoExpand = query.isNotEmpty()
-                            add(RuleListItem.Group(vendor, filteredRules.size, if (autoExpand) true else expandedSnapshot.contains(vendor)))
-                            val visibleRules = if (autoExpand) filteredRules else if (expandedSnapshot.contains(vendor)) filteredRules else emptyList()
-                            val maxVisible = 500
-                            if (visibleRules.size > maxVisible) {
-                                visibleRules.take(maxVisible).forEach { entry ->
-                                    add(RuleListItem.Domain(entry.rule, selectedSnapshot.contains(entry.rule.id), currentSelectionMode))
-                                }
-                                add(RuleListItem.More(vendor, visibleRules.size - maxVisible))
+            val state = runCatching {
+                withContext(Dispatchers.Default) {
+                    val grouped = getGroupedRules(appContext)
+                    val items = buildList {
+                        grouped.forEach { (vendor, groupRules) ->
+                            val vendorLower = vendor.lowercase()
+                            val matchesVendor = query.isEmpty() || vendorLower.contains(query)
+                            val filteredRules = if (query.isEmpty()) {
+                                groupRules
                             } else {
-                                visibleRules.forEach { entry ->
-                                    add(RuleListItem.Domain(entry.rule, selectedSnapshot.contains(entry.rule.id), currentSelectionMode))
+                                groupRules.filter { rule ->
+                                    rule.domain.contains(query, ignoreCase = true) ||
+                                        rule.vendor.contains(query, ignoreCase = true) ||
+                                        rule.keywordPattern?.contains(query, ignoreCase = true) == true ||
+                                        rule.regexPattern?.contains(query, ignoreCase = true) == true
+                                }
+                            }
+                            if (filteredRules.isNotEmpty() || matchesVendor) {
+                                val autoExpand = query.isNotEmpty()
+                                add(RuleListItem.Group(vendor, filteredRules.size, if (autoExpand) true else expandedSnapshot.contains(vendor)))
+                                val visibleRules = if (autoExpand) filteredRules else if (expandedSnapshot.contains(vendor)) filteredRules else emptyList()
+                                val maxVisible = 500
+                                if (visibleRules.size > maxVisible) {
+                                    visibleRules.take(maxVisible).forEach { entry ->
+                                        add(RuleListItem.Domain(entry, selectedSnapshot.contains(entry.id), currentSelectionMode))
+                                    }
+                                    add(RuleListItem.More(vendor, visibleRules.size - maxVisible))
+                                } else {
+                                    visibleRules.forEach { entry ->
+                                        add(RuleListItem.Domain(entry, selectedSnapshot.contains(entry.id), currentSelectionMode))
+                                    }
                                 }
                             }
                         }
                     }
+                    val inventory = RuleRepository.getRuleInventory(appContext)
+                    RuleListState(inventory, items)
                 }
-                val inventory = RuleRepository.getRuleInventory(appContext)
-                RuleListState(inventory, items)
-            }
+            }.onFailure { error ->
+                LogRepository.append(appContext, "refreshList data loading failed: ${error.message ?: error.javaClass.simpleName}")
+                if (isAdded) {
+                    safeContext()?.let { ctx ->
+                        Toast.makeText(ctx, "加载规则列表失败，请重试", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                return@launch
+            }.getOrThrow()
             if (_binding == null || currentVersion != refreshVersion) return@launch
             binding.ruleSummary.text = buildString {
                 if (query.isNotEmpty()) {
@@ -1292,8 +1292,8 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 setMessage("正在导出 ${allRules.size} 条规则...")
                 isIndeterminate = true
                 setCancelable(false)
-                show()
             }
+            runCatching { progressDialog.show() }
             try {
                 val exported = withContext(Dispatchers.IO) {
                     com.HanFeng.data.RuleRepositoryExport.buildRulesText(
@@ -1309,7 +1309,6 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         content = exported.content
                     )
                 }
-                progressDialog.dismiss()
                 if (exported.count > 0 && exportPath != null) {
                     Toast.makeText(
                         ctx,
@@ -1324,9 +1323,10 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     Toast.makeText(ctx, "导出失败：未写入任何规则", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                progressDialog.dismiss()
                 LogRepository.append(ctx, "导出规则失败：${e.message ?: e.javaClass.simpleName}")
                 Toast.makeText(ctx, "导出失败：${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+            } finally {
+                runCatching { progressDialog.dismiss() }
             }
         }
     }
@@ -1366,26 +1366,34 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 return snapshot
             }
         }
-        val currentRules = getGroupedRules(ctx).values.flatten().map { it.rule }
+        val currentRules = getGroupedRules(ctx).values.flatten()
         return currentRules.filter { it.id in selectedIds }
     }
 
     private fun deduplicateRules() {
         val actionContext = safeContext() ?: return
-        try {
-            val removed = RuleRepository.deduplicateRules(actionContext)
-            if (removed == 0) {
-                Toast.makeText(actionContext, "没有检测到重复规则", Toast.LENGTH_SHORT).show()
-                return
+        binding.btnFilter.isEnabled = false
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val removed = withContext(Dispatchers.IO) {
+                    RuleRepository.deduplicateRules(actionContext.applicationContext)
+                }
+                if (!isAdded) return@launch
+                _binding?.btnFilter?.isEnabled = true
+                if (removed == 0) {
+                    Toast.makeText(actionContext, "没有检测到重复规则", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                LogRepository.append(actionContext, "Removed $removed duplicate rules")
+                invalidateRuleListCache()
+                refreshListSoon()
+                reloadVpnIfRunning(true)
+                Toast.makeText(actionContext, "已清理 $removed 条重复规则", Toast.LENGTH_SHORT).show()
+            } catch (e: Throwable) {
+                _binding?.btnFilter?.isEnabled = true
+                LogRepository.append(actionContext, "Deduplicate rules failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
+                if (isAdded) Toast.makeText(actionContext, "清理失败：${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
             }
-            LogRepository.append(actionContext, "Removed $removed duplicate rules")
-            invalidateRuleListCache()
-            refreshListSoon()
-            reloadVpnIfRunning(true)
-            Toast.makeText(actionContext, "已清理 $removed 条重复规则", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            LogRepository.append(actionContext, "Deduplicate rules failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
-            Toast.makeText(actionContext, "清理失败：${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1525,29 +1533,15 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val ctx = safeContext() ?: return
         val appContext = ctx.applicationContext
         LogRepository.append(appContext, "Import rule file requested: uri=$uri")
-        val progress = showProgressDialog("导入规则", "正在读取规则文件...")
+        val progress = showProgressDialog("导入规则", "正在打开规则文件...")
+        // progress 为 null 时静默继续（Activity 状态不适合弹窗），导入仍正常执行
         viewLifecycleOwner.lifecycleScope.launch {
             runCatching {
-                updateProgressDialog(progress, "正在打开规则文件...")
-                delay(80)
                 val fileSize = queryRuleFileSize(appContext, uri)
-                if (fileSize != null && fileSize > LARGE_RULE_FILE_THRESHOLD_BYTES) {
-                    LogRepository.append(appContext, "Import rule file using streaming path: size=$fileSize uri=$uri")
-                    importLargeRuleFileStreaming(sourceLabel = uri.toString(), sourceUri = uri, progress = progress)
-                    return@launch
-                }
-                updateProgressDialog(progress, "正在读取规则文件...\n大文件可能需要等待几秒")
-                val content = readRuleContent(appContext, uri)
-                if (content == null) {
-                    LogRepository.append(appContext, "Import rule file failed: unable to read content from URI")
-                    dismissProgressDialog(progress)
-                    safeContext()?.let {
-                        Toast.makeText(it, "读取规则文件失败：无法从选择的文件读取内容", Toast.LENGTH_LONG).show()
-                    }
-                    return@launch
-                }
-                LogRepository.append(appContext, "Import rule file succeeded: content length=${content.length}")
-                importAndAnalyzeRuleContent(sourceLabel = uri.toString(), sourceUri = uri, content = content, progress = progress)
+                updateProgressDialog(progress, "正在以快速模式导入规则...")
+                delay(80)
+                LogRepository.append(appContext, "Import rule file using fast streaming path: size=${fileSize ?: -1L} uri=$uri")
+                importLargeRuleFileStreaming(sourceLabel = uri.toString(), sourceUri = uri, progress = progress)
             }.onFailure { e ->
                 if (e is RuleFileTooLargeException) {
                     runCatching {
@@ -1558,8 +1552,23 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         LogRepository.append(appContext, "Import rule file streaming fallback failed: ${streamingError.message ?: streamingError.javaClass.simpleName}")
                         if (isAdded) {
                             safeContext()?.let { ctx ->
-                                Toast.makeText(ctx, "导入规则失败：${streamingError.message ?: streamingError.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                                val message = if (streamingError is OutOfMemoryError) {
+                                    "规则文件过大，已停止导入以保护应用稳定；请分批导入或减少已启用规则源后重试"
+                                } else {
+                                    "导入规则失败：${streamingError.message ?: streamingError.javaClass.simpleName}"
+                                }
+                                Toast.makeText(ctx, message, Toast.LENGTH_LONG).show()
                             }
+                        }
+                    }
+                    return@onFailure
+                }
+                if (e is OutOfMemoryError) {
+                    dismissProgressDialog(progress)
+                    LogRepository.append(appContext, "Import rule file failed: OutOfMemoryError")
+                    if (isAdded) {
+                        safeContext()?.let { ctx ->
+                            Toast.makeText(ctx, "规则文件过大，已停止导入以保护应用稳定；请分批导入或减少已启用规则源后重试", Toast.LENGTH_LONG).show()
                         }
                     }
                     return@onFailure
@@ -1600,29 +1609,56 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         sourceUri: Uri,
         progress: ProgressDialogHandle?
     ) {
-        val appContext = context?.applicationContext ?: return
-        updateProgressDialog(progress, "正在以大文件模式导入规则...\n2MB 以上文件会跳过导入前分析")
-        val imported = withContext(Dispatchers.IO) {
-            val stream = appContext.contentResolver.openInputStream(sourceUri)
-                ?: throw IllegalStateException("无法打开规则文件")
-            RuleRepository.importRulesStreaming(appContext, stream, allowWhitelistDomains = true) { detail ->
-                viewLifecycleOwner.lifecycleScope.launch {
-                    updateProgressDialog(progress, detail)
+        val appContext = context?.applicationContext
+        if (appContext == null) {
+            dismissProgressDialog(progress)
+            LogRepository.append(context?.applicationContext ?: return, "Import large rule file aborted: context is null")
+            return
+        }
+        updateProgressDialog(progress, "正在以低内存模式导入规则...\n将跳过导入前分析以降低内存占用")
+        val imported = runCatching {
+            withContext(Dispatchers.IO) {
+                val stream = appContext.contentResolver.openInputStream(sourceUri)
+                    ?: throw IllegalStateException("无法打开规则文件")
+                RuleRepository.importRulesStreaming(appContext, stream, allowWhitelistDomains = true) { detail ->
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        updateProgressDialog(progress, detail)
+                    }
                 }
             }
-        }
+        }.onFailure { error ->
+            dismissProgressDialog(progress)
+            LogRepository.append(appContext, "Import large rule file failed: ${error.message ?: error.javaClass.simpleName}")
+            if (isAdded) {
+                safeContext()?.let { ctx ->
+                    val message = when (error) {
+                        is java.io.FileNotFoundException -> "无法找到规则文件，请重新选择"
+                        is java.lang.SecurityException -> "没有权限读取该文件，请重新选择并授权"
+                        is OutOfMemoryError -> "规则文件过大，已停止导入以保护应用稳定"
+                        else -> "导入规则失败：${error.message ?: error.javaClass.simpleName}"
+                    }
+                    Toast.makeText(ctx, message, Toast.LENGTH_LONG).show()
+                }
+            }
+            return
+        }.getOrThrow()
         updateProgressDialog(progress, "正在刷新规则列表...")
-        val inventory = withContext(Dispatchers.Default) {
-            RuleRepository.getRuleInventory(appContext)
-        }
         if (!isAdded || _binding == null) return
-        LogRepository.append(appContext, "Large rule file imported from $sourceLabel, importedResult=$imported, totalRules=${inventory.totalSupportedCount}")
+        LogRepository.append(appContext, "Large rule file imported from $sourceLabel, importedResult=$imported")
+        RuleRepository.scheduleBackgroundAdvancedImport(
+            context = appContext,
+            sourceLabel = sourceLabel,
+            source = RuleSource.IMPORTED,
+            allowWhitelistDomains = true
+        ) {
+            appContext.contentResolver.openInputStream(sourceUri)
+        }
         invalidateRuleListCache()
         refreshListSoon()
         reloadVpnIfRunning(true)
         dismissProgressDialog(progress)
         context?.let {
-            Toast.makeText(it, "大文件规则已导入，当前可拦截 ${inventory.totalSupportedCount} 条", Toast.LENGTH_LONG).show()
+            Toast.makeText(it, "规则已导入，本次新增 $imported 条", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1724,7 +1760,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         LogRepository.append(appContext, "Starting import analysis: content length=${content.length}, lines=${content.lineCount()}")
         
         if (!isAdded || _binding == null) return
-        updateProgressDialog(progress, "正在分析规则文件...\n大小：${content.length / 1024}KB\n行数：${content.lineCount()}")
+        updateProgressDialog(progress, "正在准备导入规则...\n大小：${content.length / 1024}KB\n行数：${content.lineCount()}")
         
         val report = withContext(Dispatchers.Default) {
             RuleRepository.analyzeImportContent(appContext, content)
@@ -1771,7 +1807,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         context?.let {
                             Toast.makeText(it, "规则已导入 ${report.safeRuleCount} 条，当前可拦截 ${inventory.totalSupportedCount} 条", Toast.LENGTH_LONG).show()
                         }
-                        openImportAnalysisPage(inventory, report, sourceLabel, sourceUri)
+                        recordImportAnalysisSilently(inventory, report, sourceLabel, sourceUri)
                     }
                 },
                 onDeleteWhitelistAndContinue = {
@@ -1804,7 +1840,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         context?.let {
                             Toast.makeText(it, "已删除白名单候选，已导入 ${sanitizedReport.safeRuleCount} 条，当前可拦截 ${inventory.totalSupportedCount} 条", Toast.LENGTH_LONG).show()
                         }
-                        openImportAnalysisPage(inventory, sanitizedReport, sourceLabel, sourceUri)
+                        recordImportAnalysisSilently(inventory, sanitizedReport, sourceLabel, sourceUri)
                     }
                 },
                 host = host
@@ -1836,113 +1872,40 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         context?.let {
             Toast.makeText(it, "规则已导入 ${report.safeRuleCount} 条，当前可拦截 ${inventory.totalSupportedCount} 条", Toast.LENGTH_LONG).show()
         }
-        openImportAnalysisPage(inventory, report, sourceLabel, sourceUri)
+        recordImportAnalysisSilently(inventory, report, sourceLabel, sourceUri)
     }
 
-    private fun openImportAnalysisPage(
+    private fun recordImportAnalysisSilently(
         inventory: RuleRepository.RuleInventory,
         report: RuleRepository.RuleAnalysisReport,
         sourceLabel: String,
         sourceUri: Uri
     ) {
-        val host = activity as? MainActivity ?: return
-        if (!isAdded || host.isFinishing || host.isDestroyed) return
-        val content = buildString {
-            append("来源：")
-            append(sourceLabel)
-            append("\n地址：")
-            append(sourceUri)
-            append("\n\n")
-            append("导入完成，当前可拦截 ")
-            append(inventory.totalSupportedCount)
-            append(" 条规则")
-            append("\n\n")
-            append(buildAnalysisSummary(report))
-            if (report.sampleUnsupportedLines.isNotEmpty() || report.sampleInvalidLines.isNotEmpty()) {
-                append("\n\n")
-                append(buildAnalysisSamples(report))
+        val appContext = context?.applicationContext ?: return
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
+            val summary = buildString {
+                append("Silent import analysis: source=")
+                append(sourceLabel)
+                append(", uri=")
+                append(sourceUri)
+                append(", totalSupported=")
+                append(inventory.totalSupportedCount)
+                append(", totalLines=")
+                append(report.totalLines)
+                append(", safeRules=")
+                append(report.safeRuleCount)
+                append(", duplicateExisting=")
+                append(report.duplicateExistingRules)
+                append(", duplicateWithinFile=")
+                append(report.duplicateWithinFileRules)
+                append(", unsupported=")
+                append(report.unsupportedModifierRules)
+                append(", invalid=")
+                append(report.invalidRules)
+                append(", whitelistConflicts=")
+                append(report.whitelistConflictRules)
             }
-        }
-        runCatching {
-            if (host.isFinishing || host.isDestroyed) {
-                LogRepository.append(host, "Skip import analysis page: activity not ready")
-                return
-            }
-            host.startActivity(GuideActivity.createIntent(host, "导入结果分析", content))
-        }.onFailure {
-            LogRepository.append(host, "Open import analysis failed: ${it.message ?: it.javaClass.simpleName}")
-            Toast.makeText(host, "规则已导入，请稍后重试查看分析结果", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun buildAnalysisSamples(report: RuleRepository.RuleAnalysisReport): String {
-        return buildString {
-            if (report.sampleWhitelistConflictLines.isNotEmpty()) {
-                append("疑似白名单规则示例：\n")
-                append(report.sampleWhitelistConflictLines.joinToString("\n"))
-            }
-            if (report.sampleUnsupportedLines.isNotEmpty()) {
-                if (isNotEmpty()) append("\n\n")
-                append("当前仍未支持的规则示例：\n")
-                append(report.sampleUnsupportedLines.joinToString("\n"))
-            }
-            if (report.sampleInvalidLines.isNotEmpty()) {
-                if (isNotEmpty()) append("\n\n")
-                append("无法识别的规则示例：\n")
-                append(report.sampleInvalidLines.joinToString("\n"))
-            }
-        }
-    }
-
-    private fun buildAnalysisSummary(report: RuleRepository.RuleAnalysisReport): String {
-        return buildString {
-            append("本次文件总行数：${report.totalLines}\n")
-            append("当前已有规则：${report.existingRules}\n")
-            append("本次识别到可处理拦截规则：${report.safeBlockedRules} 条\n")
-            append("本次识别到例外规则：${report.safeExceptionRules} 条\n")
-            append("例外规则预计影响旧规则：${report.exceptionRemovalEstimate} 条\n")
-            append("分析后预计规则总数：${report.estimatedFinalRules}\n\n")
-            append("已跳过或已合并统计：\n")
-            append("- 重复现有规则：${report.duplicateExistingRules}\n")
-            append("- 文件内重复：${report.duplicateWithinFileRules}\n")
-            append("- 当前仍未支持修饰符：${report.unsupportedModifierRules}\n")
-            append("- 疑似白名单规则：${report.whitelistConflictRules}\n")
-            append("- Cosmetic 规则：${report.cosmeticRules}\n")
-            append("- 正则规则：${report.regexRules}\n")
-            append("- 空行/注释：${report.blankOrCommentLines}\n")
-            append("- 无法识别：${report.invalidRules}")
-            append("\n\n支持的规则类型（24+ 种格式）：\n")
-            append("1. 纯域名：example.com\n")
-            append("2. Hosts: 0.0.0.0 ads.com / 127.0.0.1 tracker.com\n")
-            append("3. dnsmasq: address=/domain.com/0.0.0.0\n")
-            append("4. SmartDNS: address /domain.com/0.0.0.0 / ipset=/domain.com/adblock\n")
-            append("5. AdGuard/ABP: ||domain^ / ||domain^\$modifier / @@||whitelist^\n")
-            append("6. ABP 修饰符 (30+ 种): third-party/3p, first-party/1p, domain=, path=, removeparam=, csp=, redirect=, denyallow=, cookie=, header=, removeheader=, replace=, app=, dnstype=, urlblock, from, to, jsinject, network, blockipv6, blockipv4, dnsrewrite, generichide, ctag, client, mac, asn, important, match-case, badfilter, script, image 等\n")
-            append("7. IP-CIDR/IP-CIDR6: ip-cidr,192.168.1.0/24 / ip6-cidr,::1/128\n")
-            append("8. Clash: DOMAIN-SUFFIX,com / DOMAIN-KEYWORD,ad / IP-CIDR,... / GEOSITE,category-ads-all\n")
-            append("9. Surge: HOST-SUFFIX,com / HOST-KEYWORD,ad / IP-CIDR,... / GEOSITE:category-ads-all\n")
-            append("10. Loon: DOMAIN-SUFFIX,com / DOMAIN-KEYWORD,ad / ip-cidr,...\n")
-            append("11. Quantumult X: host example.com / ip-cidr 192.168.1.0/24 / host-keyword ad\n")
-            append("12. Shadowrocket: host-suffix,com / host-keyword,ad / url-regexp pattern\n")
-            append("13. V2Ray/Xray: domain:xxx / domainSuffix:xxx / ip:xxx / ipCIDR:xxx\n")
-            append("14. 域名 + 端口：example.com:8080\n")
-            append("15. 端口通配符：*:443\$network / *:80\$network\n")
-            append("16. 路径规则：domain.com/ads/* / api.com/v1/ad/*\n")
-            append("17. 关键词规则：*ad* / *tracker* / *analytics*\n")
-            append("18. 正则规则：/^https?:.*ad.*\\.example\\.com/ / /.*\\.(ads?|banner)\\..*/\n")
-            append("19. CSP 规则：domain##^csp:script-src 'self'\n")
-            append("20. CSS 规则：domain##.ad-banner / domain###sidebar-ads\n")
-            append("21. 复合规则：AND(domain.com, /ads/) / OR(ads1.com, ads2.com)\n")
-            append("22. 例外规则：@@||domain^ / @@0.0.0.0 whitelist.com\n")
-            append("23. 包名规则：package:com.example.app / ||ads.com^\$package=...\n")
-            append("24. 点前缀域名：.example.com（匹配所有子域名）\n")
-            append("25. IPv6 Hosts: 2001:db8::1 ads.example.com\n")
-            append("\n部分支持：redirect 类、removeparam 类、header 修改、replace 类、cookie 类、CSS 隐藏规则（需 MITM 增强）\n")
-            append("会跳过：复杂脚本、远程脚本、://schema 规则、GEOIP/IP-ASN 等需要本地数据库的高级代理规则\n")
-            if (report.vendorSummary.isNotEmpty()) {
-                append("\n\n可导入规则厂商分布：\n")
-                append(report.vendorSummary.joinToString("\n") { "- ${it.vendor}: ${it.count}" })
-            }
+            LogRepository.append(appContext, summary)
         }
     }
 
@@ -1954,16 +1917,16 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val autoExpand = query.isNotEmpty()
         return buildList {
             grouped.forEach { (vendor, groupRules) ->
-                val vendorLower = groupRules.firstOrNull()?.vendorLower ?: vendor.lowercase()
+                val vendorLower = vendor.lowercase()
                 val matchesVendor = query.isEmpty() || vendorLower.contains(query)
                 val filteredRules = if (query.isEmpty()) {
                     groupRules
                 } else {
-                    groupRules.filter {
-                        it.domainLower.contains(query) ||
-                            it.vendorLower.contains(query) ||
-                            it.keywordLower?.contains(query) == true ||
-                            it.regexLower?.contains(query) == true
+                    groupRules.filter { rule ->
+                        rule.domain.contains(query, ignoreCase = true) ||
+                            rule.vendor.contains(query, ignoreCase = true) ||
+                            rule.keywordPattern?.contains(query, ignoreCase = true) == true ||
+                            rule.regexPattern?.contains(query, ignoreCase = true) == true
                     }
                 }
                 if (filteredRules.isEmpty() && !matchesVendor) return@forEach
@@ -1972,7 +1935,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     expandedSnapshot.contains(vendor) -> filteredRules
                     else -> emptyList()
                 }
-                visibleRules.take(500).forEach { add(it.rule) }
+                visibleRules.take(500).forEach { add(it) }
             }
         }
     }
@@ -2020,14 +1983,6 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private data class RuleListState(
         val inventory: RuleRepository.RuleInventory,
         val items: List<RuleListItem>
-    )
-
-    private data class CachedRuleEntry(
-        val rule: BlockRule,
-        val domainLower: String,
-        val vendorLower: String,
-        val keywordLower: String?,
-        val regexLower: String?
     )
 
     private class FilterRuleAdapter(

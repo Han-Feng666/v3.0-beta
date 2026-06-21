@@ -49,7 +49,10 @@ class RuleListAdapter(
                 setTextColor(ContextCompat.getColor(parent.context, R.color.hf_text_secondary))
                 gravity = android.view.Gravity.CENTER
             })
-            else -> throw IllegalArgumentException("unexpected view type: $viewType")
+            else -> {
+                android.util.Log.e("RuleListAdapter", "unexpected view type: $viewType, falling back to domain view")
+                DomainHolder(ItemRuleDomainBinding.inflate(inflater, parent, false))
+            }
         }
     }
 

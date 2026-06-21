@@ -10,9 +10,9 @@ android {
     defaultConfig {
         applicationId = "com.HanFeng"
         minSdk = 24
-        targetSdk = 34
-        versionCode = 260
-        versionName = "2.6.0"
+        targetSdk = 35
+        versionCode = 269
+        versionName = "2.6.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

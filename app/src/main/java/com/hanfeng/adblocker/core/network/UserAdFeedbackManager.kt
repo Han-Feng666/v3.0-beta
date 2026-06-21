@@ -3,6 +3,7 @@ package com.HanFeng.core.network
 import android.app.Activity
 import android.content.Context
 import androidx.appcompat.app.AlertDialog
+import com.HanFeng.ui.showSafely
 import com.google.gson.Gson
 import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.LogRepository
@@ -102,13 +103,17 @@ object UserAdFeedbackManager {
             return
         }
         val labels = rules.map { "${it.ruleText}\n${it.appName}" }.toTypedArray()
+        if (activity.isFinishing || activity.isDestroyed) {
+            LogRepository.append(activity, "User ad feedback pending rule dialog skipped: activity unavailable")
+            return
+        }
         AlertDialog.Builder(activity)
             .setTitle("待确认广告规则")
             .setItems(labels) { _, which ->
                 confirmPendingRule(activity, rules[which].id)
             }
             .setNegativeButton("取消", null)
-            .show()
+            .showSafely(activity, "Show pending feedback rule dialog failed")
     }
 
     fun feedbackFile(context: Context): File = File(context.filesDir, FEEDBACK_FILE)

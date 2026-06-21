@@ -1,8 +1,9 @@
 package com.HanFeng.service
 
 import android.content.Context
-import com.HanFeng.core.network.ThermalThrottleManager
 import com.HanFeng.core.network.UserAdFeedbackManager
+import com.HanFeng.core.network.RegexCache
+import com.HanFeng.core.network.StealthModeSupport
 import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.RuleRepository
 import org.brotli.dec.BrotliInputStream
@@ -15,6 +16,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 object HttpMitmFilter {
     private const val MAX_HTTP1_FILTER_BUFFER_BYTES = 512 * 1024
+    private const val HTTP1_FILTER_BUFFER_BYTES = 64 * 1024
+    private const val HTTP2_DATA_BODY_LIMIT_BYTES = 64 * 1024
     
     // 正则表达式缓存（P1 优化）
     private val compiledReplaceRules = object : LinkedHashMap<String, Regex>(512, 0.75f, true) {
@@ -798,7 +801,7 @@ object HttpMitmFilter {
         if (requestMethods.none { text.startsWith(it) }) return null
         val lines = text.substring(0, headerEnd).split("\r\n")
         if (lines.isEmpty()) return null
-        val requestLine = lines.first().split(' ')
+        val requestLine = lines.firstOrNull()?.split(' ') ?: return null
         if (requestLine.size < 2) return null
         val hostHeader = lines.firstOrNull { it.startsWith("Host:", ignoreCase = true) }
             ?.substringAfter(':', "")
@@ -853,7 +856,19 @@ object HttpMitmFilter {
             directives.removeParams
         }
         val removeParamRegexes = directives.removeParamRegexes
-        val removeRequestHeaders = directives.removeRequestHeaders
+        val stealthEnabled = FeatureSettingsRepository.isStealthModeEnabled(context)
+        val stealthStripParams = stealthEnabled && FeatureSettingsRepository.isStealthStripTrackingParamsEnabled(context)
+        val stealthHideRef = stealthEnabled && FeatureSettingsRepository.isStealthHideRefererEnabled(context)
+        val stealthRemoveHdrs = stealthEnabled && FeatureSettingsRepository.isStealthRemoveFingerprintHeadersEnabled(context)
+        val customParams = if (stealthStripParams) FeatureSettingsRepository.getCustomTrackingParams(context) else emptySet()
+        val customHeaders = if (stealthRemoveHdrs) FeatureSettingsRepository.getCustomTrackingHeaders(context) else emptySet()
+        val stealthRemoveParams = if (stealthStripParams) StealthModeSupport.TRACKING_PARAMS + customParams else emptySet()
+        val combinedRemoveParams = if (stealthStripParams) removeParams + stealthRemoveParams else removeParams
+        val removeRequestHeaders = if (stealthRemoveHdrs) {
+            directives.removeRequestHeaders + StealthModeSupport.TRACKING_HEADERS + customHeaders
+        } else {
+            directives.removeRequestHeaders
+        }
         val setRequestHeaders = parseHeaderOverrides(directives.setRequestHeaders)
         val headerLines = text.substring(0, headerEnd).split("\r\n")
         if (headerLines.isEmpty()) return chunk
@@ -881,13 +896,22 @@ object HttpMitmFilter {
                 changed = true
                 return@mapIndexedNotNull null
             }
+            // Stealth Mode: 截断 Referer 仅保留 origin
+            if (stealthHideRef && line.startsWith("Referer:", ignoreCase = true)) {
+                val sanitized = StealthModeSupport.sanitizeReferer(line.substringAfter(':', "").trim())
+                if (sanitized != line.substringAfter(':', "").trim()) {
+                    changed = true
+                    return@mapIndexedNotNull "Referer: $sanitized"
+                }
+            }
             line
         }
         if (directives.cspValue != null) {
             changed = true
         }
-        val requestLine = rewriteRequestLine(rewrittenHeaders.first(), removeParams, removeParamRegexes)
-        if (requestLine != rewrittenHeaders.first()) changed = true
+        val requestLineSource = rewrittenHeaders.firstOrNull() ?: return chunk
+        val requestLine = rewriteRequestLine(requestLineSource, combinedRemoveParams, removeParamRegexes)
+        if (requestLine != requestLineSource) changed = true
         if (!changed) return chunk
         val body = text.substring(headerEnd + 4)
         val finalHeaders = buildList {
@@ -974,15 +998,26 @@ object HttpMitmFilter {
             vendorHint = inspection.vendor,
             requestDomain = extractRequestDomain(inspection)
         )
-        val removeParams = if (shouldStripAdParams) {
+        val removeParamRegexes = directives.removeParamRegexes
+        val stealthEnabled = FeatureSettingsRepository.isStealthModeEnabled(context)
+        val stealthStripParams = stealthEnabled && FeatureSettingsRepository.isStealthStripTrackingParamsEnabled(context)
+        val stealthHideRef = stealthEnabled && FeatureSettingsRepository.isStealthHideRefererEnabled(context)
+        val stealthRemoveHdrs = stealthEnabled && FeatureSettingsRepository.isStealthRemoveFingerprintHeadersEnabled(context)
+        val customParams = if (stealthStripParams) FeatureSettingsRepository.getCustomTrackingParams(context) else emptySet()
+        val customHeaders = if (stealthRemoveHdrs) FeatureSettingsRepository.getCustomTrackingHeaders(context) else emptySet()
+        val stealthRemoveParams = if (stealthStripParams) StealthModeSupport.TRACKING_PARAMS + customParams else emptySet()
+        val removeParams = (if (shouldStripAdParams) {
             directives.removeParams + defaultAdQueryParams
         } else {
             directives.removeParams
+        }) + stealthRemoveParams
+        val removeRequestHeaders = if (stealthRemoveHdrs) {
+            directives.removeRequestHeaders + StealthModeSupport.TRACKING_HEADERS + customHeaders
+        } else {
+            directives.removeRequestHeaders
         }
-        val removeParamRegexes = directives.removeParamRegexes
-        val removeRequestHeaders = directives.removeRequestHeaders
         val setRequestHeaders = parseHeaderOverrides(directives.setRequestHeaders)
-        if (removeParams.isEmpty() && removeParamRegexes.isEmpty() && removeRequestHeaders.isEmpty() && setRequestHeaders.isEmpty() && directives.cspValue == null) return base
+        if (!stealthEnabled && removeParams.isEmpty() && removeParamRegexes.isEmpty() && removeRequestHeaders.isEmpty() && setRequestHeaders.isEmpty() && directives.cspValue == null) return base
         var changed = base.changed
         val appliedHeaderNames = mutableSetOf<String>()
         val rewritten = base.headers.mapNotNull { header ->
@@ -1001,6 +1036,14 @@ object HttpMitmFilter {
                 val updated = rewritePathOnly(header.value, removeParams, removeParamRegexes)
                 if (updated != header.value) changed = true
                 HpackDecoder.HeaderField(header.name, updated)
+            } else if (stealthHideRef && lowerName == "referer") {
+                val sanitized = StealthModeSupport.sanitizeReferer(header.value)
+                if (sanitized != header.value) {
+                    changed = true
+                    HpackDecoder.HeaderField(header.name, sanitized)
+                } else {
+                    header
+                }
             } else {
                 header
             }
@@ -1153,11 +1196,7 @@ object HttpMitmFilter {
         return FilterResult.Replaced(response, neutralizeReason, chunk.size)
     }
 
-    fun maxHttp1FilterBufferBytes(): Int = if (ThermalThrottleManager.shouldBypassMitmBodyInspection()) {
-        0
-    } else {
-        minOf(MAX_HTTP1_FILTER_BUFFER_BYTES, ThermalThrottleManager.responseBodyLimitBytes())
-    }
+    fun maxHttp1FilterBufferBytes(): Int = minOf(MAX_HTTP1_FILTER_BUFFER_BYTES, HTTP1_FILTER_BUFFER_BYTES)
 
     fun inspectBufferedHttp1Response(
         buffer: ByteArray,
@@ -1224,7 +1263,7 @@ object HttpMitmFilter {
         if (incomingFragment.isEmpty()) return null
         if (headerInspection?.responseLike != true) return null
         val context = TlsMitmSessionManager.getContextOrNull() ?: return null
-        val combinedSample = appendSample(currentSample, incomingFragment, ThermalThrottleManager.responseBodyLimitBytes())
+        val combinedSample = appendSample(currentSample, incomingFragment, HTTP2_DATA_BODY_LIMIT_BYTES)
         val contentType = headerInspection.contentType?.lowercase().orEmpty()
         val targetedContentType = contentType.contains("json") ||
             contentType.contains("javascript") ||
@@ -2997,14 +3036,15 @@ object HttpMitmFilter {
     private fun getCompiledRegex(pattern: String, flags: String): Regex? {
         val cacheKey = "$pattern|$flags"
         
-        // 先查缓存（LinkedHashMap 自动处理 LRU）
-        compiledReplaceRules[cacheKey]?.let { return it }
+        synchronized(compiledReplaceRulesLock) {
+            compiledReplaceRules[cacheKey]?.let { return it }
+        }
         
-        // 缓存未命中，编译新正则
         val regex = runCatching { Regex(pattern, buildReplaceRegexOptions(flags)) }.getOrNull() ?: return null
         
-        // 存入缓存（LinkedHashMap 自动清理）
-        compiledReplaceRules[cacheKey] = regex
+        synchronized(compiledReplaceRulesLock) {
+            compiledReplaceRules[cacheKey] = regex
+        }
         
         return regex
     }
@@ -3025,12 +3065,17 @@ object HttpMitmFilter {
             val pattern = parts[0]
             val replacement = parts[1]
             val flags = parts[2]
-            // P1 增强：使用缓存的正则表达式
             val regex = getCompiledRegex(pattern, flags) ?: return@forEach
-            updated = if ('g' in flags) {
-                regex.replace(updated, replacement)
-            } else {
-                regex.replaceFirst(updated, replacement)
+            updated = try {
+                if ('g' in flags) {
+                    regex.replace(updated, replacement)
+                } else {
+                    regex.replaceFirst(updated, replacement)
+                }
+            } catch (_: StackOverflowError) {
+                return null
+            } catch (_: OutOfMemoryError) {
+                return null
             }
         }
         return updated
@@ -3313,9 +3358,9 @@ object HttpMitmFilter {
             "\"creative_id\"", "\"material_url\"", "\"duration\"", "\"ecpm\""
         )
         modelScore += keySignals.count(lowerBody::contains)
-        if (Regex("\"duration\"\\s*:\\s*(1[5-9]|2[0-9]|30)").containsMatchIn(lowerBody)) modelScore += 2
-        if (Regex("\"reward_amount\"\\s*:\\s*[1-9][0-9]*").containsMatchIn(lowerBody)) modelScore += 2
-        if (Regex("<iframe[^>]+(?:width=[\"']?(?:0|1|300|320)|height=[\"']?(?:0|1|250|480))").containsMatchIn(lowerBody)) modelScore += 2
+        if (RegexCache.get("\"duration\"\\s*:\\s*(1[5-9]|2[0-9]|30)").containsMatchIn(lowerBody)) modelScore += 2
+        if (RegexCache.get("\"reward_amount\"\\s*:\\s*[1-9][0-9]*").containsMatchIn(lowerBody)) modelScore += 2
+        if (RegexCache.get("<iframe[^>]+(?:width=[\"']?(?:0|1|300|320)|height=[\"']?(?:0|1|250|480))").containsMatchIn(lowerBody)) modelScore += 2
         if (lowerBody.contains("display:none") && (lowerBody.contains("track") || lowerBody.contains("impression"))) modelScore += 2
         if (lowerBody.contains("click_tracking") && lowerBody.contains("impression")) modelScore += 2
         if (lowerBody.contains("video_url") && lowerBody.contains("landing_url")) modelScore += 2
@@ -5812,14 +5857,14 @@ object HttpMitmFilter {
                     value.contains("creative") ||
                     value.contains("material") ||
                     value.contains("campaign") ||
-                    value.matches(Regex("[a-z0-9_-]{8,}"))
+                    value.matches(RegexCache.get("[a-z0-9_-]{8,}"))
                 )
         }
     }
 
     private fun looksLikeGeneralizedAdParameterName(key: String): Boolean {
         if (key.isBlank()) return false
-        return Regex("(?:^|_)(ad|ads|slot|auction|placement|track|imp|impression|bid|creative|material|campaign)(?:_)?(id|url|token|key|hash|sig|signature)(?:$|_)")
+        return RegexCache.get("(?:^|_)(ad|ads|slot|auction|placement|track|imp|impression|bid|creative|material|campaign)(?:_)?(id|url|token|key|hash|sig|signature)(?:$|_)")
             .containsMatchIn(key)
     }
 
@@ -5977,7 +6022,7 @@ object HttpMitmFilter {
         val fragment = path.substringAfter('#', "")
         val query = path.substringAfter('?', "").substringBefore('#')
         if (query.isBlank()) return path
-        val regexRules = removeParamRegexes.mapNotNull { pattern -> runCatching { Regex(pattern, RegexOption.IGNORE_CASE) }.getOrNull() }
+        val regexRules = removeParamRegexes.mapNotNull { pattern -> runCatching { RegexCache.get(pattern, RegexOption.IGNORE_CASE) }.getOrNull() }
         val filtered = query.split('&')
             .filter { it.isNotBlank() }
             .filterNot { part ->
@@ -6008,76 +6053,9 @@ object HttpMitmFilter {
         return host.takeIf { it.contains('.') }
     }
 
-    sealed interface FilterResult {
-        data class PassThrough(val payload: ByteArray, val reason: String) : FilterResult
-        data class Replaced(val payload: ByteArray, val reason: String, val originalBytes: Int = 0) : FilterResult
-    }
-
-    data class RequestInspection(
-        val method: String,
-        val path: String,
-        val host: String,
-        val httpVersion: String,
-        val referer: String?,
-        val origin: String?
-    )
-
-    data class Http2HeaderInspection(
-        val method: String?,
-        val authority: String,
-        val appName: String?,
-        val path: String?,
-        val scheme: String?,
-        val status: String?,
-        val contentType: String?,
-        val referer: String?,
-        val userAgent: String?,
-        val location: String?,
-        val setCookie: String?,
-        val vendor: String,
-        val suspiciousScore: Int,
-        val suspiciousReasons: List<String>,
-        val redirectResource: String? = null,
-        val cspValue: String? = null,
-        val requestLike: Boolean,
-        val responseLike: Boolean,
-        val hasBodyRewriteDirectives: Boolean = false
-    )
-
-    data class Http2ActionDecision(
-        val action: String,
-        val confidence: String,
-        val shouldBlockCandidate: Boolean,
-        val shouldSyntheticRespond: Boolean = false,
-        val redirectResource: String? = null,
-        val cspValue: String? = null,
-        val contentType: String? = null
-    )
-
     data class Http2HeaderRewriteResult(
         val headers: List<HpackDecoder.HeaderField>,
         val changed: Boolean
-    )
-
-    sealed interface BufferedHttp1Result {
-        data object AwaitMore : BufferedHttp1Result
-        data class Ready(val responseBytes: ByteArray, val remainderBytes: ByteArray) : BufferedHttp1Result
-        data class Bypass(val reason: String) : BufferedHttp1Result
-    }
-
-    data class Http2DataInspection(
-        val suspiciousScore: Int,
-        val suspiciousReasons: List<String>,
-        val confidence: String,
-        val samplePreview: String,
-        val vendor: String,
-        val combinedSample: ByteArray,
-        val redirectResource: String? = null,
-        val cspValue: String? = null,
-        val contentType: String = "",
-        val replacementBody: ByteArray? = null,
-        val replacementContentType: String = "",
-        val rewriteReason: String? = null
     )
 
     data class Http2BodyRewriteResult(
