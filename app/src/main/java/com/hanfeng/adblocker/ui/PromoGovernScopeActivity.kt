@@ -34,6 +34,8 @@ import com.HanFeng.data.ShizukuRepository
 import com.HanFeng.databinding.ActivityPromoGovernScopeBinding
 import com.HanFeng.databinding.ItemPromoGovernTargetBinding
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -46,6 +48,7 @@ class PromoGovernScopeActivity : BaseActivity() {
     private var allTargets: List<PromoGovernTarget> = emptyList()
     private var visibleTargets: List<PromoGovernTarget> = emptyList()
     private var searchQuery: String = ""
+    private var searchDebounceJob: Job? = null
 
     private val SYSTEM_CRITICAL_APPS = setOf(
         "android",
@@ -84,7 +87,11 @@ class PromoGovernScopeActivity : BaseActivity() {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 searchQuery = s?.toString().orEmpty().trim().lowercase()
-                applyScope(currentScope)
+                searchDebounceJob?.cancel()
+                searchDebounceJob = lifecycleScope.launch {
+                    delay(180)
+                    applyScope(currentScope)
+                }
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })

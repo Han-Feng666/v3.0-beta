@@ -6,11 +6,16 @@ import android.os.Bundle
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.lifecycleScope
 import com.HanFeng.data.StatsRepository
 import com.HanFeng.databinding.ActivityRankingDetailBinding
 import com.HanFeng.model.RankingEntry
 import com.HanFeng.model.RankingType
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.RandomAccessFile
 
 class RankingDetailActivity : BaseActivity() {
     private lateinit var binding: ActivityRankingDetailBinding
@@ -47,13 +52,15 @@ class RankingDetailActivity : BaseActivity() {
     }
 
     private fun renderContent() {
-        val content = buildContent(rankingType)
-        if (content == lastRenderedContent) return
-        val previousScrollY = binding.rankingScroll.scrollY
-        lastRenderedContent = content
-        binding.contentText.text = content
-        binding.rankingScroll.post {
-            binding.rankingScroll.scrollTo(0, previousScrollY)
+        lifecycleScope.launch {
+            val content = withContext(Dispatchers.IO) { buildContent(rankingType) }
+            if (content == lastRenderedContent) return@launch
+            val previousScrollY = binding.rankingScroll.scrollY
+            lastRenderedContent = content
+            binding.contentText.text = content
+            binding.rankingScroll.post {
+                binding.rankingScroll.scrollTo(0, previousScrollY)
+            }
         }
     }
 
@@ -80,7 +87,7 @@ class RankingDetailActivity : BaseActivity() {
         if (trackedEntries.isEmpty()) return ""
         val reasonCounts = linkedMapOf<String, Int>()
         runCatching {
-            logFile.readLines().takeLast(1500).forEach { line ->
+            readRecentLogLines(logFile, maxBytes = 256 * 1024, maxLines = 1500).forEach { line ->
                 val reason = line.substringAfter(" reason=", "").substringBefore(' ').trim()
                 if (reason.isBlank()) return@forEach
                 if (!matchesRankingLine(line, type, trackedEntries)) return@forEach
@@ -92,6 +99,18 @@ class RankingDetailActivity : BaseActivity() {
             .sortedByDescending { it.value }
             .take(8)
             .joinToString("\n") { (reason, count) -> "$reason    $count" }
+    }
+
+    private fun readRecentLogLines(file: File, maxBytes: Int, maxLines: Int): List<String> {
+        if (!file.exists() || file.length() <= 0L) return emptyList()
+        return RandomAccessFile(file, "r").use { raf ->
+            val start = (raf.length() - maxBytes).coerceAtLeast(0L)
+            val size = (raf.length() - start).coerceAtMost(maxBytes.toLong()).toInt()
+            val buffer = ByteArray(size)
+            raf.seek(start)
+            raf.readFully(buffer)
+            String(buffer, Charsets.UTF_8).lines().takeLast(maxLines)
+        }
     }
 
     private fun matchesRankingLine(line: String, type: RankingType, entries: List<RankingEntry>): Boolean {

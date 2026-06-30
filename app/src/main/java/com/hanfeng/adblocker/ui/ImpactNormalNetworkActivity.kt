@@ -184,13 +184,13 @@ class ImpactNormalNetworkActivity : BaseActivity() {
         if (unselectedInVisible.isNotEmpty()) {
             selectedRuleIds += unselectedInVisible
         }
-        adapter.notifyDataSetChanged()
+        adapter.notifyItemRangeChanged(0, adapter.itemCount)
         updateDeleteButton()
     }
 
     private fun clearSelection() {
         selectedRuleIds.clear()
-        adapter.notifyDataSetChanged()
+        adapter.notifyItemRangeChanged(0, adapter.itemCount)
         updateDeleteButton()
     }
 
@@ -346,13 +346,10 @@ class ImpactNormalNetworkActivity : BaseActivity() {
                 binding.selectBox.setOnCheckedChangeListener(null)
                 val selected = isSelected(item)
                 binding.selectBox.isChecked = selected
-                LogRepository.append(binding.root.context, "CandidateAdapter bind: domain=${item.rule.domain}, selected=$selected")
                 binding.selectBox.setOnCheckedChangeListener { _, checked -> 
-                    LogRepository.append(binding.root.context, "Candidate checkbox changed: domain=${item.rule.domain}, checked=$checked")
                     onToggle(item, checked) 
                 }
                 binding.root.setOnClickListener { 
-                    LogRepository.append(binding.root.context, "Candidate root clicked: domain=${item.rule.domain}, will toggle checkbox")
                     binding.selectBox.toggle() 
                 }
                 binding.root.setOnLongClickListener {

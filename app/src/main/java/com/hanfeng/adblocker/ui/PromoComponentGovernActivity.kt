@@ -19,6 +19,8 @@ import com.HanFeng.data.PromoGovernComponentRepository
 import com.HanFeng.databinding.ActivityPromoComponentGovernBinding
 import com.HanFeng.databinding.ItemPromoComponentBinding
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -31,6 +33,7 @@ class PromoComponentGovernActivity : BaseActivity() {
     private var recommendedComponents: List<PromoComponentCandidate> = emptyList()
     private var allActivities: List<PromoComponentCandidate> = emptyList()
     private var showAllActivities = false
+    private var searchDebounceJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,7 +69,13 @@ class PromoComponentGovernActivity : BaseActivity() {
         binding.btnUnfreezeSelected.setOnClickListener { executeSelected(disable = false) }
         binding.searchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = applyFilter()
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                searchDebounceJob?.cancel()
+                searchDebounceJob = lifecycleScope.launch {
+                    delay(180)
+                    applyFilter()
+                }
+            }
             override fun afterTextChanged(s: Editable?) = Unit
         })
 

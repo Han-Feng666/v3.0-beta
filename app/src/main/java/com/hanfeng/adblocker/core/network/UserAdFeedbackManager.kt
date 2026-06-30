@@ -20,6 +20,7 @@ object UserAdFeedbackManager {
     private const val FEEDBACK_FILE = "ad_feedback_samples.jsonl"
     private const val WINDOW_MILLIS = 60_000L
     private const val MAX_EVENTS = 256
+    private const val MAX_FEEDBACK_FILE_BYTES = 50L * 1024 * 1024
     private val gson = Gson()
     private val lock = Any()
     private val events = ArrayDeque<NetworkActivity>()
@@ -187,7 +188,9 @@ object UserAdFeedbackManager {
 
     private fun appendJsonLine(context: Context, fileName: String, value: Any) {
         runCatching {
-            FileWriter(File(context.filesDir, fileName), true).use { writer ->
+            val file = File(context.filesDir, fileName)
+            if (file.exists() && file.length() >= MAX_FEEDBACK_FILE_BYTES) return@runCatching
+            FileWriter(file, true).use { writer ->
                 writer.append(gson.toJson(value)).append('\n')
             }
         }.onFailure {

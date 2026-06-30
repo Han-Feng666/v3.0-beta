@@ -1,19 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
-
-    <ImageView
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:contentDescription="背景图"
-        android:scaleType="centerCrop"
-        android:src="@drawable/app_background_image" />
-
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="@drawable/bg_main" />
+    android:layout_height="match_parent"
+    android:background="@drawable/bg_main">
 
     <LinearLayout
         android:id="@+id/hostsRoot"

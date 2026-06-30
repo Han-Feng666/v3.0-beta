@@ -9,6 +9,7 @@ import com.HanFeng.data.RuleRepository
 import org.brotli.dec.BrotliInputStream
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.util.zip.GZIPInputStream
 import java.util.zip.InflaterInputStream
@@ -18,6 +19,7 @@ object HttpMitmFilter {
     private const val MAX_HTTP1_FILTER_BUFFER_BYTES = 512 * 1024
     private const val HTTP1_FILTER_BUFFER_BYTES = 64 * 1024
     private const val HTTP2_DATA_BODY_LIMIT_BYTES = 64 * 1024
+    private const val MAX_DECODED_BODY_BYTES = 512 * 1024
     
     // 正则表达式缓存（P1 优化）
     private val compiledReplaceRules = object : LinkedHashMap<String, Regex>(512, 0.75f, true) {
@@ -53,6 +55,7 @@ object HttpMitmFilter {
         "precache-material-ad-payload-extended", "shake-sensor-ad-payload-extended",
         "httpdns-ad-resolution-payload-extended", "websocket-sse-ad-stream-payload-extended",
         "grpc-protobuf-ad-payload-extended", "dynamic-code-ad-module-payload-extended",
+        "websocket-block",
         "encrypted-config-ad-payload-extended", "private-protocol-ad-gateway-payload-extended",
         "media-preroll-metadata-payload-extended", "audio-ad-break-payload-extended",
         "comic-manga-unlock-ad-payload-extended", "short-drama-episode-ad-payload-extended",
@@ -394,6 +397,8 @@ object HttpMitmFilter {
     )
     private val dohContentTypeKeywords = listOf(
         "application/dns-message",
+        "application/dns-message+xml",
+        "application/dns-udpwireformat",
         "application/dns-json",
         "application/oblivious-dns-message",
         "application/x-javascript",
@@ -816,13 +821,19 @@ object HttpMitmFilter {
             ?.substringAfter(':', "")
             ?.trim()
             ?.ifBlank { null }
+        val upgrade = lines.firstOrNull { it.startsWith("Upgrade:", ignoreCase = true) }
+            ?.substringAfter(':', "")
+            ?.trim()
+            ?.lowercase()
+            ?.ifBlank { null }
         return RequestInspection(
             method = requestLine[0],
             path = requestLine[1],
             host = hostHeader ?: session.host,
             httpVersion = requestLine.getOrNull(2) ?: "HTTP/1.1",
             referer = referer,
-            origin = origin
+            origin = origin,
+            upgrade = upgrade
         )
     }
 
@@ -1072,16 +1083,27 @@ object HttpMitmFilter {
         if (headerEnd <= 0) return FilterResult.PassThrough(chunk, "partial-response-headers")
         val responseHeaders = parseHttp1ResponseHeaders(text, headerEnd)
             ?: return FilterResult.PassThrough(chunk, "missing-status-line")
+        val effectiveRequestType = if (requestInspection?.isWebSocket == true) "websocket" else null
         val directives = requestInspection?.let {
             RuleRepository.getRequestRewriteDirectives(
                 context = TlsMitmSessionManager.getContextOrNull() ?: return@let RuleRepository.RequestRewriteDirectives(),
                 host = it.host,
                 path = it.path,
                 appName = session.appName,
-                requestDomain = extractRequestDomain(it)
+                requestDomain = extractRequestDomain(it),
+                requestType = effectiveRequestType
             )
         } ?: RuleRepository.RequestRewriteDirectives()
+        if (responseHeaders.statusCode == 101 && requestInspection?.isWebSocket == true && directives.block) {
+            return FilterResult.Replaced(buildWebSocketBlockResponse(), "websocket-blocked", ruleDebug = directives.matchedRuleSummaries)
+        }
+        if (directives.emptyResponse) {
+            return FilterResult.Replaced(buildEmptyResponse(), "empty-response", ruleDebug = directives.matchedRuleSummaries)
+        }
         val cosmeticSelectors = directives.cosmeticSelectors
+        val modifiedChunk = if (directives.cookieRemove.isNotEmpty()) {
+            stripResponseCookies(chunk, headerEnd, directives.cookieRemove)
+        } else chunk
         reportSuspiciousRedirectDomain(
             host = normalizeAuthority(requestInspection?.host ?: session.host),
             location = responseHeaders.location,
@@ -1093,20 +1115,21 @@ object HttpMitmFilter {
         if (headerResult != null) return headerResult
         val bodyInspectionReason = shouldInspectHttp1ResponseBody(session, requestInspection, responseHeaders.contentType)
         if (bodyInspectionReason == null) {
+            if (modifiedChunk !== chunk) return FilterResult.Replaced(modifiedChunk, "cookie-stripped", ruleDebug = directives.matchedRuleSummaries)
             return FilterResult.PassThrough(chunk, "response-body-skip:no-deep-inspection-target")
         }
-        val bodyBytes = chunk.copyOfRange(headerEnd + 4, chunk.size)
+        val bodyBytes = modifiedChunk.copyOfRange(headerEnd + 4, modifiedChunk.size)
         val decodedTransferBytes = if ("chunked" in responseHeaders.transferEncoding) {
-            decodeChunkedBody(bodyBytes) ?: return FilterResult.PassThrough(chunk, "invalid-chunked")
+            decodeChunkedBody(bodyBytes) ?: return FilterResult.PassThrough(modifiedChunk, "invalid-chunked")
         } else {
             bodyBytes
         }
         val decodedBodyBytes = decodeContentEncodedBody(decodedTransferBytes, responseHeaders.contentEncoding)
-            ?: return buildDecodeFailureResult(chunk, responseHeaders.contentEncoding)
-        val body = decodeAscii(decodedBodyBytes) ?: return FilterResult.PassThrough(chunk, "binary-response-body")
+            ?: return buildDecodeFailureResult(modifiedChunk, responseHeaders.contentEncoding)
+        val body = decodeAscii(decodedBodyBytes) ?: return FilterResult.PassThrough(modifiedChunk, "binary-response-body")
         return buildHttp1BodyFilterResult(
             session = session,
-            chunk = chunk,
+            chunk = modifiedChunk,
             requestInspection = requestInspection,
             responseHeaders = responseHeaders,
             body = body,
@@ -1118,8 +1141,10 @@ object HttpMitmFilter {
     private fun parseHttp1ResponseHeaders(text: String, headerEnd: Int): Http1ResponseHeaders? {
         val headerLines = text.substring(0, headerEnd).split("\r\n")
         val statusLine = headerLines.firstOrNull() ?: return null
+        val statusCode = statusLine.split(' ').getOrNull(1)?.toIntOrNull() ?: 0
         return Http1ResponseHeaders(
             statusLine = statusLine,
+            statusCode = statusCode,
             contentType = findHttpHeaderValue(headerLines, "Content-Type"),
             contentEncoding = findHttpHeaderValue(headerLines, "Content-Encoding"),
             transferEncoding = findHttpHeaderValue(headerLines, "Transfer-Encoding"),
@@ -1171,14 +1196,14 @@ object HttpMitmFilter {
                 redirectBodyBytes,
                 directives.cspValue
             )
-            return FilterResult.Replaced(response, "redirect-resource-applied", chunk.size)
+            return FilterResult.Replaced(response, "redirect-resource-applied", chunk.size, directives.matchedRuleSummaries)
         }
         val scrubbedBody = scrubHtmlAdArtifacts(contentType, body)
         val replacedBody = applyReplaceRules(contentType, scrubbedBody, directives.replaceRules)
         if (replacedBody != null && replacedBody != body) {
             val replacementBodyBytes = replacedBody.toByteArray(StandardCharsets.UTF_8)
             val response = buildSyntheticResponse(responseHeaders.statusLine, contentType, replacementBodyBytes, directives.cspValue)
-            return FilterResult.Replaced(response, "replace-rule-applied", chunk.size)
+            return FilterResult.Replaced(response, "replace-rule-applied", chunk.size, directives.matchedRuleSummaries)
         }
         val rewrittenBody = replacedBody ?: scrubbedBody
         if (neutralizeReason == null) {
@@ -1187,13 +1212,13 @@ object HttpMitmFilter {
                 val injectedBodyBytes = buildInjectedHtmlBody(rewrittenBody, cosmeticSelectors, directives.cspValue, directives.jsInjectRules)
                 val response = buildSyntheticResponse(responseHeaders.statusLine, contentType, injectedBodyBytes, directives.cspValue)
                 val reason = if (scrubbedBody != body) "html-ad-artifact-scrubbed" else "cosmetic-html-injected"
-                return FilterResult.Replaced(response, reason, chunk.size)
+                return FilterResult.Replaced(response, reason, chunk.size, directives.matchedRuleSummaries)
             }
             return FilterResult.PassThrough(chunk, "response-allowed")
         }
         val replacementBodyBytes = buildReplacementBody(contentType, rewrittenBody, cosmeticSelectors, directives.cspValue, directives.jsInjectRules)
         val response = buildSyntheticResponse(responseHeaders.statusLine, contentType, replacementBodyBytes, directives.cspValue)
-        return FilterResult.Replaced(response, neutralizeReason, chunk.size)
+        return FilterResult.Replaced(response, neutralizeReason, chunk.size, directives.matchedRuleSummaries)
     }
 
     fun maxHttp1FilterBufferBytes(): Int = minOf(MAX_HTTP1_FILTER_BUFFER_BYTES, HTTP1_FILTER_BUFFER_BYTES)
@@ -1288,7 +1313,7 @@ object HttpMitmFilter {
         if (bodyRewrite != null) {
             return Http2DataInspection(
                 suspiciousScore = 3,
-                suspiciousReasons = listOf(bodyRewrite.reason),
+                suspiciousReasons = appendRuleDebugReasons(listOf(bodyRewrite.reason), directives.matchedRuleSummaries),
                 confidence = if (bodyRewrite.reason == "redirect-resource-applied") "high" else "medium",
                 samplePreview = decoded.replace('\r', ' ').replace('\n', ' ').take(160),
                 vendor = headerInspection.vendor,
@@ -1376,7 +1401,7 @@ object HttpMitmFilter {
         )
         return Http2DataInspection(
             suspiciousScore = suspiciousScore,
-            suspiciousReasons = reasons.distinct(),
+            suspiciousReasons = appendRuleDebugReasons(reasons.distinct(), directives.matchedRuleSummaries),
             confidence = if (suspiciousScore >= 4) "high" else "medium",
             samplePreview = preview,
             vendor = vendor,
@@ -1434,6 +1459,11 @@ object HttpMitmFilter {
         return null
     }
 
+    private fun appendRuleDebugReasons(reasons: List<String>, ruleSummaries: List<String>): List<String> {
+        if (ruleSummaries.isEmpty()) return reasons
+        return (reasons + ruleSummaries.map { "rule:$it" }).distinct()
+    }
+
     private fun decodeChunkedBody(body: ByteArray): ByteArray? {
         var offset = 0
         val output = ByteArrayOutputStream(body.size)
@@ -1462,7 +1492,7 @@ object HttpMitmFilter {
     private fun gunzipBody(body: ByteArray): ByteArray? {
         return runCatching {
             GZIPInputStream(ByteArrayInputStream(body)).use { input ->
-                input.readBytes()
+                input.readBytesLimited(MAX_DECODED_BODY_BYTES)
             }
         }.getOrNull()
     }
@@ -1470,7 +1500,7 @@ object HttpMitmFilter {
     private fun brotliBody(body: ByteArray): ByteArray? {
         return runCatching {
             BrotliInputStream(ByteArrayInputStream(body)).use { input ->
-                input.readBytes()
+                input.readBytesLimited(MAX_DECODED_BODY_BYTES)
             }
         }.getOrNull()
     }
@@ -1478,7 +1508,7 @@ object HttpMitmFilter {
     private fun inflateDeflateBody(body: ByteArray): ByteArray? {
         return runCatching {
             InflaterInputStream(ByteArrayInputStream(body)).use { input ->
-                input.readBytes()
+                input.readBytesLimited(MAX_DECODED_BODY_BYTES)
             }
         }.getOrNull()
     }
@@ -1490,9 +1520,23 @@ object HttpMitmFilter {
             // 由于 Android 默认不支持 zstd，这里使用通用压缩检测
             // 如果检测到 zstd 压缩，尝试使用标准 Inflater（部分 zstd 流兼容）
             InflaterInputStream(ByteArrayInputStream(body)).use { input ->
-                input.readBytes()
+                input.readBytesLimited(MAX_DECODED_BODY_BYTES)
             }
         }.getOrNull()
+    }
+
+    private fun InputStream.readBytesLimited(maxBytes: Int): ByteArray? {
+        val output = ByteArrayOutputStream(minOf(maxBytes, 32 * 1024))
+        val buffer = ByteArray(8 * 1024)
+        var total = 0
+        while (true) {
+            val read = read(buffer)
+            if (read < 0) break
+            total += read
+            if (total > maxBytes) return null
+            output.write(buffer, 0, read)
+        }
+        return output.toByteArray()
     }
 
     private fun decodeContentEncodedBody(body: ByteArray, contentEncoding: String): ByteArray? {
@@ -2663,6 +2707,32 @@ object HttpMitmFilter {
 }
 </style>"""
 
+    private fun buildEmptyResponse(): ByteArray {
+        return buildString {
+            append("HTTP/1.1 204 No Content\r\n")
+            append("Connection: close\r\n")
+            append("Content-Length: 0\r\n")
+            append("Cache-Control: no-store\r\n")
+            append("X-HanFeng-Block: 1\r\n")
+            append("\r\n")
+        }.toByteArray(StandardCharsets.UTF_8)
+    }
+
+    private fun buildWebSocketBlockResponse(): ByteArray {
+        val body = "403 Forbidden"
+        val bodyBytes = body.toByteArray(StandardCharsets.UTF_8)
+        return buildString {
+            append("HTTP/1.1 403 Forbidden\r\n")
+            append("Connection: close\r\n")
+            append("Content-Type: text/plain; charset=utf-8\r\n")
+            append("Content-Length: ").append(bodyBytes.size).append("\r\n")
+            append("Cache-Control: no-store\r\n")
+            append("X-HanFeng-Block: 1\r\n")
+            append("\r\n")
+            append(body)
+        }.toByteArray(StandardCharsets.UTF_8)
+    }
+
     private fun buildSyntheticResponse(statusLine: String, contentType: String, body: String): String {
         val actualStatusLine = if (statusLine.startsWith("HTTP/1.")) {
             "${statusLine.substringBefore(' ')} 204 No Content"
@@ -2715,6 +2785,21 @@ object HttpMitmFilter {
             append("\r\n")
         }.toByteArray(StandardCharsets.ISO_8859_1)
         return headerBytes + bodyBytes
+    }
+
+    private fun stripResponseCookies(chunk: ByteArray, headerEnd: Int, cookieRemove: Set<String>): ByteArray {
+        val text = decodeAscii(chunk) ?: return chunk
+        val headerLines = text.substring(0, headerEnd).split("\r\n")
+        val filtered = headerLines.filterNot { line ->
+            if (!line.startsWith("Set-Cookie:", ignoreCase = true)) return@filterNot false
+            val cookieValue = line.substringAfter(':', "").trim()
+            cookieRemove.any { cookieValue.startsWith("$it=") || cookieValue.equals(it, ignoreCase = true) }
+        }
+        if (filtered.size == headerLines.size) return chunk
+        val newHeader = filtered.joinToString("\r\n")
+        val bodyBytes = chunk.copyOfRange(headerEnd, chunk.size)
+        val newHeaderBytes = newHeader.toByteArray(StandardCharsets.ISO_8859_1)
+        return newHeaderBytes + bodyBytes
     }
 
     private fun decodeAscii(chunk: ByteArray): String? {
@@ -2976,13 +3061,13 @@ object HttpMitmFilter {
         val resource = redirectResource?.trim()?.lowercase().orEmpty()
         if (resource.isBlank()) return null
         return when {
-            resource.contains("noopjs") || resource.contains("noop.js") || resource.contains("noop-script") || resource.contains("noopscript") || resource.contains("abp-resource:blank-js") || resource.contains("blank-js") || resource.contains("empty-js") -> {
+            resource.contains("noopjs") || resource.contains("noop.js") || resource.contains("noop-script") || resource.contains("noopscript") || resource.contains("abp-resource:blank-js") || resource.contains("ubo-resource:noop.js") || resource.contains("blank-js") || resource.contains("empty-js") -> {
                 "(()=>{})();".toByteArray(StandardCharsets.UTF_8)
             }
             resource.contains("noopjson") || resource.contains("noop-json") || resource.contains("blank-json") || resource.contains("empty-json") || resource.contains("abp-resource:blank-json") -> {
                 "{}".toByteArray(StandardCharsets.UTF_8)
             }
-            resource.contains("noophtml") || resource.contains("noop-html") || resource.contains("blank-html") || resource.contains("empty-html") || resource.contains("abp-resource:blank-html") -> {
+            resource.contains("noophtml") || resource.contains("noop-html") || resource.contains("noopframe") || resource.contains("noop-frame") || resource.contains("blank-frame") || resource.contains("blank-html") || resource.contains("empty-html") || resource.contains("abp-resource:blank-html") || resource.contains("ubo-resource:noop.html") -> {
                 "<html><head></head><body></body></html>".toByteArray(StandardCharsets.UTF_8)
             }
             resource.contains("noopvast") || resource.contains("noop-vast") || resource.contains("blank-vast") || resource.contains("empty-vast") || resource.contains("vast-empty") -> {
@@ -3000,7 +3085,10 @@ object HttpMitmFilter {
             resource.contains("noopmp4") || resource.contains("noop-video") || resource.contains("noopvideo") || resource.contains("blank-mp4") || resource.contains("empty-mp4") || resource.contains("blank-video") || resource.contains("empty-video") -> {
                 ByteArray(0)
             }
-            resource.contains("noopcss") || resource.contains("noop-css") || resource.contains("blank-css") || resource.contains("abp-resource:blank-css") || resource.contains("empty-css") -> {
+            resource.contains("noopmp3") || resource.contains("noop-audio") || resource.contains("noopaudio") || resource.contains("blank-audio") || resource.contains("empty-audio") || resource.contains("noop-0.1s.mp3") -> {
+                ByteArray(0)
+            }
+            resource.contains("noopcss") || resource.contains("noop.css") || resource.contains("noop-css") || resource.contains("blank-css") || resource.contains("abp-resource:blank-css") || resource.contains("ubo-resource:noop.css") || resource.contains("empty-css") -> {
                 ByteArray(0)
             }
             resource.contains("empty") || resource.contains("nooptext") || resource.contains("noop-text") || resource.contains("blank-text") -> {
@@ -3109,13 +3197,14 @@ object HttpMitmFilter {
     private fun inferRedirectContentType(originalContentType: String, redirectResource: String?): String {
         val resource = redirectResource?.trim()?.lowercase().orEmpty()
         return when {
-            resource.contains("noopjs") || resource.contains("noop.js") || resource.contains("noop-script") || resource.contains("noopscript") || resource.contains("abp-resource:blank-js") || resource.contains("blank-js") || resource.contains("empty-js") -> "application/javascript; charset=utf-8"
+            resource.contains("noopjs") || resource.contains("noop.js") || resource.contains("noop-script") || resource.contains("noopscript") || resource.contains("abp-resource:blank-js") || resource.contains("ubo-resource:noop.js") || resource.contains("blank-js") || resource.contains("empty-js") -> "application/javascript; charset=utf-8"
             resource.contains("noopjson") || resource.contains("noop-json") || resource.contains("blank-json") || resource.contains("empty-json") || resource.contains("abp-resource:blank-json") -> "application/json; charset=utf-8"
-            resource.contains("noophtml") || resource.contains("noop-html") || resource.contains("blank-html") || resource.contains("empty-html") || resource.contains("abp-resource:blank-html") -> "text/html; charset=utf-8"
+            resource.contains("noophtml") || resource.contains("noop-html") || resource.contains("noopframe") || resource.contains("noop-frame") || resource.contains("blank-frame") || resource.contains("blank-html") || resource.contains("empty-html") || resource.contains("abp-resource:blank-html") || resource.contains("ubo-resource:noop.html") -> "text/html; charset=utf-8"
             resource.contains("noopvast") || resource.contains("noop-vast") || resource.contains("blank-vast") || resource.contains("empty-vast") || resource.contains("vast-empty") -> "application/xml; charset=utf-8"
             resource.contains("1x1") || resource.contains("pixel") || resource.contains("transparent") || resource.contains("noopimage") || resource.contains("noop-image") || resource.contains("blank-image") || resource.contains("abp-resource:blank-image") || resource.contains("empty-image") -> "image/gif"
-            resource.contains("noopcss") || resource.contains("noop-css") || resource.contains("blank-css") || resource.contains("abp-resource:blank-css") || resource.contains("empty-css") -> "text/css; charset=utf-8"
+            resource.contains("noopcss") || resource.contains("noop.css") || resource.contains("noop-css") || resource.contains("blank-css") || resource.contains("abp-resource:blank-css") || resource.contains("ubo-resource:noop.css") || resource.contains("empty-css") -> "text/css; charset=utf-8"
             resource.contains("noopmp4") || resource.contains("noop-video") || resource.contains("noopvideo") || resource.contains("blank-mp4") || resource.contains("empty-mp4") || resource.contains("blank-video") || resource.contains("empty-video") -> "video/mp4"
+            resource.contains("noopmp3") || resource.contains("noop-audio") || resource.contains("noopaudio") || resource.contains("blank-audio") || resource.contains("empty-audio") || resource.contains("noop-0.1s.mp3") -> "audio/mpeg"
             resource.contains("empty") && originalContentType.contains("json") -> "application/json; charset=utf-8"
             resource.contains("empty") && originalContentType.contains("html") -> "text/html; charset=utf-8"
             originalContentType.isBlank() -> "text/plain; charset=utf-8"
@@ -5015,12 +5104,16 @@ object HttpMitmFilter {
         val pathInspection = inspectSuspiciousHttpPath(environment.lowerPath)
         val context = TlsMitmSessionManager.getContextOrNull() ?: return null
         val requestDomain = extractRequestDomain(environment.referer)
+        val isWebSocketConnect = environment.method.equals("connect", ignoreCase = true) &&
+            environment.protocol.equals("websocket", ignoreCase = true)
+        val effectiveRequestType = if (isWebSocketConnect) "websocket" else null
         val directives = RuleRepository.getRequestRewriteDirectives(
             context = context,
             host = environment.lowerAuthority,
             path = environment.lowerPath,
             appName = session.appName,
-            requestDomain = requestDomain
+            requestDomain = requestDomain,
+            requestType = effectiveRequestType
         )
         reportSuspiciousRedirectDomain(
             host = environment.lowerAuthority,
@@ -5037,6 +5130,7 @@ object HttpMitmFilter {
         val suspicion = Http2SuspicionAccumulator()
         if (blockedHost) suspicion.add(3, "blocked-host")
         if (blockedUrl) suspicion.add(3, "blocked-url")
+        if (isWebSocketConnect && directives.block) suspicion.add(10, "websocket-block")
         val vendor = RuleRepository.classifyVendorFromHints(context, environment.lowerAuthority, session.appName)
         val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         val aggressiveAdApp = RuleRepository.isAggressiveAdAppHint(session.appName)
@@ -5284,6 +5378,7 @@ object HttpMitmFilter {
         val path: String?,
         val scheme: String?,
         val status: String?,
+        val protocol: String?,
         val contentType: String?,
         val referer: String?,
         val userAgent: String?,
@@ -5385,6 +5480,7 @@ object HttpMitmFilter {
         val path = normalized[":path"]?.firstOrNull()?.ifBlank { null }
         val scheme = normalized[":scheme"]?.firstOrNull()?.ifBlank { null }
         val status = normalized[":status"]?.firstOrNull()?.ifBlank { null }
+        val protocol = normalized[":protocol"]?.firstOrNull()?.ifBlank { null }
         val contentType = normalized["content-type"]?.firstOrNull()?.ifBlank { null }
         val referer = normalized["referer"]?.firstOrNull()?.ifBlank { null }
         val userAgent = normalized["user-agent"]?.firstOrNull()?.ifBlank { null }
@@ -5397,6 +5493,7 @@ object HttpMitmFilter {
             path = path,
             scheme = scheme,
             status = status,
+            protocol = protocol,
             contentType = contentType,
             referer = referer,
             userAgent = userAgent,
@@ -5445,6 +5542,7 @@ object HttpMitmFilter {
             path = environment.path,
             scheme = environment.scheme,
             status = environment.status,
+            protocol = environment.protocol,
             contentType = environment.contentType,
             referer = environment.referer,
             userAgent = environment.userAgent,
@@ -5452,7 +5550,7 @@ object HttpMitmFilter {
             setCookie = environment.setCookie,
             vendor = vendor,
             suspiciousScore = suspicion.score,
-            suspiciousReasons = suspicion.reasons,
+            suspiciousReasons = appendRuleDebugReasons(suspicion.reasons, directives.matchedRuleSummaries),
             redirectResource = directives.redirectResource,
             cspValue = directives.cspValue,
             requestLike = environment.method != null && environment.status == null,
@@ -5910,6 +6008,7 @@ object HttpMitmFilter {
 
     private data class Http1ResponseHeaders(
         val statusLine: String,
+        val statusCode: Int,
         val contentType: String,
         val contentEncoding: String,
         val transferEncoding: String,

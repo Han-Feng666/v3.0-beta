@@ -5,7 +5,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
+import java.util.zip.GZIPOutputStream
 
 class HttpMitmFilterBodySignalTest {
     @Test
@@ -866,12 +868,21 @@ class HttpMitmFilterBodySignalTest {
         val jsonBody = redirectBody("application/json", "noop-json")
         val htmlBody = redirectBody("text/html", "blank-html")
         val vastBody = redirectBody("application/xml", "noop-vast")
+        val frameBody = redirectBody("text/html", "ubo-resource:noop.html")
+        val cssBody = redirectBody("text/css", "ubo-resource:noop.css")
+        val audioBody = redirectBody("audio/mpeg", "noop-0.1s.mp3")
 
         assertEquals("{}", String(jsonBody, StandardCharsets.UTF_8))
         assertTrue(String(htmlBody, StandardCharsets.UTF_8).contains("<html>"))
         assertTrue(String(vastBody, StandardCharsets.UTF_8).contains("<VAST"))
+        assertTrue(String(frameBody, StandardCharsets.UTF_8).contains("<html>"))
+        assertEquals(0, cssBody.size)
+        assertEquals(0, audioBody.size)
         assertEquals("application/json; charset=utf-8", redirectContentType("text/plain", "noop-json"))
         assertEquals("application/xml; charset=utf-8", redirectContentType("text/plain", "noop-vast"))
+        assertEquals("text/html; charset=utf-8", redirectContentType("text/plain", "ubo-resource:noop.html"))
+        assertEquals("text/css; charset=utf-8", redirectContentType("text/plain", "ubo-resource:noop.css"))
+        assertEquals("audio/mpeg", redirectContentType("text/plain", "noop-0.1s.mp3"))
     }
 
     @Test
@@ -903,6 +914,34 @@ class HttpMitmFilterBodySignalTest {
 
         assertEquals("replace-rule-applied", rewrite!!.reason)
         assertEquals("{\"slot\":\"blocked_payload\"}", String(rewrite.body, StandardCharsets.UTF_8))
+    }
+
+    @Test
+    fun `http2 rule debug reasons are appended without changing base reason`() {
+        val method = HttpMitmFilter::class.java.getDeclaredMethod(
+            "appendRuleDebugReasons",
+            List::class.java,
+            List::class.java
+        )
+        method.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val reasons = method.invoke(
+            HttpMitmFilter,
+            listOf("replace-rule-applied"),
+            listOf("ads.example.com[replace] source=IMPORTED vendor=Test")
+        ) as List<String>
+
+        assertTrue(reasons.contains("replace-rule-applied"))
+        assertTrue(reasons.contains("rule:ads.example.com[replace] source=IMPORTED vendor=Test"))
+    }
+
+    @Test
+    fun `gzip decode is bounded to avoid oversized body allocation`() {
+        val small = decodeContentEncodedBody(gzip("ad".repeat(32)), "gzip")
+        assertEquals("ad".repeat(32), String(small!!, StandardCharsets.UTF_8))
+
+        val large = decodeContentEncodedBody(gzip("x".repeat(700 * 1024)), "gzip")
+        assertEquals(null, large)
     }
 
     private fun inspectBodySignals(body: String): BodySignalView {
@@ -989,5 +1028,21 @@ class HttpMitmFilterBodySignalTest {
         )
         method.isAccessible = true
         return method.invoke(HttpMitmFilter, contentType, resource) as String
+    }
+
+    private fun decodeContentEncodedBody(body: ByteArray, encoding: String): ByteArray? {
+        val method = HttpMitmFilter::class.java.getDeclaredMethod(
+            "decodeContentEncodedBody",
+            ByteArray::class.java,
+            String::class.java
+        )
+        method.isAccessible = true
+        return method.invoke(HttpMitmFilter, body, encoding) as ByteArray?
+    }
+
+    private fun gzip(value: String): ByteArray {
+        val output = ByteArrayOutputStream()
+        GZIPOutputStream(output).use { it.write(value.toByteArray(StandardCharsets.UTF_8)) }
+        return output.toByteArray()
     }
 }

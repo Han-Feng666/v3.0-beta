@@ -36,6 +36,11 @@ data class BlockRule(
     val cspValue: String? = null,
     val redirectResource: String? = null,
     val jsInjectRules: Set<String> = emptySet(),
+    val cookieRemove: Set<String> = emptySet(),
+    val cookieSet: Set<String> = emptySet(),
+    val toDomains: Set<String> = emptySet(),
+    val cname: Boolean = false,
+    val emptyResponse: Boolean = false,
     val remoteSourceId: String? = null
 )
 

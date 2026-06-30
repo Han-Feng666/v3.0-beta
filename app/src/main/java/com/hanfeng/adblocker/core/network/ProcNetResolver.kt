@@ -68,9 +68,9 @@ object ProcNetResolver {
         val file = File(path)
         if (!file.canRead()) return emptyList()
         return runCatching {
-            file.readLines()
-                .drop(1)
-                .mapNotNull { line -> parseLine(line, path, protocol) }
+            file.bufferedReader().useLines { lines ->
+                lines.drop(1).mapNotNull { line -> parseLine(line, path, protocol) }.toList()
+            }
         }.getOrDefault(emptyList())
     }
 

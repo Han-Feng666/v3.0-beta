@@ -19,6 +19,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.viewpager2.widget.ViewPager2
 import com.HanFeng.R
 import com.HanFeng.core.network.NetworkKernel
 import com.HanFeng.data.AppSettingsRepository
@@ -137,12 +138,17 @@ class MainActivity : BaseActivity() {
     private fun setupMainContent(savedInstanceState: Bundle?) {
         val isTabletLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
             resources.configuration.smallestScreenWidthDp >= 600
-        val pager = binding.root.findViewById<androidx.viewpager2.widget.ViewPager2?>(R.id.pager)
+        val pager = binding.root.findViewById<ViewPager2?>(R.id.pager)
         if (!isTabletLandscape) {
             pager?.isSaveEnabled = false
             pager?.adapter = null
             pager?.adapter = MainPagerAdapter(this)
             pager?.offscreenPageLimit = 1
+            pager?.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+                override fun onPageSelected(position: Int) {
+                    if (position == 0) notifyRulesPageSelected()
+                }
+            })
             pager?.setCurrentItem(1, false)
             return
         }
@@ -152,6 +158,17 @@ class MainActivity : BaseActivity() {
             .replace(R.id.homeContainer, HomeFragment())
             .replace(R.id.statsContainer, StatsFragment())
             .commitNowAllowingStateLoss()
+    }
+
+    private fun notifyRulesPageSelected() {
+        supportFragmentManager.fragments.forEach { fragment ->
+            when (fragment) {
+                is RulesFragment -> fragment.onSelectedInPager()
+                else -> fragment.childFragmentManager.fragments
+                    .filterIsInstance<RulesFragment>()
+                    .forEach { it.onSelectedInPager() }
+            }
+        }
     }
 
     private fun syncMitmCertificateStateIfNeeded() {

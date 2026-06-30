@@ -164,6 +164,7 @@ class SettingsActivity : BaseActivity() {
             AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
             applyHideBackgroundPolicy(isChecked)
             btnResetHideBackground.visibility = View.VISIBLE
+            if (isChecked) showShortToast("返回桌面后将自动移除最近任务卡片")
         }
         btnResetHideBackground.setOnClickListener {
             AppSettingsRepository.resetHideBackground(this)
@@ -172,6 +173,7 @@ class SettingsActivity : BaseActivity() {
             switchHideBackground.setOnCheckedChangeListener { _, isChecked ->
                 AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
                 applyHideBackgroundPolicy(isChecked)
+                if (isChecked) showShortToast("返回桌面后将自动移除最近任务卡片")
             }
             btnResetHideBackground.visibility = View.GONE
             applyHideBackgroundPolicy(false)
@@ -355,6 +357,7 @@ class SettingsActivity : BaseActivity() {
         switchHideBackground.setOnCheckedChangeListener { _, isChecked ->
             AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
             applyHideBackgroundPolicy(isChecked)
+            if (isChecked) showShortToast("返回桌面后将自动移除最近任务卡片")
         }
     }
 

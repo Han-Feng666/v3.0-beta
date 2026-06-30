@@ -1,8 +1,8 @@
 package com.HanFeng.service
 
 sealed interface FilterResult {
-    data class PassThrough(val payload: ByteArray, val reason: String) : FilterResult
-    data class Replaced(val payload: ByteArray, val reason: String, val originalBytes: Int = 0) : FilterResult
+    data class PassThrough(val payload: ByteArray, val reason: String, val ruleDebug: List<String> = emptyList()) : FilterResult
+    data class Replaced(val payload: ByteArray, val reason: String, val originalBytes: Int = 0, val ruleDebug: List<String> = emptyList()) : FilterResult
 }
 
 data class RequestInspection(
@@ -11,8 +11,11 @@ data class RequestInspection(
     val host: String,
     val httpVersion: String,
     val referer: String?,
-    val origin: String?
-)
+    val origin: String?,
+    val upgrade: String? = null
+) {
+    val isWebSocket: Boolean get() = upgrade.equals("websocket", ignoreCase = true)
+}
 
 data class Http2HeaderInspection(
     val method: String?,
@@ -21,6 +24,7 @@ data class Http2HeaderInspection(
     val path: String?,
     val scheme: String?,
     val status: String?,
+    val protocol: String? = null,
     val contentType: String?,
     val referer: String?,
     val userAgent: String?,
@@ -34,7 +38,10 @@ data class Http2HeaderInspection(
     val requestLike: Boolean,
     val responseLike: Boolean,
     val hasBodyRewriteDirectives: Boolean = false
-)
+) {
+    val isWebSocket: Boolean get() = method.equals("CONNECT", ignoreCase = true) &&
+        protocol.equals("websocket", ignoreCase = true)
+}
 
 data class Http2ActionDecision(
     val action: String,

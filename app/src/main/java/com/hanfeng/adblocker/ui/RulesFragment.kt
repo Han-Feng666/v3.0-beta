@@ -33,6 +33,7 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.viewpager2.widget.ViewPager2
 import com.HanFeng.R
 import com.HanFeng.data.LogRepository
 import com.HanFeng.data.RemoteRuleSourceRepository
@@ -74,6 +75,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private var searchQuery = ""
     private var pendingSearchJob: Job? = null
     private var pendingRefreshJob: Job? = null
+    private var rulesLoadedOnce = false
     private var cachedRulesRef: List<BlockRule> = emptyList()
     private var cachedRulesSignature: Int = 0
     private var cachedGroupedRules = linkedMapOf<String, List<BlockRule>>()
@@ -274,6 +276,10 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             }
         })
         refreshListDelayed()
+    }
+
+    fun onSelectedInPager() {
+        refreshListSoon(0L)
     }
 
     private fun refreshListDelayed() {
@@ -952,6 +958,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun refreshList() {
         if (!isAdded || _binding == null) return
+        if (!shouldLoadRulesNow()) return
         val appContext = context?.applicationContext ?: return
         val currentVersion = ++refreshVersion
         val expandedSnapshot = expandedGroups.toSet()
@@ -1007,6 +1014,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 return@launch
             }.getOrThrow()
             if (_binding == null || currentVersion != refreshVersion) return@launch
+            rulesLoadedOnce = true
             binding.ruleSummary.text = buildString {
                 if (query.isNotEmpty()) {
                     append("搜索 ${state.items.count { it is RuleListItem.Domain }} 条结果")
@@ -1032,6 +1040,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             }
             adapter.submit(state.items)
         }
+    }
+
+    private fun shouldLoadRulesNow(): Boolean {
+        if (rulesLoadedOnce || searchQuery.isNotEmpty() || expandedGroups.isNotEmpty() || selectionMode) return true
+        val pager = activity?.findViewById<ViewPager2?>(R.id.pager) ?: return true
+        return pager.currentItem == 0
     }
 
     private fun reloadVpnIfRunning(shouldReload: Boolean) {

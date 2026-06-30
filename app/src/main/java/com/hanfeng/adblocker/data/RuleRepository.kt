@@ -49,6 +49,15 @@ object RuleRepository {
     private const val BUILTIN_AD_SEED_SOURCE_ID = "builtin-ad-seed"
     private const val IMPORT_PARSE_BATCH_SIZE = 4_000
     private const val LARGE_RULE_CACHE_THRESHOLD = 20_000
+    private const val MAX_STREAM_IMPORT_NEW_RULES = 300_000
+    private const val MAX_BACKGROUND_ADVANCED_NEW_RULES = 50_000
+    private const val MAX_CACHEABLE_RULES = 350_000
+    private const val MAX_IMPORT_LINE_CHARS = 32 * 1024
+    private const val MIN_IMPORT_FREE_HEAP_BYTES = 24L * 1024L * 1024L
+    private const val MAX_CACHED_WHITELIST_ENTRIES = 500_000
+    private const val MAX_CACHED_VENDOR_ENTRIES = 500_000
+    private val BUILTIN_NOEVAL_SCRIPTLET = "(function(){try{window.eval=function(){throw new EvalError('eval blocked');};}catch(e){}})();"
+    private val BUILTIN_NOWEBRTC_SCRIPTLET = "(function(){try{delete window.RTCPeerConnection;delete window.webkitRTCPeerConnection;delete window.mozRTCPeerConnection;}catch(e){}})();"
     private val SIMPLE_MODIFIER_NAMES = setOf("important", "badfilter")
     private val importScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // 白名单域名 - 这些域名被拦截会导致 APP 断网
@@ -229,6 +238,7 @@ object RuleRepository {
     @Volatile private var cachedBlockedDomains: Set<String>? = null
     @Volatile private var cachedRuleMap: Map<String, List<BlockRule>>? = null
     @Volatile private var cachedSimpleDomainIndex: SimpleDomainIndex? = null
+    @Volatile private var cachedTrieIndex: DomainTrieIndex? = null
     @Volatile private var cachedRegexRules: List<BlockRule>? = null
     @Volatile private var cachedCosmeticRules: List<BlockRule>? = null
     @Volatile private var cachedIpCidrRules: List<BlockRule>? = null
@@ -239,6 +249,8 @@ object RuleRepository {
     @Volatile private var cachedInvalidRegexRules: Set<String> = emptySet()
     @Volatile private var cachedVendorMap: MutableMap<String, String> = ConcurrentHashMap()
     @Volatile private var cachedKeywordRules: List<BlockRule>? = null
+    @Volatile private var cachedCombinedKeywordPattern: java.util.regex.Pattern? = null
+    @Volatile private var cachedRegexLiteralIndex: Map<String, List<BlockRule>>? = null
     @Volatile private var cachedWhitelistHits = ConcurrentHashMap<String, Boolean>()
     @Volatile private var cachedUnknownVendorSamples: Map<String, SuspiciousDomainRecord>? = null
     @Volatile private var cachedUnknownVendorSamplesLoaded = false
@@ -246,6 +258,8 @@ object RuleRepository {
     @Volatile private var cachedAppRuleIndex: Map<String, Map<String, List<BlockRule>>>? = null
     // Universal rules (no appPackages): domain → rules
     @Volatile private var cachedUniversalRuleMap: Map<String, List<BlockRule>>? = null
+    // CNAME rules: domain → BlockRule (for alias target matching in DNS resolution)
+    @Volatile private var cachedCnameRuleIndex: Map<String, BlockRule>? = null
     @Volatile private var lastUnknownVendorSamplesPersistAt: Long = 0L
 
     private data class SimpleDomainIndex(
@@ -413,1096 +427,20 @@ object RuleRepository {
         "captcha",
         "securelogin"
     )
-    private val novelVendorNames = setOf(
-        "番茄小说 (Fanqie Novel)",
-        "七猫小说 (Qimao Novel)",
-        "起点读书 (Qidian Reader)",
-        "QQ阅读 (QQ Reader)",
-        "书旗小说 (Shuqi Novel)",
-        "掌阅 (iReader)",
-        "咪咕阅读 (Migu Read)",
-        "米读小说 (Midu Novel)",
-        "纵横小说 (Zongheng Novel)",
-        "17K 小说 (17K Novel)",
-        "长读小说 (Changdu Novel)"
-    )
-    private val novelAppIdentifiers = listOf(
-        "番茄小说", "番茄免费小说", "fanqie", "fqnovel", "dragon.read",
-        "番茄畅听", "tomato.read", "tomatoread", "tomatonovel", "novel.snssdk", "fanqienovel",
-        "七猫小说", "七猫免费小说", "qimao", "kmxs", "wtzw",
-        "起点读书", "qidian", "qdreader", "yuewen",
-        "qq阅读", "qqreader", "qqread", "weread",
-        "书旗小说", "shuqi", "aliwx",
-        "掌阅", "ireader", "zhangyue",
-        "咪咕阅读", "migu", "cmread",
-        "米读小说", "midu", "miduread", "lechuan", "duokan", "readnovel",
-        "纵横小说", "zongheng", "zhread",
-        "17k", "17k小说", "book17k",
-        "长读小说", "changdu",
-        "红果免费短剧", "红果短剧", "免费短剧", "短剧", "短剧大全", "短剧场", "微短剧", "剧场", "小剧场",
-        "hongguo", "hongguoapp", "dejian", "duanju", "duanvideo", "shortdrama", "short_drama", "minidrama", "mini_drama", "drama", "episode",
-        "漫画", "免费漫画", "漫画大全", "漫剧", "comic", "manga", "manhua", "cartoon", "kuaikan", "buka", "dongman",
-        "听书", "有声书", "追书", "看书", "免费小说", "小说大全", "小说阅读", "阅读器", "书城",
-        "bookcity", "bookstore", "story", "stories", "freebook", "bookreader", "bookread",
-        "novelreader", "readapp", "yuedu", "xiaoshuo", "mianfei", "zhuishu", "kanshu"
-    )
-    private val novelAppProtectedSuffixes = setOf(
-        "wtzw.com",
-        "qimao.com",
-        "kmxs.com",
-        "fqnovel.com",
-        "fanqienovel.com",
-        "reading.snssdk.com",
-        "novel.snssdk.com",
-        "zijieapi.com",
-        "qidian.com",
-        "yuewen.com",
-        "readnovel.com",
-        "hongxiu.com",
-        "xxsy.net",
-        "qqreader.com",
-        "reader.qq.com",
-        "shuqi.com",
-        "ireader.com",
-        "zhangyue.com",
-        "cmread.com",
-        "migu.cn",
-        "migu.com",
-        "midu.com",
-        "zongheng.com",
-        "17k.com",
-        "changdu.com",
-        "hongguo.com",
-        "dejian.com"
-    )
     
     // 游戏核心服务域名（确保登录、联机、更新正常）
-    private val gameCoreDomains = setOf(
-        // 腾讯游戏
-        "gamehelper.com.cn", "act.qq.com", "imgcache.qq.com",
-        "gamedl.qq.com", "game.qq.com", "gamesafe.qq.com", "gameinfo.qq.com",
-        "gamecenter.qq.com", "sso.10.qq.com", "open.id.qq.com",
-        "ssl.ptlogin2.qq.com", "ptlogin2.qq.com",
-        "dl.dir.qq.com", "dlied1.qq.com", "dlied2.qq.com",
-        "dlied3.qq.com", "dlied4.qq.com", "dlied5.qq.com", "dlied6.qq.com",
-        // 米哈游
-        "mihoyo.com", "mihayo.com", "yuanshen.com", "hoyolab.com",
-        "hoyoverse.com", "bhsr.com", "starrails.com",
-        // 网易
-        "game.163.com",
-        // 通用下载 CDN
-        "cdndm.com", "cdn.hockeyapp.net", "fir.im"
-    )
     
     // 社交 APP 核心域名（确保聊天、语音、视频正常）
-    private val socialCoreDomains = setOf(
-        // 微信 QQ
-        "qq.com", "weixin.qq.com", "wx.qq.com", "web.weixin.qq.com", "mp.weixin.qq.com",
-        "work.weixin.qq.com", "long.weixin.qq.com", "szshort.weixin.qq.com",
-        "weixinbridge.com", "wechat.com", "wechatpay.cn",
-        "mqqurl.com", "qqurl.com", "qq.com.cn", "imqq.com",
-        "wecom.qq.com", "wework.com", "weiyun.com", "weiyun.cn",
-        "qqmail.com", "mail.qq.com", "exmail.qq.com", "docs.qq.com",
-        "meeting.tencent.com", "voovmeeting.com", "tim.qq.com", "ftn.qq.com",
-        "myqcloud.com", "qcloud.com", "tencentyun.com", "file.myqcloud.com", "cos.myqcloud.com", "tpns.tencent.com",
-        "qlogo.cn", "qlogo.com", "qpic.cn", "qpic.com",
-        "gtimg.com", "gtimg.cn",
-        // 酷安社区
-        "coolapk.com", "coolapkmarket.com",
-        // 支付
-        "qpay.tf.qq.com", "qpay.qq.com", "tenpay.com", "paipai.com"
-    )
 
     // 音乐/音频核心域名（确保播放、搜索、评论、账号同步正常）
-    private val mediaCoreDomains = setOf(
-        "music.qq.com", "y.qq.com", "qqmusic.qq.com", "stream.qqmusic.qq.com", "dl.stream.qqmusic.qq.com",
-        "kg.qq.com", "kgimg.com", "kugou.com", "kugoucdn.com", "kglink.cn", "staticssl.kugou.com",
-        "kuwo.cn", "kuwo.com", "kuwoapp.com", "kwimgs.com", "kuwo.cn",
-        "music.163.com", "music.126.net", "126.net", "nosdn.127.net", "vod.126.net",
-        "ximalaya.com", "ximaimg.com", "xmcdn.com", "ximaimg.cn",
-        "qingting.fm", "qtfm.cn", "qingtingcdn.com",
-        "lizhi.fm", "lizhi.io"
-    )
 
-    private val businessCoreDomains = setOf(
-        "alidrive.com", "aliyundrive.com", "aliyuncs.com", "drive.uc.cn",
-        "cloud.189.cn", "115.com", "pan.baidu.com", "yunpan.360.cn",
-        "docs.qq.com", "doc.weixin.qq.com", "shimo.im", "feishu.cn", "feishu.net",
-        "larkoffice.com", "bytedocs.com", "yuque.com", "notion.so",
-        "amap.com", "autonavi.com", "amapapis.com", "didialift.com", "didichuxing.com",
-        "meituan.com", "sankuai.com", "ele.me", "eleme.cn",
-        "alipay.com", "alipay.cn", "tenpay.com", "unionpay.com", "95516.com"
-    )
     
     // 小说内容 API 白名单 (这些域名/子域名专门提供小说内容，不拦截)
-    private val novelContentApiDomains = setOf(
-        // 番茄小说
-        "api.fanqienovel.com",
-        "api1.fanqienovel.com",
-        "api2.fanqienovel.com",
-        "reader-api.fanqienovel.com",
-        "api-access.fqnovel.com",
-        "reader-api.fqnovel.com",
-        "reading.snssdk.com",
-        "novel.snssdk.com",
-        "api5-normal-lf.fqnovel.com",
-        "api3-normal-lf.fqnovel.com",
-        // 七猫小说
-        "api.qimao.com",
-        "webnovel.qimao.com",
-        "reader-api.kmxs.com",
-        "api-ks.wtzw.com",
-        // 起点读书
-        "bookapi.qidian.com",
-        "read.qidian.com",
-        "trader.qidian.com",
-        "druidv6.if.qidian.com",
-        // QQ 阅读
-        "book.qqreader.com",
-        "reader.qq.com",
-        "api.weread.qq.com",
-        // 书旗小说
-        "api.shuqi.com",
-        "reader.aliwx.com",
-        "capi.shuqireader.com",
-        // 掌阅
-        "api.ireader.com",
-        "book.zhangyue.com",
-        // 其他
-        "api.cmread.com",
-        "api.migu.com",
-        "api.midu.com",
-        "api.zongheng.com",
-        "api.17k.com",
-        "api.changdu.com",
-        "api.dejian.com",
-        "api.hongguo.com"
-    )
-    private val novelAggressiveVendorNames = setOf(
-        "优比客思 (UBIX Ads)",
-        "QXM (QXM Ads)",
-        "中关互动 (ZGHD)",
-        "趣盟广告 (Qumeng Ads)",
-        "AdScope 聚合广告 (AdScope)",
-        "通用广告/追踪 (Generic Ad/Tracking)"
-    )
-    private val novelAggressiveExactDomains = setOf(
-        "ad.hunyuan.tencent.com",
-        "dsp-creative.ubixioe.com",
-        "adx-data-u1.ubixioe.com",
-        "ade-rtb.netease.com",
-        "adtrack.e.kuaishou.com",
-        "v4-lm.adukwai.com",
-        "log-api.pangolin-sdk-toutiao-b.com",
-        "p2-pro.a.yximgs.com",
-        "tnc3-aliec2.zijieapi.com",
-        "tnc3-bjlgy.zijieapi.com",
-        "tnc3-alisc1.snssdk.com",
-        "tnc11-aliec2.zijieapi.com",
-        "tnc11-bjlgy.zijieapi.com",
-        "api-access.pangolin-sdk-toutiao.com",
-        "api-access.pangolin-sdk-toutiao1.com",
-        "tnc3-bjlgy.bytegecko.com",
-        "log-api.pangolin-sdk-toutiao-b.com",
-        "pangolin-sdk-toutiao.com",
-        "pangolin-sdk-toutiao1.com",
-        "gdt.qq.com",
-        "gdtimg.com",
-        "e.qq.com"
-    )
-    private val highConfidenceAdSdkDomains = setOf(
-        "pangolin-sdk-toutiao.com",
-        "pangolin-sdk-toutiao1.com",
-        "pangolin-sdk-toutiao-b.com",
-        "pangle.io",
-        "csjplatform.com",
-        "oceanengine.com",
-        "gromore.com",
-        "gdt.qq.com",
-        "e.qq.com",
-        "gdtimg.com",
-        "guangdiantong.cn",
-        "youlianghui.com"
-    )
-    private val byteDanceInfraProtectedSuffixes = setOf(
-        "bytegecko.com",
-        "pstatp.com",
-        "snssdk.com",
-        "fqnovelstatic.com",
-        "byteimg.com",
-        "ibytedtos.com",
-        "bytedtos.com",
-        "zijieapi.com"
-    )
-    private val fanqieProtectedAdPathKeywords = listOf(
-        "/ad/", "/ads/", "/adx/", "/advert/", "/advertisement/", "/union/", "/sdk/union/",
-        "/reward/", "/rewarded/", "/excitation/", "/inspire/", "/banner/", "/feed_ad/",
-        "/bottom_banner/", "/floating_banner/", "/common/banner/", "/native/banner/",
-        "/draw_ad/", "/ad_plan/", "/ad_request/", "/ad_style/", "/ad_config/", "/ad_info/",
-        "/launch/", "/startup/", "/open_screen/", "/splash/", "/feed/banner/", "/popup/",
-        "/welfare/", "/task/", "/task_center/", "/coin/", "/bonus/", "/benefit/", "/offerwall/"
-    )
-    private val bypassProtectionDomains = setOf(
-        "dns.alidns.com",
-        "httpdns.aliyun.com",
-        "httpdns.alicdn.com",
-        "httpdns-sc.aliyuncs.com",
-        "httpdns-cn.aliyuncs.com",
-        "httpdns-api.aliyuncs.com",
-        "httpdns.m.aliyuncs.com",
-        "doh.pub",
-        "dot.pub",
-        "doq.pub",
-        "dns.google",
-        "dns.google.com",
-        "dns64.dns.google",
-        "cloudflare-dns.com",
-        "one.one.one.one",
-        "1dot1dot1dot1.cloudflare-dns.com",
-        "mozilla.cloudflare-dns.com",
-        "chrome.cloudflare-dns.com",
-        "security.cloudflare-dns.com",
-        "family.cloudflare-dns.com",
-        "dns.quad9.net",
-        "dns10.quad9.net",
-        "dns11.quad9.net",
-        "dns.adguard-dns.com",
-        "unfiltered.adguard-dns.com",
-        "dns-family.adguard.com",
-        "dns-unfiltered.adguard.com",
-        "dns.nextdns.io",
-        "dns.nextdns.io.sslip.io",
-        "dns0.eu",
-        "zero.dns0.eu",
-        "doh.opendns.com",
-        "doh.cleanbrowsing.org",
-        "dns.umbrella.com",
-        "dns64.steward.net",
-        "family-filter-dns.cleanbrowsing.org",
-        "security-filter-dns.cleanbrowsing.org",
-        "adult-filter-dns.cleanbrowsing.org",
-        "dns.adguard.com",
-        "dns-family.adguard.com",
-        "dns-unfiltered.adguard.com",
-        "unfiltered.adguard-dns.com",
-        "dns.nextdns.io",
-        "dns0.eu",
-        "zero.dns0.eu",
-        "resolver1.opendns.com",
-        "resolver2.opendns.com",
-        "resolver3.opendns.com",
-        "resolver4.opendns.com",
-        "familyshield.opendns.com",
-        "security.cloudflare-dns.com",
-        "family.cloudflare-dns.com",
-        "dns11.quad9.net",
-        "dns10.quad9.net",
-        "dns.quad9.net",
-        "doh.dns.sb",
-        "dot.dns.sb",
-        "public.dns.iij.jp",
-        "jp.tiar.app",
-        "doh.apad.pro",
-        "dot.apad.pro",
-        "httpdns.bcelive.com",
-        "httpdns.baidu.com",
-        "doh.baidu.com",
-        "dns.srv.baidu.com",
-        "dns.weixin.qq.com",
-        "dns.weixin.qq.com.cn",
-        "httpdns.weixin.qq.com",
-        "httpdns.qq.com",
-        "httpdns.tencentyun.com",
-        "httpdns.tencent-cloud.com",
-        "resolver-a.privatelink.apple-dns.net",
-        "mask.icloud.com",
-        "mask-h2.icloud.com",
-        "use-application-dns.net"
-    )
-    private val vendorPatterns = linkedMapOf(
-        "腾讯 (Tencent)" to listOf(
-            "gdt", "qq", "e.qq", "tencent", "wechat", "weixin", "qcloud", "bugly", "qzone", "qzs",
-            "gtimg", "imtt", "myapp", "sogou", "iegcom", "tmead", "music.qq", "y.qq", "kuwo", "kugou", "kgimg",
-            "qpic", "idqqimg", "tenpay", "tenvideo", "qlogo", "wechatpay", "qweather"
-        ),
-        "字节跳动 (ByteDance)" to listOf(
-            "pangle", "pangolin", "oceanengine", "bytedance", "bytecdn", "toutiao", "snssdk", "douyin",
-            "amemv", "volces", "tiktok", "musical.ly", "toutiaocloud", "jinritemai", "zijieapi", "isnssdk", "ibytedtos", "gromore", "csj",
-            "lf3", "lf6", "ixigua", "bdxigua"
-        ),
-        "番茄小说 (Fanqie Novel)" to listOf(
-            "fanqie", "fanqienovel", "fqnovel", "dragon.read", "reading.snssdk", "tomato.read", "fqnovelvod", "novel.snssdk"
-        ),
-        "七猫小说 (Qimao Novel)" to listOf(
-            "qimao", "kmxs", "wtzw", "sevencat", "qmread", "qmks", "qimaoad"
-        ),
-        "起点读书 (Qidian Reader)" to listOf(
-            "qidian", "qdreader", "yuewen", "readnovel", "hongxiu", "xxsy", "qdbook", "ywstatic", "qdmm"
-        ),
-        "QQ阅读 (QQ Reader)" to listOf(
-            "qqreader", "reader.qq", "qqbook", "qqread", "weread", "book.qq"
-        ),
-        "书旗小说 (Shuqi Novel)" to listOf(
-            "shuqi", "shuqiapi", "aliwx", "sqnovel", "shuqireader", "shuqiimg", "sqxs"
-        ),
-        "掌阅 (iReader)" to listOf(
-            "ireader", "zhangyue", "zyreader", "chaozh", "iread", "zyad", "ireadad"
-        ),
-        "咪咕阅读 (Migu Read)" to listOf(
-            "migu", "miguread", "cmread", "wap.cmread", "miguvideo", "migulive"
-        ),
-        "米读小说 (Midu Novel)" to listOf(
-            "midu", "miduread", "miduoke", "lechuan", "midubook", "miduad", "midusdk"
-        ),
-        "纵横小说 (Zongheng Novel)" to listOf(
-            "zongheng", "zongheng.com", "zhread", "zonghengad"
-        ),
-        "17K 小说 (17K Novel)" to listOf(
-            "17k", "17k.com", "book17k", "read17k", "17kimg"
-        ),
-        "长读小说 (Changdu Novel)" to listOf(
-            "changdu", "changdu.com", "changduad", "cdsdk"
-        ),
-        "阿里巴巴集团 (Alibaba Group)" to listOf(
-            "alibaba", "alibabagroup", "alipay", "taobao", "tmall", "aliyun", "alimama", "tanx", "umeng",
-            "ucads", "ucweb", "mmstat", "ut.taobao", "union.taobao", "ad.aliyun", "youku", "ykimg", "ykad", "amap", "eleme",
-            "alicdn", "adashx", "koubei", "fliggy", "etao", "xiami", "gaode"
-        ),
-        "百度 (Baidu)" to listOf(
-            "baidu", "mobads", "duapps", "baidustatic", "cpro", "dueros", "hao123", "baidubce", "bdimg",
-            "bdstatic", "baidubcs", "tieba", "haokan", "quanmin", "box.baidu"
-        ),
-        "快手 (Kuaishou)" to listOf(
-            "kuaishou", "kwai", "kwad", "kwaiad", "adkwai", "ksad", "yximgs", "gifshow"
-        ),
-        "华为 (Huawei)" to listOf(
-            "huawei", "hicloud", "hispace", "hms", "hwcloud", "openalliance", "ads-drcn", "petal"
-        ),
-        "小米 (Xiaomi)" to listOf(
-            "xiaomi", "miui", "mistat", "ad.xiaomi", "tracking.miui", "mi.com", "duokan"
-        ),
-        "OPPO (HeyTap)" to listOf(
-            "oppo", "heytap", "coloros", "aps", "adx.ads.heytap", "cp01", "oppomobile"
-        ),
-        "vivo (vivo Ads)" to listOf(
-            "vivo", "iqoo", "ads.vivo", "adlog.vivo", "vivoglobal", "bbk"
-        ),
-        "QXM (QXM Ads)" to listOf(
-            "qxm", "qxmad", "qxmads", "52qumao", "qumao", "qmxad"
-        ),
-        "UBIX (UBIX Ads)" to listOf(
-            "ubix", "ubixio", "ubixad", "ubxi", "ubixai", "ubiadx", "ubixioe"
-        ),
-        "中关互动 (ZGHD)" to listOf(
-            "zghd", "zhongguan", "zgad", "zhghd", "hxltad", "adintl"
-        ),
-        "荣耀 (Honor)" to listOf("honor", "honormagic", "ads.honor", "hihonor"),
-        "京东 (JD.com)" to listOf("jingdong", "jad", "jrad", "ads-union.jd", "3.cn", "jcloud", "jdcloud", "jdwl"),
-        "美团 (Meituan)" to listOf("meituan", "dianping", "maoyan", "union.meituan", "ad.meituan", "media.meituan", "sankuai", "meituan.net", "meituanstatic", "meituanad"),
-        "趣盟广告 (Qumeng Ads)" to listOf("qumeng", "qmob", "qtmojo", "qmadsdk", "qumengad"),
-        "网易 (NetEase)" to listOf("netease", "163", "youdao", "music.126", "adgeo.163", "netease.im"),
-        "微博 (Weibo)" to listOf("weibo", "sinaimg", "alitui.weibo", "ad.weibo", "sina.cn"),
-        "哔哩哔哩 (Bilibili)" to listOf("bilibili", "biliapi", "bilivideo", "cm.bilibili", "hdslb"),
-        "爱奇艺 (iQIYI)" to listOf("iqiyi", "qiyi", "pps", "adx.qiyi", "msg.qy.net"),
-        "搜狐 (Sohu)" to listOf("sohu", "sohucs", "aty.sohu"),
-        "芒果 (MangoTV)" to listOf("mgtv", "hunantv", "ad.mgtv"),
-        "拼多多 (PDD)" to listOf("pinduoduo", "yangkeduo", "pddpic", "pddimg"),
-        "小红书 (Xiaohongshu)" to listOf("xiaohongshu", "xhscdn", "xhslink", "xhsimg"),
-        "携程 (Trip.com)" to listOf("ctrip", "trip.com", "qunar", "tieshujia"),
-        "360 (Qihoo 360)" to listOf("360.cn", "qhimg", "qhmsg", "so.com", "360safe", "360buyimg"),
-        "极光 (Jiguang)" to listOf("jiguang", "jpush", "jmessage", "aurora", "jiguang.cn"),
-        "个推 (Getui)" to listOf("getui", "igexin", "gexin", "getui.net"),
-        "TalkingData (TalkingData)" to listOf("talkingdata", "tendcloud", "talkingdata.net"),
-        "神策数据 (Sensors Data)" to listOf("sensorsdata", "sa-sdk", "sensorsdata.cn"),
-        "秒针系统 (Miaozhen)" to listOf("miaozhen", "miaozhen.com"),
-        "AdMaster (AdMaster)" to listOf("admaster", "admasterapi"),
-        "Sigmob (Sigmob)" to listOf("sigmob", "sigmob.cn", "sigmobads"),
-        "MobTech (MobTech)" to listOf("mob.com", "mobpush", "sharesdk"),
-        "Alphabet (Google)" to listOf(
-            "google", "doubleclick", "admob", "googlesyndication", "googleadservices", "googleads", "gstatic",
-            "googletagmanager", "google-analytics", "analytics.google", "firebase", "firebasead", "youtube",
-            "ytimg", "crashlytics", "adservice.google"
-        ),
-        "Meta (Meta Platforms)" to listOf(
-            "facebook", "fbcdn", "fbsbx", "meta", "instagram", "audiencenetwork", "whatsapp", "oculus"
-        ),
-        "Amazon (Amazon Ads)" to listOf("amazon", "amzn", "amazon-adsystem", "aaxads", "twitch", "imdb"),
-        "Microsoft (Microsoft Ads)" to listOf(
-            "microsoft", "msn", "bing", "xandr", "linkedin", "skype"
-        ),
-        "Apple (Apple Ads)" to listOf(
-            "apple", "icloud", "itunes", "iad.apple", "appleadservices", "mzstatic", "cdn-apple"
-        ),
-        "Samsung (Samsung Ads)" to listOf(
-            "samsung", "samsungads", "samsungacr", "samsungcloudcdn"
-        ),
-        "X (Twitter)" to listOf("twitter", "t.co", "twimg", "ads-twitter", "x.com"),
-        "Snap (Snapchat)" to listOf("snapchat", "sc-cdn", "snapads", "snapkit", "feelinsonice"),
-        "Pinterest (Pinterest)" to listOf("pinterest", "pinimg", "ads.pinterest"),
-        "Reddit (Reddit)" to listOf("reddit", "redd.it", "redditmedia", "ads.reddit"),
-        "Unity (Unity Ads)" to listOf("unityads", "unity3d", "unityads.unity3d", "delta-dna"),
-        "AppLovin (AppLovin)" to listOf("applovin", "applvn", "applovinsdk", "maxads"),
-        "ironSource (ironSource)" to listOf("ironsrc", "ironsource", "supersonicads", "unity-ironsource"),
-        "Vungle (Liftoff)" to listOf("vungle", "liftoff", "vungleads", "liftoff.io"),
-        "Chartboost (Chartboost)" to listOf("chartboost", "chartboosts"),
-        "InMobi (InMobi)" to listOf("inmobi", "aerserv", "glancecdn"),
-        "Mintegral (Mintegral)" to listOf("mintegral", "mobvista", "mbridge", "mtgads", "mbridgelab"),
-        "Moloco (Moloco)" to listOf("moloco", "molocoads"),
-        "The Trade Desk (TTD)" to listOf("thetradedesk", "adsrvr", "uidapi"),
-        "PubMatic (PubMatic)" to listOf("pubmatic", "ads.pubmatic", "hbopenbid"),
-        "PubNative (PubNative)" to listOf("pubnative", "pubnative.net", "hybid"),
-        "Magnite (Magnite)" to listOf("magnite", "rubiconproject", "spotxchange", "spotx.tv"),
-        "OpenX (OpenX)" to listOf("openx", "openx.net"),
-        "Index Exchange (Index Exchange)" to listOf("indexww", "casalemedia", "indexexchange", "js-sec.indexww"),
-        "Media.net (Media.net)" to listOf("media.net", "medianet", "contextual.media.net"),
-        "Taboola (Taboola)" to listOf("taboola", "taboolasyndication"),
-        "Outbrain (Outbrain)" to listOf("outbrain", "outbrainimg", "odb.outbrain"),
-        "TripleLift (TripleLift)" to listOf("triplelift", "3lift"),
-        "AdColony (AdColony)" to listOf("adcolony", "adc3"),
-        "Ogury (Ogury)" to listOf("ogury", "adogy"),
-        "Digital Turbine (DT Exchange)" to listOf("fyber", "inner-active", "iaacdn", "digitalturbine", "colossusssp"),
-        "Smaato (Smaato)" to listOf("smaato", "smaato.net"),
-        "Start.io (Start.io)" to listOf("startappservice", "start.io", "startapp", "startad"),
-        "Tapjoy (Tapjoy)" to listOf("tapjoy", "tjvid", "ws.tapjoyads"),
-        "Adjoe (adjoe)" to listOf("adjoe", "adjoe.zone"),
-        "LoopMe (LoopMe)" to listOf("loopme", "loopme.me"),
-        "Verve (Verve Group)" to listOf("verve", "adtilt", "vervewireless"),
-        "HyprMX (HyprMX)" to listOf("hyprmx", "hyprmx.com"),
-        "Smadex (Smadex)" to listOf("smadex", "smadex.com"),
-        "Maio (Maio)" to listOf("maio", "maio.jp"),
-        "Verizon Media (Yahoo/AOL)" to listOf("yahoo", "yimg", "aol", "flurry", "verizonmedia"),
-        "Oracle (Oracle Ads)" to listOf("oracle", "moatads", "addthis", "bluekai"),
-        "Criteo (Criteo)" to listOf("criteo", "criteo.net"),
-        "Yandex (Yandex Ads)" to listOf("yandex", "yandexadexchange", "yastatic"),
-        "VK (VK Ads)" to listOf("vk.com", "vkuser", "mytarget", "mail.ru"),
-        "传音 (Transsion)" to listOf("transsion", "tecno", "infinix", "itel-mobile")
-    )
-    private val vendorKeywords = linkedMapOf(
-        "腾讯 (Tencent)" to listOf(
-            "tencent", "wechat", "weixin", "qq", "gdt", "bugly", "qcloud", "myapp", "kuwo", "kugou", "sogou", "tenpay", "qzone", "qimei", "guangdiantong", "adqq", "adexpo"
-        ),
-        "字节跳动 (ByteDance)" to listOf(
-            "bytedance", "douyin", "tiktok", "toutiao", "pangle", "oceanengine", "snssdk", "amemv", "ixigua", "gromore", "csj"
-        ),
-        "番茄小说 (Fanqie Novel)" to listOf(
-            "fanqie", "fanqienovel", "fqnovel", "dragonread", "tomatonovel", "tomatoread", "novelsnssdk", "fqnovelvod"
-        ),
-        "七猫小说 (Qimao Novel)" to listOf(
-            "qimao", "kmxs", "wtzw", "sevencat", "qimaoreader", "qmread", "qimaoad"
-        ),
-        "起点读书 (Qidian Reader)" to listOf(
-            "qidian", "qdreader", "yuewen", "readnovel", "hongxiu", "xxsy", "qdbook", "qdmm", "ywstatic"
-        ),
-        "QQ阅读 (QQ Reader)" to listOf(
-            "qqreader", "qqread", "qqbook", "readerqq", "weread", "bookqq"
-        ),
-        "书旗小说 (Shuqi Novel)" to listOf(
-            "shuqi", "shuqinovel", "sqnovel", "aliwx", "shuqireader", "shuqiimg"
-        ),
-        "掌阅 (iReader)" to listOf(
-            "ireader", "zhangyue", "chaozh", "zyreader", "iread", "zyad"
-        ),
-        "咪咕阅读 (Migu Read)" to listOf(
-            "migu", "miguread", "cmread"
-        ),
-        "米读小说 (Midu Novel)" to listOf(
-            "midu", "miduread", "lechuan", "midubook", "miduad"
-        ),
-        "纵横小说 (Zongheng Novel)" to listOf(
-            "zongheng", "zhread"
-        ),
-        "17K 小说 (17K Novel)" to listOf(
-            "17k", "book17k", "read17k"
-        ),
-        "长读小说 (Changdu Novel)" to listOf(
-            "changdu", "changduad", "cdsdk"
-        ),
-        "阿里巴巴集团 (Alibaba Group)" to listOf(
-            "alibaba", "taobao", "tmall", "alipay", "aliyun", "alimama", "umeng", "uc", "youku", "amap", "gaode", "eleme", "fliggy", "tanx", "mmstat", "adash"
-        ),
-        "百度 (Baidu)" to listOf(
-            "baidu", "mobads", "cpro", "duapp", "tieba", "hao123", "dueros", "haokan", "baidumobads", "bdunion"
-        ),
-        "快手 (Kuaishou)" to listOf(
-            "kuaishou", "kwai", "kwad", "gifshow", "ksad", "kwaiads", "kwaicdn", "adukwai", "yximgs"
-        ),
-        "华为 (Huawei)" to listOf(
-            "huawei", "hms", "hicloud", "petal", "honor", "hispace", "openalliance", "hwads", "appgallery", "hwclouds"
-        ),
-        "小米 (Xiaomi)" to listOf(
-            "xiaomi", "miui", "mistat", "miad", "mishop", "mipush", "miglobal", "redmi", "mitv", "mibox", "duokan", "mi"
-        ),
-        "OPPO (HeyTap)" to listOf(
-            "oppo", "heytap", "coloros", "realme", "breeno", "oppomobile", "nearme"
-        ),
-        "vivo (vivo Ads)" to listOf(
-            "vivo", "iqoo", "bbk", "vivoglobal", "jovi"
-        ),
-        "荣耀 (Honor)" to listOf(
-            "honor", "hihonor", "magicui"
-        ),
-        "京东 (JD.com)" to listOf(
-            "jd", "jingdong", "jrad", "jad", "3cn", "jdcloud", "jingxi", "paipai"
-        ),
-        "美团 (Meituan)" to listOf(
-            "meituan", "dianping", "sankuai", "maoyan", "kuailv", "wmapi", "meituanad"
-        ),
-        "趣盟广告 (Qumeng Ads)" to listOf(
-            "qumeng", "qmob", "qtmojo", "qmadsdk", "qumengad", "qtadx"
-        ),
-        "网易 (NetEase)" to listOf(
-            "netease", "163", "youdao", "lofter", "music126", "mail163"
-        ),
-        "微博 (Weibo)" to listOf(
-            "weibo", "sina", "sinaimg", "weibocdn"
-        ),
-        "哔哩哔哩 (Bilibili)" to listOf(
-            "bilibili", "bili", "hdslb", "bilivideo", "biliapi"
-        ),
-        "爱奇艺 (iQIYI)" to listOf(
-            "iqiyi", "qiyi", "pps", "qy", "71edge"
-        ),
-        "搜狐 (Sohu)" to listOf(
-            "sohu", "sohucs", "focus"
-        ),
-        "芒果 (MangoTV)" to listOf(
-            "mgtv", "mango", "hunantv", "mgad"
-        ),
-        "拼多多 (PDD)" to listOf(
-            "pinduoduo", "yangkeduo", "pdd", "jinbao", "pddpic"
-        ),
-        "小红书 (Xiaohongshu)" to listOf(
-            "xiaohongshu", "xiaohong", "xhs", "xhscdn", "xhslink"
-        ),
-        "携程 (Trip.com)" to listOf(
-            "ctrip", "trip", "qunar", "tripcdn", "qunarzz"
-        ),
-        "360 (Qihoo 360)" to listOf(
-            "360", "qihoo", "360safe", "qhimg", "so"
-        ),
-        "极光 (Jiguang)" to listOf(
-            "jiguang", "jpush", "aurora", "janalytics", "jverification"
-        ),
-        "个推 (Getui)" to listOf(
-            "getui", "gexin", "igexin", "gtpush"
-        ),
-        "TalkingData (TalkingData)" to listOf(
-            "talkingdata", "tendcloud", "tdid"
-        ),
-        "极光推送广告 (Jiguang Ads)" to listOf(
-            "jpush", "jiguang", "aurora", "ad.jiguang", "jmessage"
-        ),
-        "个推广告 (Getui Ads)" to listOf(
-            "getui", "gexin", "igexin", "sdk.open.phone.igexin"
-        ),
-        "神策数据 (Sensors Data)" to listOf(
-            "sensorsdata", "sensors"
-        ),
-        "秒针系统 (Miaozhen)" to listOf(
-            "miaozhen"
-        ),
-        "AdMaster (AdMaster)" to listOf(
-            "admaster"
-        ),
-        "Sigmob (Sigmob)" to listOf(
-            "sigmob", "sigmobads"
-        ),
-        "MobTech (MobTech)" to listOf(
-            "mobtech", "sharesdk", "mobpush", "moblink", "mobsec"
-        ),
-        "热云数据 (Reyun)" to listOf(
-            "reyun", "trackingio", "reyun.com", "reyunad"
-        ),
-        "友盟+ (Umeng+)" to listOf(
-            "umeng", "utdevice", "uappstat", "umtrack", "umtrack2", "utsystem"
-        ),
-        "穿山甲 (Pangle)" to listOf(
-            "pangle", "pangolin", "csj", "gromore", "pangleglobal"
-        ),
-        "腾讯广告 (Tencent Ads)" to listOf(
-            "gdt", "tmead", "eqq", "qqe2", "gdtimg", "gdt.qq"
-        ),
-        "百度联盟 (Baidu Union)" to listOf(
-            "mobads", "cpro", "baidubes", "baidustat", "hm.baidu"
-        ),
-        "优量汇 (Tencent Marketing)" to listOf(
-            "gdt", "eqq", "qqe2", "youlianghui"
-        ),
-        "快手联盟 (Kwai Business)" to listOf(
-            "kwai", "kwad", "kuaishou", "kwaibusiness"
-        ),
-        "磁力引擎 (Kwai Ads)" to listOf(
-            "magneticengine", "kuaishouad", "kwaiad", "adukwai", "open.e.kuaishou"
-        ),
-        "阿里妈妈 (Alimama)" to listOf(
-            "alimama", "tanx", "atanx", "adash", "simba.taobao"
-        ),
-        "华为广告 (Huawei Ads)" to listOf(
-            "openalliance", "hwads", "ads-drcn", "huaweiads"
-        ),
-        "小米广告 (Xiaomi Ads)" to listOf(
-            "miad", "mistat", "ad.xiaomi", "tracking.miui"
-        ),
-        "OPPO 广告 (OPPO Ads)" to listOf(
-            "heytap", "oppo", "nearme", "ads.heytap"
-        ),
-        "vivo 广告 (vivo Ads)" to listOf(
-            "ads.vivo", "adlog.vivo", "vivoad", "vivo"
-        ),
-        "百青藤 (Baidu Union)" to listOf(
-            "baijingteng", "bqt", "mobads", "cpro", "cpu-openapi"
-        ),
-        "荣耀广告 (Honor Ads)" to listOf(
-            "hihonor", "honorads", "ads.honor", "openads.hihonor"
-        ),
-        "魅族广告 (Meizu Ads)" to listOf(
-            "meizu", "flyme", "aider-res", "bro.flyme"
-        ),
-        "趣头条广告 (Qutoutiao Ads)" to listOf(
-            "qutoutiao", "qut", "qttad", "ad.qutoutiao"
-        ),
-        "搜狗广告 (Sogou Ads)" to listOf(
-            "sogou", "sogoucdn", "theta.sogou"
-        ),
-        "360 广告联盟 (Qihoo Ads)" to listOf(
-            "360ads", "adapi.360", "shuaji.360", "s.360"
-        ),
-        "讯飞广告 (iFlytek Ads)" to listOf(
-            "voiceads", "iflyad", "iflytekad"
-        ),
-        "酷狗广告 (Kugou Ads)" to listOf(
-            "kugouad", "adservice.kugou", "ads.service.kugou"
-        ),
-        "酷我广告 (Kuwo Ads)" to listOf(
-            "kuwoad", "mobilead.kuwo", "rich.kuwo"
-        ),
-        "多盟 (Domob)" to listOf(
-            "domob", "duomeng"
-        ),
-        "万普世纪 (Waps)" to listOf(
-            "waps", "wapx"
-        ),
-        "艾德思奇 (adSage)" to listOf(
-            "adsage", "adsage.cn", "adsage.com"
-        ),
-        "力美广告 (Limei)" to listOf(
-            "limei", "adsalim"
-        ),
-        "触控广告 (Chukong)" to listOf(
-            "imichuang", "chukong"
-        ),
-        "斗鱼广告 (Douyu Ads)" to listOf(
-            "douyuad", "matchads.douyu", "rtbapi.douyu"
-        ),
-        "虎牙广告 (Huya Ads)" to listOf(
-            "huyaad", "udblog.huya"
-        ),
-        "QXM (QXM Ads)" to listOf(
-            "qxm", "qxmad", "qxmads", "52qumao", "qumao"
-        ),
-        "UBIX (UBIX Ads)" to listOf(
-            "ubix", "ubixad", "ubixio", "ubxi", "ubixai", "ubiadx"
-        ),
-        "中关互动 (ZGHD)" to listOf(
-            "zghd", "zhongguan", "zgad", "zhghd", "hxltad", "adintl"
-        ),
-        "Mintegral China (Mintegral)" to listOf(
-            "mintegral", "mobvista", "mbridge", "mtgads"
-        ),
-        "TopOn (TopOn)" to listOf(
-            "topon", "anythink", "toponad"
-        ),
-        "TradPlus (TradPlus)" to listOf(
-            "tradplus", "tpbid", "tradplusad"
-        ),
-        "Beizi (Beizi)" to listOf(
-            "beizi", "bzadx", "beizisdk"
-        ),
-        "AdScope (AdScope)" to listOf(
-            "adscope", "aiclk", "adscopead"
-        ),
-        "Youmi (Youmi)" to listOf(
-            "youmi", "adwo", "youmioffer"
-        ),
-        "多盟 (Domob)" to listOf(
-            "domob", "duomeng"
-        ),
-        "易传媒 (Adsame)" to listOf(
-            "adsame", "smartmad"
-        ),
-        "MediaV (MediaV)" to listOf(
-            "mediav", "mvad", "mvads"
-        ),
-        "Bigo Ads (Bigo)" to listOf(
-            "bigo", "bigo.sg", "likee"
-        ),
-        "Vpon (Vpon)" to listOf(
-            "vpon", "vpadn"
-        ),
-        "Maticoo (Maticoo)" to listOf(
-            "maticoo"
-        ),
-        "Kidoz (Kidoz)" to listOf(
-            "kidoz"
-        ),
-        "Alphabet (Google)" to listOf(
-            "google", "admob", "doubleclick", "firebase", "youtube", "gma", "adsense", "googleadmanager", "adservice"
-        ),
-        "Meta (Meta Platforms)" to listOf(
-            "meta", "facebook", "instagram", "fb", "audiencenetwork", "whatsapp", "messenger"
-        ),
-        "Amazon (Amazon Ads)" to listOf(
-            "amazon", "amzn", "aax", "twitch", "imdb", "aps.amazon"
-        ),
-        "Microsoft (Microsoft Ads)" to listOf(
-            "microsoft", "msn", "bing", "xandr", "linkedin", "appnexus"
-        ),
-        "Apple (Apple Ads)" to listOf(
-            "apple", "icloud", "itunes", "iad"
-        ),
-        "Samsung (Samsung Ads)" to listOf(
-            "samsung"
-        ),
-        "X (Twitter)" to listOf(
-            "twitter", "twimg", "tweet"
-        ),
-        "Snap (Snapchat)" to listOf(
-            "snap", "snapchat"
-        ),
-        "Pinterest (Pinterest)" to listOf(
-            "pinterest", "pin"
-        ),
-        "Reddit (Reddit)" to listOf(
-            "reddit"
-        ),
-        "Unity (Unity Ads)" to listOf(
-            "unity", "unityads", "delta-dna"
-        ),
-        "AppLovin (AppLovin)" to listOf(
-            "applovin", "applvn", "max", "axon", "sparklabs"
-        ),
-        "ironSource (ironSource)" to listOf(
-            "ironsource", "ironsrc", "supersonic", "levelplay"
-        ),
-        "Vungle (Liftoff)" to listOf(
-            "vungle", "liftoff", "jetfuel"
-        ),
-        "Chartboost (Chartboost)" to listOf(
-            "chartboost"
-        ),
-        "InMobi (InMobi)" to listOf(
-            "inmobi", "aerserv"
-        ),
-        "Mintegral (Mintegral)" to listOf(
-            "mintegral", "mobvista", "mbridge"
-        ),
-        "Moloco (Moloco)" to listOf(
-            "moloco"
-        ),
-        "The Trade Desk (TTD)" to listOf(
-            "ttd", "tradedesk", "adsrvr", "uid2", "uidapi"
-        ),
-        "PubMatic (PubMatic)" to listOf(
-            "pubmatic", "openwrap", "hbopenbid"
-        ),
-        "PubNative (PubNative)" to listOf(
-            "pubnative", "hybid"
-        ),
-        "Magnite (Magnite)" to listOf(
-            "magnite", "rubicon", "spotx", "springserve"
-        ),
-        "OpenX (OpenX)" to listOf(
-            "openx"
-        ),
-        "Index Exchange (Index Exchange)" to listOf(
-            "indexexchange", "indexww", "casale", "jssecindexww"
-        ),
-        "Media.net (Media.net)" to listOf(
-            "medianet", "contextualmedianet"
-        ),
-        "Taboola (Taboola)" to listOf(
-            "taboola", "taboolasyndication"
-        ),
-        "Outbrain (Outbrain)" to listOf(
-            "outbrain", "odboutbrain"
-        ),
-        "TripleLift (TripleLift)" to listOf(
-            "triplelift"
-        ),
-        "AdColony (AdColony)" to listOf(
-            "adcolony"
-        ),
-        "Ogury (Ogury)" to listOf(
-            "ogury"
-        ),
-        "Digital Turbine (DT Exchange)" to listOf(
-            "digitalturbine", "fyber", "inneractive", "dtexchange", "colossusssp"
-        ),
-        "Smaato (Smaato)" to listOf(
-            "smaato"
-        ),
-        "Start.io (Start.io)" to listOf(
-            "startio", "startapp"
-        ),
-        "Tapjoy (Tapjoy)" to listOf(
-            "tapjoy"
-        ),
-        "Adjoe (adjoe)" to listOf(
-            "adjoe"
-        ),
-        "LoopMe (LoopMe)" to listOf(
-            "loopme"
-        ),
-        "Verve (Verve Group)" to listOf(
-            "verve", "adtilt"
-        ),
-        "HyprMX (HyprMX)" to listOf(
-            "hyprmx"
-        ),
-        "Smadex (Smadex)" to listOf(
-            "smadex"
-        ),
-        "Maio (Maio)" to listOf(
-            "maio"
-        ),
-        "Verizon Media (Yahoo/AOL)" to listOf(
-            "yahoo", "aol", "flurry", "verizonmedia"
-        ),
-        "Oracle (Oracle Ads)" to listOf(
-            "oracle", "moat", "bluekai", "addthis", "grapeshot"
-        ),
-        "Criteo (Criteo)" to listOf(
-            "criteo", "hooklogic"
-        ),
-        "Yandex (Yandex Ads)" to listOf(
-            "yandex", "appmetrica"
-        ),
-        "VK (VK Ads)" to listOf(
-            "vk", "mytarget", "mailru", "vkad"
-        ),
-        "传音 (Transsion)" to listOf(
-            "transsion", "tecno", "infinix", "itel", "phoenixbrowser"
-        )
-    )
-    private val vendorSdkIdentifiers = linkedMapOf(
-        "番茄小说 (Fanqie Novel)" to listOf(
-            "番茄小说",
-            "fanqie",
-            "fqnovel",
-            "com.dragon.read",
-            "dragon.read"
-        ),
-        "七猫小说 (Qimao Novel)" to listOf(
-            "七猫小说",
-            "qimao",
-            "com.kmxs.reader",
-            "kmxs",
-            "wtzw"
-        ),
-        "起点读书 (Qidian Reader)" to listOf(
-            "起点读书",
-            "qidian",
-            "qdreader",
-            "com.qidian.QDReader",
-            "yuewen"
-        ),
-        "QQ阅读 (QQ Reader)" to listOf(
-            "QQ阅读",
-            "qqreader",
-            "com.qq.reader",
-            "qqread"
-        ),
-        "书旗小说 (Shuqi Novel)" to listOf(
-            "书旗小说",
-            "shuqi",
-            "com.shuqi.controller",
-            "aliwx"
-        ),
-        "掌阅 (iReader)" to listOf(
-            "掌阅",
-            "ireader",
-            "com.chaozh.iReaderFree",
-            "zhangyue"
-        ),
-        "咪咕阅读 (Migu Read)" to listOf(
-            "咪咕阅读",
-            "migu",
-            "cmread",
-            "com.ophone.reader.ui"
-        ),
-        "米读小说 (Midu Novel)" to listOf(
-            "米读小说",
-            "midu",
-            "miduread",
-            "com.lechuan.mdwz"
-        ),
-        "纵横小说 (Zongheng Novel)" to listOf(
-            "纵横小说",
-            "zongheng",
-            "com.zongheng.reader"
-        ),
-        "17K 小说 (17K Novel)" to listOf(
-            "17k小说",
-            "17k",
-            "book17k"
-        ),
-        "长读小说 (Changdu Novel)" to listOf(
-            "长读小说",
-            "changdu",
-            "com.changdu.ereader"
-        ),
-        "QXM (QXM Ads)" to listOf(
-            "qxm",
-            "趣小猫广告",
-            "com.qxm.ad",
-            "com.qumao.ad",
-            "52qumao"
-        ),
-        "UBIX (UBIX Ads)" to listOf(
-            "ubxi",
-            "ubix",
-            "ubiadx",
-            "ubixai",
-            "com.ubix.ad",
-            "com.ubixai.sdk"
-        ),
-        "中关互动 (ZGHD)" to listOf(
-            "中关互动",
-            "hxltad",
-            "adintl",
-            "com.zghd.ad",
-            "com.hxltad.sdk",
-            "com.adintl.ad"
-        ),
-        "趣盟广告 (Qumeng Ads)" to listOf(
-            "qumeng",
-            "qmob",
-            "qtmojo",
-            "qmadsdk",
-            "com.qumeng.ad",
-            "com.qumeng.advlib"
-        ),
-        "TopOn 聚合广告 (TopOn)" to listOf(
-            "topon",
-            "anythink",
-            "toponad",
-            "com.anythink",
-            "com.topon"
-        ),
-        "TradPlus 聚合广告 (TradPlus)" to listOf(
-            "tradplus",
-            "tpbid",
-            "tradplusad",
-            "com.tradplus"
-        ),
-        "Beizi 广告 (Beizi)" to listOf(
-            "beizi",
-            "bzadx",
-            "beizisdk",
-            "com.beizi"
-        ),
-        "AdScope 聚合广告 (AdScope)" to listOf(
-            "adscope",
-            "aiclk",
-            "adscopead",
-            "com.adscope"
-        ),
-        "有米广告 (Youmi)" to listOf(
-            "youmi",
-            "adwo",
-            "youmioffer",
-            "com.youmi"
-        ),
-        "Meta 平台 (Meta Platforms)" to listOf(
-            "audiencenetwork",
-            "facebook",
-            "fbcdn",
-            "com.facebook.ads"
-        )
-    )
-    private val vendorAliases = mapOf(
-        "Google (Google Ads)" to "Alphabet (Google)",
-        "Meta (Facebook)" to "Meta (Meta Platforms)",
-        "阿里 (Alibaba)" to "阿里巴巴集团 (Alibaba Group)",
-        "阿里妈妈 (Alimama)" to "阿里巴巴集团 (Alibaba Group)",
-        "友盟+ (Umeng+)" to "阿里巴巴集团 (Alibaba Group)",
-        "优酷 (Youku)" to "阿里巴巴集团 (Alibaba Group)",
-        "快手联盟 (Kwai Business)" to "快手 (Kuaishou)",
-        "磁力引擎 (Kwai Ads)" to "快手 (Kuaishou)",
-        "优量汇 (Tencent Marketing)" to "腾讯 (Tencent)",
-        "腾讯广告 (Tencent Ads)" to "腾讯 (Tencent)",
-        "百青藤 (Baidu Union)" to "百度 (Baidu)",
-        "京东 (JD)" to "京东 (JD.com)",
-        "Fyber (Digital Turbine)" to "Digital Turbine (DT Exchange)",
-        "穿山甲 (Pangle)" to "字节跳动 (ByteDance)",
-        "百度联盟 (Baidu Union)" to "百度 (Baidu)",
-        "华为广告 (Huawei Ads)" to "华为 (Huawei)",
-        "小米广告 (Xiaomi Ads)" to "小米 (Xiaomi)",
-        "OPPO 广告 (OPPO Ads)" to "OPPO (HeyTap)",
-        "vivo 广告 (vivo Ads)" to "vivo (vivo Ads)",
-        "Mintegral China (Mintegral)" to "Mintegral (Mintegral)",
-        "VIVO (vivo Ads)" to "vivo (vivo Ads)",
-        "QXM (QXM Ads)" to "趣小猫 (QXM Ads)",
-        "UBIX (UBIX Ads)" to "优比客思 (UBIX Ads)",
-        "TalkingData (TalkingData)" to "腾云天下 (TalkingData)",
-        "AdMaster (AdMaster)" to "精硕科技 (AdMaster)",
-        "Sigmob (Sigmob)" to "Sigmob 聚效广告 (Sigmob)",
-        "MobTech (MobTech)" to "MobTech 魔方科技 (MobTech)",
-        "TopOn (TopOn)" to "TopOn 聚合广告 (TopOn)",
-        "TradPlus (TradPlus)" to "TradPlus 聚合广告 (TradPlus)",
-        "Beizi (Beizi)" to "Beizi 广告 (Beizi)",
-        "AdScope (AdScope)" to "AdScope 聚合广告 (AdScope)",
-        "Youmi (Youmi)" to "有米广告 (Youmi)",
-        "MediaV (MediaV)" to "MediaV 广告 (MediaV)",
-        "Bigo Ads (Bigo)" to "Bigo 广告 (Bigo)",
-        "Vpon (Vpon)" to "Vpon 广告 (Vpon)",
-        "Maticoo (Maticoo)" to "Maticoo 广告 (Maticoo)",
-        "Kidoz (Kidoz)" to "Kidoz 广告 (Kidoz)",
-        "Alphabet (Google)" to "谷歌 (Google)",
-        "Meta (Meta Platforms)" to "Meta 平台 (Meta Platforms)",
-        "Amazon (Amazon Ads)" to "亚马逊 (Amazon Ads)",
-        "Microsoft (Microsoft Ads)" to "微软 (Microsoft Ads)",
-        "Apple (Apple Ads)" to "苹果 (Apple Ads)",
-        "Samsung (Samsung Ads)" to "三星 (Samsung Ads)",
-        "X (Twitter)" to "X 平台 (Twitter)",
-        "Snap (Snapchat)" to "Snap 平台 (Snapchat)",
-        "Pinterest (Pinterest)" to "Pinterest 平台 (Pinterest)",
-        "Reddit (Reddit)" to "Reddit 平台 (Reddit)",
-        "Unity (Unity Ads)" to "Unity 广告 (Unity Ads)",
-        "AppLovin (AppLovin)" to "AppLovin 广告 (AppLovin)",
-        "ironSource (ironSource)" to "ironSource 广告 (ironSource)",
-        "Vungle (Liftoff)" to "Vungle 广告 (Liftoff)",
-        "Chartboost (Chartboost)" to "Chartboost 广告 (Chartboost)",
-        "InMobi (InMobi)" to "InMobi 广告 (InMobi)",
-        "Mintegral (Mintegral)" to "Mintegral 广告 (Mintegral)",
-        "Moloco (Moloco)" to "Moloco 广告 (Moloco)",
-        "The Trade Desk (TTD)" to "Trade Desk 广告 (TTD)",
-        "PubMatic (PubMatic)" to "PubMatic 广告 (PubMatic)",
-        "Magnite (Magnite)" to "Magnite 广告 (Magnite)",
-        "OpenX (OpenX)" to "OpenX 广告 (OpenX)",
-        "Index Exchange (Index Exchange)" to "Index Exchange 广告 (Index Exchange)",
-        "Media.net (Media.net)" to "Media.net 广告 (Media.net)",
-        "Taboola (Taboola)" to "Taboola 广告 (Taboola)",
-        "Outbrain (Outbrain)" to "Outbrain 广告 (Outbrain)",
-        "TripleLift (TripleLift)" to "TripleLift 广告 (TripleLift)",
-        "AdColony (AdColony)" to "AdColony 广告 (AdColony)",
-        "Ogury (Ogury)" to "Ogury 广告 (Ogury)",
-        "Digital Turbine (DT Exchange)" to "Digital Turbine 广告 (DT Exchange)",
-        "Smaato (Smaato)" to "Smaato 广告 (Smaato)",
-        "Start.io (Start.io)" to "Start.io 广告 (Start.io)",
-        "Tapjoy (Tapjoy)" to "Tapjoy 广告 (Tapjoy)",
-        "Verizon Media (Yahoo/AOL)" to "Verizon Media 广告 (Yahoo/AOL)",
-        "Oracle (Oracle Ads)" to "甲骨文广告 (Oracle Ads)",
-        "Criteo (Criteo)" to "Criteo 广告 (Criteo)",
-        "Yandex (Yandex Ads)" to "Yandex 广告 (Yandex Ads)",
-        "VK (VK Ads)" to "VK 广告 (VK Ads)"
-    )
-    private val unsupportedAdGuardModifiers = setOf(
+    private val unsupportedAdGuardModifiers = emptySet<String>()
+    private val ignorableAdGuardModifiers = setOf(
+        "all",
         "content",
         "extension"
-    )
-    private val ignorableAdGuardModifiers = setOf(
-        "all"
     )
     private val geositeAdCategoryTokens = setOf(
         "ad",
@@ -1579,17 +517,17 @@ object RuleRepository {
                     LogRepository.append(context, "RuleRepository.getRules migrate write failed: ${e.message ?: e.javaClass.simpleName}")
                 }
             }
-            updateRuleCache(rules)
+            cachedRules = rules
             return rules
         }
     }
 
     fun getRuleCount(context: Context): Int {
-        cachedRules?.let { return it.size }
         cachedRuleCount?.let { return it }
+        cachedRules?.let { return it.size }
         synchronized(cacheLock) {
-            cachedRules?.let { return it.size }
             cachedRuleCount?.let { return it }
+            cachedRules?.let { return it.size }
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val storedCount = prefs.getInt(KEY_RULE_COUNT, -1)
             if (storedCount >= 0) {
@@ -1614,20 +552,175 @@ object RuleRepository {
     private const val DECISION_TTL_MS = 5000L // 5 秒缓存
 
     fun prewarmCaches(context: Context) {
-        if (cachedRules != null) return
-        getRules(context)
-        getRuleMap(context)
-        getRegexRules(context)
-        getCosmeticRules(context)
-        getKeywordRules(context)
+        if (cachedSimpleDomainIndex != null) return
+        buildAllCachesFromFile(context)
+    }
+
+    private fun buildAllCachesFromFile(context: Context) {
+        val file = rulesFile(context)
+        if (!file.exists() || file.length() <= 2L) {
+            synchronized(cacheLock) {
+                cachedBlockedDomains = emptySet()
+                cachedSimpleDomainIndex = SimpleDomainIndex(emptySet(), emptySet(), emptySet(), emptySet())
+                cachedRuleMap = emptyMap()
+                cachedRegexRules = emptyList()
+                cachedKeywordRules = emptyList()
+                cachedCombinedKeywordPattern = null
+                cachedRegexLiteralIndex = null
+                cachedCnameRuleIndex = null
+                cachedCosmeticRules = emptyList()
+                cachedIpCidrRules = emptyList()
+                cachedPortOnlyRules = emptyList()
+                cachedAppRuleIndex = emptyMap()
+                cachedUniversalRuleMap = emptyMap()
+                cachedCompiledRegexRules = emptyMap()
+                cachedRuleCount = 0
+            }
+            return
+        }
+        val blocked = linkedSetOf<String>()
+        val userOwnedBlocked = linkedSetOf<String>()
+        val importantBlocked = linkedSetOf<String>()
+        val exceptions = linkedSetOf<String>()
+        val nonSimpleRules = mutableListOf<BlockRule>()
+        val regexRules = mutableListOf<BlockRule>()
+        val keywordRules = mutableListOf<BlockRule>()
+        val cosmeticRules = mutableListOf<BlockRule>()
+        val ipCidrRules = mutableListOf<BlockRule>()
+        val portOnlyRules = mutableListOf<BlockRule>()
+        val cnameRules = mutableListOf<BlockRule>()
+        var ruleCount = 0
+        try {
+            file.bufferedReader(Charsets.UTF_8).use { reader ->
+                JsonReader(reader).use { jsonReader ->
+                    jsonReader.beginArray()
+                    while (jsonReader.hasNext()) {
+                        val rule = gson.fromJson<BlockRule>(jsonReader, BlockRule::class.java)
+                            ?.let(::normalizeRuleFromStorage)
+                            ?: continue
+                        ruleCount++
+                        if (ruleCount > MAX_CACHEABLE_RULES || isImportHeapLow()) continue
+                        if (isSimpleDomainRule(rule)) {
+                            if (rule.exceptionRule) {
+                                exceptions += rule.domain
+                            } else {
+                                blocked += rule.domain
+                                if (isUserOwnedBlockingRule(rule)) userOwnedBlocked += rule.domain
+                                if (isImportantBlockingRule(rule)) importantBlocked += rule.domain
+                            }
+                        } else {
+                            nonSimpleRules += rule
+                        }
+                        if (rule.regexPattern != null) regexRules += rule
+                        if (rule.keywordPattern != null) keywordRules += rule
+                        if (rule.cosmeticSelector != null) cosmeticRules += rule
+                        if (rule.ipCidr != null) ipCidrRules += rule
+                        if (rule.domain == "*" && rule.ipCidr.isNullOrBlank()) portOnlyRules += rule
+                        if (rule.cname) cnameRules += rule
+                    }
+                    jsonReader.endArray()
+                }
+            }
+        } catch (e: Exception) {
+            LogRepository.append(context, "buildAllCachesFromFile failed: ${e.message ?: e.javaClass.simpleName}")
+            return
+        } catch (e: OutOfMemoryError) {
+            synchronized(cacheLock) {
+                cachedBlockedDomains = emptySet()
+                cachedSimpleDomainIndex = SimpleDomainIndex(emptySet(), emptySet(), emptySet(), emptySet())
+                cachedTrieIndex = DomainTrieIndex(emptySet(), emptySet(), emptySet(), emptySet())
+                cachedRuleMap = emptyMap()
+                cachedRegexRules = emptyList()
+                cachedKeywordRules = emptyList()
+                cachedCosmeticRules = emptyList()
+                cachedIpCidrRules = emptyList()
+                cachedPortOnlyRules = emptyList()
+                cachedCnameRuleIndex = emptyMap()
+                cachedCompiledRegexRules = emptyMap()
+                cachedRuleInventory = null
+                cachedWhitelistHits.clear()
+            }
+            LogRepository.append(context, "buildAllCachesFromFile stopped by low memory: ${runtimeMemorySnapshot()}")
+            return
+        }
+        synchronized(cacheLock) {
+            cachedBlockedDomains = emptySet()
+            cachedSimpleDomainIndex = SimpleDomainIndex(
+                blocked = (blocked - exceptions) + userOwnedBlocked,
+                userOwnedBlocked = userOwnedBlocked,
+                importantBlocked = importantBlocked - exceptions,
+                exceptions = exceptions
+            )
+            cachedTrieIndex = DomainTrieIndex(
+                blocked = (blocked - exceptions) + userOwnedBlocked,
+                userOwnedBlocked = userOwnedBlocked,
+                importantBlocked = importantBlocked - exceptions,
+                exceptions = exceptions
+            )
+            cachedRuleMap = nonSimpleRules.groupBy { it.domain }
+            buildAppRuleIndex(nonSimpleRules)
+            cachedRegexRules = regexRules
+            cachedKeywordRules = keywordRules
+            cachedCosmeticRules = cosmeticRules
+            cachedIpCidrRules = ipCidrRules
+            cachedPortOnlyRules = portOnlyRules
+            cachedCnameRuleIndex = cnameRules.associateBy { it.domain }
+            cachedCompiledRegexRules = emptyMap()
+            cachedRuleCount = ruleCount
+            cachedWhitelistHits.clear()
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_RULE_COUNT, ruleCount)
+            .apply()
+        LogRepository.append(context, "RuleRepository.buildAllCachesFromFile: rules=$ruleCount, cached=${minOf(ruleCount, MAX_CACHEABLE_RULES)} memory=${runtimeMemorySnapshot()}")
     }
 
     fun addRule(context: Context, rawDomain: String, source: RuleSource): BlockRule? {
         val domain = sanitizeDomain(rawDomain) ?: return null
-        val addState = buildManualAddState(context)
-        if (!addState.existingDomains.add(domain)) return null
+        val existingDomains = getExistingDomainSet(context)
+        if (!existingDomains.add(domain)) return null
         val rule = buildNormalizedBlockRule(context, domain, source)
-        appendAndSaveRules(context, addState.current, listOf(rule))
+        appendRulesToFile(context, listOf(rule))
+        return rule
+    }
+
+    fun addExceptionRule(context: Context, rawDomain: String): BlockRule? {
+        val domain = sanitizeDomain(rawDomain) ?: return null
+        val simpleIndex = getSimpleDomainIndex(context)
+        if (domain in simpleIndex.exceptions) {
+            LogRepository.append(context, "addExceptionRule: $domain already in exceptions, skip")
+            return null
+        }
+        val rule = BlockRule(
+            id = UUID.randomUUID().toString(),
+            domain = domain,
+            vendor = classifyVendor(context, domain),
+            source = RuleSource.MANUAL,
+            exceptionRule = true
+        )
+        appendRulesToFile(context, listOf(rule))
+        synchronized(cacheLock) {
+            val current = cachedSimpleDomainIndex
+            if (current != null) {
+                cachedSimpleDomainIndex = current.copy(
+                    blocked = current.blocked - domain,
+                    userOwnedBlocked = current.userOwnedBlocked - domain,
+                    exceptions = current.exceptions + domain
+                )
+                LogRepository.append(context, "addExceptionRule: $domain added to exceptions cache, size=${cachedSimpleDomainIndex?.exceptions?.size ?: 0}")
+            } else {
+                LogRepository.append(context, "addExceptionRule: cachedSimpleDomainIndex is null, cache correction skipped for $domain")
+            }
+            cachedTrieIndex = DomainTrieIndex(
+                blocked = cachedSimpleDomainIndex!!.blocked,
+                userOwnedBlocked = cachedSimpleDomainIndex!!.userOwnedBlocked,
+                importantBlocked = cachedSimpleDomainIndex!!.importantBlocked,
+                exceptions = cachedSimpleDomainIndex!!.exceptions
+            )
+            cachedRuleCount = null
+            cachedWhitelistHits.clear()
+        }
         return rule
     }
 
@@ -1743,43 +836,12 @@ object RuleRepository {
     }
 
     fun replaceRulesForRemoteSource(context: Context, sourceId: String, content: String, allowWhitelistDomains: Boolean = false): Int {
-        val startTime = System.currentTimeMillis()
-        val normalizedSourceId = normalizeRemoteSourceId(sourceId)
-        
-        // Step 1: 获取现有规则（排除要替换的规则源）
-        val step1Start = System.currentTimeMillis()
-        val baseRules = buildRemoteSourceReplacementBaseRules(context, normalizedSourceId)
-        LogRepository.append(context, "replaceRulesForRemoteSource [Step1/4]: get base rules in ${System.currentTimeMillis() - step1Start}ms, baseRules=${baseRules.size}")
-        
-        // Step 2: 构建状态（复用 baseRules 的规则 keys）
-        val step2Start = System.currentTimeMillis()
-        val importState = buildImportedRuleState(baseRules)
-        LogRepository.append(context, "replaceRulesForRemoteSource [Step2/4]: build state in ${System.currentTimeMillis() - step2Start}ms, existingKeys=${importState.existingRuleKeys.size}")
-        
-        // Step 3: 解析规则
-        val step3Start = System.currentTimeMillis()
-        val parsed = parseImportLines(content)
-        LogRepository.append(context, "replaceRulesForRemoteSource [Step3/4]: parse in ${System.currentTimeMillis() - step3Start}ms, parsed=${parsed.blockedRules.size + parsed.exceptionRules.size + parsed.badfilterRules.size}")
-        
-        // Step 4: 收集并保存
-        val step4Start = System.currentTimeMillis()
-        val added = collectImportedBlockedRules(
+        return replaceRulesForRemoteSourceStreaming(
             context = context,
-            blockedRules = parsed.blockedRules,
-            existingRuleKeys = importState.existingRuleKeys,
-            source = RuleSource.IMPORTED,
-            allowWhitelistDomains = allowWhitelistDomains,
-            remoteSourceId = normalizedSourceId,
-            useVendorHints = false,
-            identityRemoteSourceId = normalizedSourceId
+            sourceId = sourceId,
+            inputStream = content.byteInputStream(Charsets.UTF_8),
+            allowWhitelistDomains = allowWhitelistDomains
         )
-        LogRepository.append(context, "replaceRulesForRemoteSource [Step4/4]: collect blocked in ${System.currentTimeMillis() - step4Start}ms, added=${added.size}")
-        
-        saveImportedRules(context, baseRules + added, parsed.exceptionRules)
-        
-        val totalTime = System.currentTimeMillis() - startTime
-        LogRepository.append(context, "replaceRulesForRemoteSource: source=$sourceId, TOTAL time=${totalTime}ms, finalRules=${baseRules.size + added.size}")
-        return added.size
     }
 
     // P0.4 新增：流式替换规则源（使用 InputStream，避免大文件 OOM）
@@ -1807,11 +869,14 @@ object RuleRepository {
                 var parsedRuleCount = 0
                 var lastProgressAt = 0L
                 inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { rawLine ->
+                    lines.forEach lineLoop@{ rawLine ->
                         lineCount += 1
-                        RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach { fragment ->
+                        if (shouldStopStreamingImport(context, addedCount, MAX_STREAM_IMPORT_NEW_RULES)) return@useLines
+                        if (rawLine.length > MAX_IMPORT_LINE_CHARS) return@lineLoop
+                        RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach fragmentLoop@{ fragment ->
+                            if (shouldStopStreamingImport(context, addedCount, MAX_STREAM_IMPORT_NEW_RULES)) return@fragmentLoop
                             val trimmed = fragment.trim()
-                            if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@forEach
+                            if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@fragmentLoop
                             val simpleDomain = extractSimpleImportDomain(trimmed)
                             if (simpleDomain != null && (allowWhitelistDomains || !isWhitelistedDomain(simpleDomain))) {
                                 parsedBlockedCount += 1
@@ -1880,54 +945,13 @@ object RuleRepository {
         allowWhitelistDomains: Boolean = false,
         onProgress: ((String) -> Unit)? = null
     ): Int {
-        val startTime = System.currentTimeMillis()
-        
-        // 优化：使用 lineSequence 避免一次性加载计数
-        var lineCount = 0
-        content.lineSequence().forEach { lineCount++ }
-        LogRepository.append(context, "ImportRules started: lines=$lineCount, source=$source, allowWhitelist=$allowWhitelistDomains")
-        
-        // 检测可能影响正常网络功能的规则（仅对真正的正常服务域名提醒，不对广告域名提醒）
-        val networkAffectingRules = detectNetworkAffectingRules(content)
-        if (networkAffectingRules.isNotEmpty()) {
-            LogRepository.append(context, "⚠️ 提醒：检测到 ${networkAffectingRules.size} 条规则可能影响正常网络功能（命中保护域名）：")
-            networkAffectingRules.take(10).forEach { detail ->
-                LogRepository.append(context, "   - $detail")
-            }
-            if (networkAffectingRules.size > 10) {
-                LogRepository.append(context, "   ... 还有 ${networkAffectingRules.size - 10} 条")
-            }
-            LogRepository.append(context, "⚠️ 这些规则会正常导入并拦截，如导致 App 功能异常请将相关域名加入白名单")
-        }
-        
-        onProgress?.invoke("正在读取现有规则...")
-        val step1Start = System.currentTimeMillis()
-        val current = getRules(context).toMutableList()
-        LogRepository.append(context, "ImportRules [Step1/4]: get existing rules in ${System.currentTimeMillis() - step1Start}ms, count=${current.size}")
-        
-        onProgress?.invoke("正在解析规则文件...")
-        val step2Start = System.currentTimeMillis()
-        val parsed = parseImportLines(content)
-        LogRepository.append(context, "ImportRules [Step2/4]: parse in ${System.currentTimeMillis() - step2Start}ms, blocked=${parsed.blockedRules.size}, exceptions=${parsed.exceptionRules.size}, badfilter=${parsed.badfilterRules.size}")
-        
-        onProgress?.invoke("正在整理规则并去重...")
-        val step3Start = System.currentTimeMillis()
-        val finalRules = buildImportedRules(
+        return importRulesStreaming(
             context = context,
-            current = current,
-            parsed = parsed,
+            inputStream = content.byteInputStream(Charsets.UTF_8),
             source = source,
-            allowWhitelistDomains = allowWhitelistDomains
+            allowWhitelistDomains = allowWhitelistDomains,
+            onProgress = onProgress
         )
-        LogRepository.append(context, "ImportRules [Step3/4]: build in ${System.currentTimeMillis() - step3Start}ms, finalRules=${finalRules.size}")
-        
-        onProgress?.invoke("正在保存规则到本地...")
-        val step4Start = System.currentTimeMillis()
-        save(context, finalRules)
-        val elapsed = System.currentTimeMillis() - startTime
-        LogRepository.append(context, "ImportRules [Step4/4]: save in ${System.currentTimeMillis() - step4Start}ms")
-        LogRepository.append(context, "ImportRules completed: finalRules=${finalRules.size} TOTAL time=${elapsed}ms")
-        return finalRules.size
     }
     
     // P0.4 新增：大规则文件流式解析（避免 OOM）
@@ -1955,11 +979,14 @@ object RuleRepository {
                 var parsedRuleCount = 0
                 var lastProgressAt = 0L
                 inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { rawLine ->
+                    lines.forEach lineLoop@{ rawLine ->
                         lineCount += 1
-                        RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach { fragment ->
+                        if (shouldStopStreamingImport(context, addedCount, MAX_STREAM_IMPORT_NEW_RULES)) return@useLines
+                        if (rawLine.length > MAX_IMPORT_LINE_CHARS) return@lineLoop
+                        RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach fragmentLoop@{ fragment ->
+                            if (shouldStopStreamingImport(context, addedCount, MAX_STREAM_IMPORT_NEW_RULES)) return@fragmentLoop
                             val trimmed = fragment.trim()
-                            if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@forEach
+                            if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@fragmentLoop
                             val simpleDomain = extractSimpleImportDomain(trimmed)
                             if (simpleDomain != null && (allowWhitelistDomains || !isWhitelistedDomain(simpleDomain))) {
                                 parsedBlockedCount += 1
@@ -2053,23 +1080,26 @@ object RuleRepository {
             val rewrite = beginStreamingRulesRewrite(context, excludeRemoteSourceId = null)
             try {
                 inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { rawLine ->
+                    lines.forEach lineLoop@{ rawLine ->
                         lineCount += 1
-                        RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach { fragment ->
+                        if (shouldStopStreamingImport(context, addedCount, MAX_BACKGROUND_ADVANCED_NEW_RULES)) return@useLines
+                        if (rawLine.length > MAX_IMPORT_LINE_CHARS) return@lineLoop
+                        RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach fragmentLoop@{ fragment ->
+                            if (shouldStopStreamingImport(context, addedCount, MAX_BACKGROUND_ADVANCED_NEW_RULES)) return@fragmentLoop
                             val trimmed = fragment.trim()
                             if (trimmed.startsWith("#pkg=", ignoreCase = true)) {
                                 lineContext = RuleParsingSupport.parseRuleLineContext(trimmed)
-                                return@forEach
+                                return@fragmentLoop
                             }
-                            if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@forEach
-                            if (extractSimpleImportDomain(trimmed) != null) return@forEach
+                            if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@fragmentLoop
+                            if (extractSimpleImportDomain(trimmed) != null) return@fragmentLoop
 
                             val parsedLineRules = parseRuleLine(fragment, lineContext).ifEmpty {
                                 listOfNotNull(parseUnsupportedImportRule(fragment, lineContext))
                             }
-                            parsedLineRules.forEach { parsedRule ->
-                                if (parsedRule.isBadfilter) return@forEach
-                                if (!allowWhitelistDomains && !parsedRule.isException && isWhitelistedDomain(parsedRule.domain)) return@forEach
+                            parsedLineRules.forEach parsedRuleLoop@{ parsedRule ->
+                                if (parsedRule.isBadfilter) return@parsedRuleLoop
+                                if (!allowWhitelistDomains && !parsedRule.isException && isWhitelistedDomain(parsedRule.domain)) return@parsedRuleLoop
                                 rewrite.writeRule(buildBlockRuleFromParsedRule(
                                     context = context,
                                     parsedRule = parsedRule,
@@ -2171,8 +1201,8 @@ object RuleRepository {
         if (whitelistDomains.any { lower.endsWith(".$it") }) return true
         
         // 3. 检查是否是游戏核心域名
-        if (gameCoreDomains.contains(lower)) return true
-        if (gameCoreDomains.any { lower.endsWith(".$it") }) return true
+        if (VendorConfigData.gameCoreDomains.contains(lower)) return true
+        if (VendorConfigData.gameCoreDomains.any { lower.endsWith(".$it") }) return true
         
         // 4. 其他情况不提醒（让用户自己判断）
         return false
@@ -2323,30 +1353,19 @@ object RuleRepository {
         allowWhitelistDomains: Boolean
     ): List<BlockRule> {
         if (domains.isEmpty()) return emptyList()
-        val addState = buildManualAddState(context)
+        val existingDomains = getExistingDomainSet(context)
         val added = mutableListOf<BlockRule>()
         val userOwnedSource = source == RuleSource.MANUAL || source == RuleSource.IMPORTED
         domains.forEach { domain ->
             if (!userOwnedSource && !allowWhitelistDomains && isWhitelistedDomain(domain)) return@forEach
-            if (addState.existingDomains.add(domain)) {
+            if (existingDomains.add(domain)) {
                 added += buildNormalizedBlockRule(context, domain, source)
             }
         }
-        appendAndSaveRules(context, addState.current, added)
+        if (added.isNotEmpty()) {
+            appendRulesToFile(context, added)
+        }
         return added
-    }
-
-    private data class ManualAddState(
-        val current: MutableList<BlockRule>,
-        val existingDomains: MutableSet<String>
-    )
-
-    private fun buildManualAddState(context: Context): ManualAddState {
-        val current = getRules(context).toMutableList()
-        return ManualAddState(
-            current = current,
-            existingDomains = current.mapTo(linkedSetOf()) { it.domain }
-        )
     }
 
     private fun buildNormalizedBlockRule(
@@ -2360,16 +1379,6 @@ object RuleRepository {
             vendor = classifyVendor(context, domain),
             source = source
         )
-    }
-
-    private fun appendAndSaveRules(
-        context: Context,
-        current: MutableList<BlockRule>,
-        added: List<BlockRule>
-    ) {
-        if (added.isEmpty()) return
-        current += added
-        save(context, current)
     }
 
     private fun collectImportedBlockedRules(
@@ -2638,6 +1647,11 @@ object RuleRepository {
             cspValue = parsedRule.cspValue,
             redirectResource = parsedRule.redirectResource,
             jsInjectRules = parsedRule.jsInjectRules,
+            cookieRemove = parsedRule.cookieRemove,
+            cookieSet = parsedRule.cookieSet,
+            toDomains = parsedRule.toDomains,
+            cname = parsedRule.cname,
+            emptyResponse = parsedRule.emptyResponse,
             remoteSourceId = remoteSourceId
         )
     }
@@ -2889,9 +1903,10 @@ object RuleRepository {
         val normalized = sanitizeDomain(domain) ?: return false
         val candidates = buildDomainCandidates(normalized).toList()
         val simpleIndex = getSimpleDomainIndex(context)
-        val simpleImportantBlock = candidates.any { it in simpleIndex.importantBlocked }
+        val trie = getTrieIndex(context)
+        val simpleImportantBlock = trie.hasImportantBlock(normalized)
         if (simpleImportantBlock) return true
-        val simpleUserOwnedBlock = candidates.any { it in simpleIndex.userOwnedBlocked }
+        val simpleUserOwnedBlock = trie.hasUserOwnedBlock(normalized)
         if (isCoreTrafficProtectedDomain(normalized) && !simpleUserOwnedBlock) {
             val hasSimpleOnly = candidates.any { it in simpleIndex.blocked || it in simpleIndex.exceptions }
             if (hasSimpleOnly && getRuleMap(context).isEmpty() && getRegexRules(context).isEmpty() && getKeywordRules(context).isEmpty()) return false
@@ -2909,10 +1924,18 @@ object RuleRepository {
         val lowerDomain = normalized.lowercase()
 
         // 合并正则规则扫描：一次遍历得出 important / userOwned / general 三类结果
+        // 使用字面子串索引预过滤：仅扫描 domain 包含其字面子串的规则
         var regexImportant = false
         var regexUserOwned = false
         var regexGeneral = false
-        for (rule in getFilteredRegexRules(context, appName)) {
+        val pkg = appName?.let { extractPackageName(it) }
+        val regexIndex = getRegexLiteralIndex(context)
+        val candidateRegexRules = regexIndex.entries.asSequence()
+            .filter { (fragment, _) -> lowerDomain.contains(fragment) }
+            .flatMap { it.value.asSequence() }
+            .filter { rule -> pkg == null || rule.appPackages.isEmpty() || pkg in rule.appPackages }
+            .distinct()
+        for (rule in candidateRegexRules) {
             if (rule.source == RuleSource.UNSUPPORTED) continue
             if (!matchesRegexRule(rule, normalized)) continue
             if (isImportantBlockingRule(rule)) { regexImportant = true; break }
@@ -2920,26 +1943,29 @@ object RuleRepository {
             if (!rule.exceptionRule) regexGeneral = true
         }
 
-        // 合并关键词规则扫描：一次遍历得出 important / userOwned / general 三类结果
+        // 合并关键词规则扫描：使用组合正则预过滤后仅扫描命中的规则
         var keywordImportant = false
         var keywordUserOwned = false
         var keywordGeneral = false
-        for (rule in getFilteredKeywordRules(context, appName)) {
-            val keyword = rule.keywordPattern?.lowercase() ?: continue
-            if (!lowerDomain.contains(keyword)) continue
-            if (rule.source == RuleSource.UNSUPPORTED) continue
-            if (isImportantBlockingRule(rule)) { keywordImportant = true; break }
-            if (isUserOwnedBlockingRule(rule)) keywordUserOwned = true
-            if (!rule.exceptionRule) keywordGeneral = true
+        val combinedKwMatcher = getCombinedKeywordMatcher(context)
+        if (combinedKwMatcher != null && combinedKwMatcher.matcher(lowerDomain).find()) {
+            for (rule in getFilteredKeywordRules(context, appName)) {
+                val keyword = rule.keywordPattern?.lowercase() ?: continue
+                if (!lowerDomain.contains(keyword)) continue
+                if (rule.source == RuleSource.UNSUPPORTED) continue
+                if (isImportantBlockingRule(rule)) { keywordImportant = true; break }
+                if (isUserOwnedBlockingRule(rule)) keywordUserOwned = true
+                if (!rule.exceptionRule) keywordGeneral = true
+            }
         }
 
         val hasImportantBlock = simpleImportantBlock || matchingRules.any(::isImportantBlockingRule) || regexImportant || keywordImportant
         if (hasImportantBlock) return true
         val hasUserOwnedBlock = simpleUserOwnedBlock || matchingRules.any(::isUserOwnedBlockingRule) || regexUserOwned || keywordUserOwned
         if (isCoreTrafficProtectedDomain(normalized) && !hasUserOwnedBlock) return false
-        if (!hasUserOwnedBlock && (candidates.any { it in simpleIndex.exceptions } || matchingRules.any { it.exceptionRule })) return false
+        if (!hasUserOwnedBlock && (trie.hasException(normalized) || matchingRules.any { it.exceptionRule })) return false
         if (hasUserOwnedBlock) return true
-        val matched = candidates.any { it in simpleIndex.blocked } || matchingRules.any { !it.exceptionRule } || regexGeneral || keywordGeneral
+        val matched = trie.hasBlocked(normalized) || matchingRules.any { !it.exceptionRule } || regexGeneral || keywordGeneral
         if (matched) return true
         if (isWhitelistedDomain(normalized)) return false
         return false
@@ -2950,20 +1976,27 @@ object RuleRepository {
         val normalized = sanitizeDomain(domain) ?: return false
         val candidates = buildDomainCandidates(normalized).toList()
         val simpleIndex = getSimpleDomainIndex(context)
-        val simpleImportantBlock = candidates.any { it in simpleIndex.importantBlocked }
+        val trie = getTrieIndex(context)
+        val simpleImportantBlock = trie.hasImportantBlock(normalized)
         if (simpleImportantBlock) return true
-        val simpleUserOwnedBlock = candidates.any { it in simpleIndex.userOwnedBlocked }
+        val simpleUserOwnedBlock = trie.hasUserOwnedBlock(normalized)
         getRuleMap(context)  // triggers buildAppRuleIndex
         val matchingRules = candidates.asSequence()
             .flatMap { candidate -> getFilteredRulesForApp(context, candidate, null).asSequence() }
             .filter { it.source != RuleSource.UNSUPPORTED && ruleMatches(it, qType, null) && it.destinationPorts.isEmpty() && it.sourcePorts.isEmpty() }
             .toList()
 
-        // 合并正则规则扫描：一次遍历得出三类结果
+        // 合并正则规则扫描：使用字面子串索引预过滤
         var regexImportant = false
         var regexUserOwned = false
         var regexGeneral = false
-        for (rule in getRegexRules(context)) {
+        val fastLowerDomain = normalized.lowercase()
+        val fastRegexIndex = getRegexLiteralIndex(context)
+        val fastCandidateRegexRules = fastRegexIndex.entries.asSequence()
+            .filter { (fragment, _) -> fastLowerDomain.contains(fragment) }
+            .flatMap { it.value.asSequence() }
+            .distinct()
+        for (rule in fastCandidateRegexRules) {
             if (rule.source == RuleSource.UNSUPPORTED) continue
             if (!matchesRegexRule(rule, normalized)) continue
             if (isImportantBlockingRule(rule)) { regexImportant = true; break }
@@ -2975,9 +2008,9 @@ object RuleRepository {
         val hasImportantBlock = simpleImportantBlock || matchingRules.any(::isImportantBlockingRule) || regexImportant
         if (hasImportantBlock) return true
         if (isCoreTrafficProtectedDomain(normalized) && !hasUserOwnedBlock) return false
-        if (!hasUserOwnedBlock && (candidates.any { it in simpleIndex.exceptions } || matchingRules.any { it.exceptionRule })) return false
+        if (!hasUserOwnedBlock && (trie.hasException(normalized) || matchingRules.any { it.exceptionRule })) return false
         if (hasUserOwnedBlock) return true
-        val matched = candidates.any { it in simpleIndex.blocked } || matchingRules.any { !it.exceptionRule } || regexGeneral
+        val matched = trie.hasBlocked(normalized) || matchingRules.any { !it.exceptionRule } || regexGeneral
         if (matched) return true
         if (isWhitelistedDomain(normalized)) return false
         return false
@@ -2996,9 +2029,10 @@ object RuleRepository {
         val normalizedHost = sanitizeDomain(host) ?: return false
         val candidates = buildDomainCandidates(normalizedHost).toList()
         val simpleIndex = getSimpleDomainIndex(context)
-        val simpleImportantBlock = candidates.any { it in simpleIndex.importantBlocked }
+        val trie = getTrieIndex(context)
+        val simpleImportantBlock = trie.hasImportantBlock(normalizedHost)
         if (simpleImportantBlock) return true
-        val simpleUserOwnedBlock = candidates.any { it in simpleIndex.userOwnedBlocked }
+        val simpleUserOwnedBlock = trie.hasUserOwnedBlock(normalizedHost)
         getRuleMap(context)  // triggers buildAppRuleIndex
         val fullUrl = "$host$path".lowercase()
         val effectiveRequestType = requestType?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
@@ -3038,7 +2072,7 @@ object RuleRepository {
         }
         if (hasImportantBlock) return true
         if (isCoreTrafficProtectedDomain(normalizedHost) && !hasUserOwnedBlock) return false
-        val hasExceptionMatch = candidates.any { it in simpleIndex.exceptions } || matchingRules.any { it.exceptionRule } || getFilteredRegexRules(context, appName).any { rule ->
+        val hasExceptionMatch = trie.hasException(normalizedHost) || matchingRules.any { it.exceptionRule } || getFilteredRegexRules(context, appName).any { rule ->
             if (rule.source == RuleSource.UNSUPPORTED) return@any false
             if (!rule.exceptionRule) return@any false
             if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
@@ -3048,7 +2082,7 @@ object RuleRepository {
         }
         if (!hasUserOwnedBlock && hasExceptionMatch) return false
         if (hasUserOwnedBlock) return true
-        val matched = candidates.any { it in simpleIndex.blocked } || matchingRules.any { !it.exceptionRule } || getFilteredRegexRules(context, appName).any { rule ->
+        val matched = trie.hasBlocked(normalizedHost) || matchingRules.any { !it.exceptionRule } || getFilteredRegexRules(context, appName).any { rule ->
             if (rule.source == RuleSource.UNSUPPORTED) return@any false
             if (rule.exceptionRule) return@any false
             if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
@@ -3073,6 +2107,8 @@ object RuleRepository {
                 cleanPath.endsWith(".otf") || cleanPath.endsWith(".eot") -> "font"
             cleanPath.endsWith(".mp4") || cleanPath.endsWith(".m4v") || cleanPath.endsWith(".webm") ||
                 cleanPath.endsWith(".mp3") || cleanPath.endsWith(".m3u8") || cleanPath.endsWith(".ts") -> "media"
+            cleanPath.endsWith("/") || cleanPath.endsWith(".html") || cleanPath.endsWith(".htm") ||
+                !cleanPath.substringAfterLast('/').contains('.') -> "document"
             else -> null
         }
     }
@@ -3140,6 +2176,9 @@ object RuleRepository {
         cachedWhitelistHits[lowerDomain]?.let { return it }
         val result = checkDomainWhitelist(lowerDomain)
         cachedWhitelistHits[lowerDomain] = result
+        if (cachedWhitelistHits.size > MAX_CACHED_WHITELIST_ENTRIES) {
+            clearWhitelistCache()
+        }
         return result
     }
 
@@ -3148,7 +2187,7 @@ object RuleRepository {
             domain = domain,
             sanitizeDomain = ::sanitizeDomain,
             buildDomainCandidates = ::buildDomainCandidates,
-            bypassProtectionDomains = bypassProtectionDomains
+            bypassProtectionDomains = VendorConfigData.bypassProtectionDomains
         )
     }
 
@@ -3228,11 +2267,11 @@ object RuleRepository {
 
     // 域名后缀 Trie - 替代 endsWith 线性扫描，查询从 O(N) 降为 O(L)
     private val whitelistTrie by lazy { DomainSuffixTrie.fromDomains(whitelistDomains) }
-    private val gameCoreTrie by lazy { DomainSuffixTrie.fromDomains(gameCoreDomains) }
-    private val socialCoreTrie by lazy { DomainSuffixTrie.fromDomains(socialCoreDomains) }
-    private val mediaCoreTrie by lazy { DomainSuffixTrie.fromDomains(mediaCoreDomains) }
-    private val businessCoreTrie by lazy { DomainSuffixTrie.fromDomains(businessCoreDomains) }
-    private val novelContentApiTrie by lazy { DomainSuffixTrie.fromDomains(novelContentApiDomains) }
+    private val gameCoreTrie by lazy { DomainSuffixTrie.fromDomains(VendorConfigData.gameCoreDomains) }
+    private val socialCoreTrie by lazy { DomainSuffixTrie.fromDomains(VendorConfigData.socialCoreDomains) }
+    private val mediaCoreTrie by lazy { DomainSuffixTrie.fromDomains(VendorConfigData.mediaCoreDomains) }
+    private val businessCoreTrie by lazy { DomainSuffixTrie.fromDomains(VendorConfigData.businessCoreDomains) }
+    private val novelContentApiTrie by lazy { DomainSuffixTrie.fromDomains(VendorConfigData.novelContentApiDomains) }
     private val umengTrie by lazy { DomainSuffixTrie.fromDomains(umengWhitelistSubDomains) }
     private val qqTrie by lazy { DomainSuffixTrie.fromDomains(qqWhitelistSubDomains) }
     private val neteaseTrie by lazy { DomainSuffixTrie.fromDomains(neteaseWhitelistSubDomains) }
@@ -3241,10 +2280,10 @@ object RuleRepository {
     private val protectedDomainTrie by lazy {
         DomainSuffixTrie().also { trie ->
             trie.insertAll(whitelistDomains)
-            trie.insertAll(gameCoreDomains)
-            trie.insertAll(socialCoreDomains)
-            trie.insertAll(mediaCoreDomains)
-            trie.insertAll(businessCoreDomains)
+            trie.insertAll(VendorConfigData.gameCoreDomains)
+            trie.insertAll(VendorConfigData.socialCoreDomains)
+            trie.insertAll(VendorConfigData.mediaCoreDomains)
+            trie.insertAll(VendorConfigData.businessCoreDomains)
         }
     }
 
@@ -3260,6 +2299,7 @@ object RuleRepository {
         val candidates = buildDomainCandidates(normalized).toList()
         val simpleIndex = getSimpleDomainIndex(context)
         getRuleMap(context)  // triggers buildAppRuleIndex
+        val hasException = candidates.any { it in simpleIndex.exceptions }
         val domainMatch = candidates.asSequence()
             .flatMap { candidate -> getFilteredRulesForApp(context, candidate, appName).asSequence() }
             .filter {
@@ -3267,22 +2307,49 @@ object RuleRepository {
                     ruleMatches(it, qType, appName) &&
                     !it.exceptionRule &&
                     matchesPortScope(it.destinationPorts, destinationPort) &&
-                    matchesPortScope(it.sourcePorts, sourcePort)
+                    matchesPortScope(it.sourcePorts, sourcePort) &&
+                    (!hasException || isUserOwnedBlockingRule(it))
             }
             .firstOrNull()
-        val regexMatch = getRegexRules(context).firstOrNull { it.source != RuleSource.UNSUPPORTED && !it.exceptionRule && matchesRegexRule(it, normalized) }
-        val simpleMatch = candidates.firstOrNull { it in simpleIndex.blocked }?.let { matchedDomain ->
-            BlockRule(
-                id = "simple-index-$matchedDomain",
-                domain = matchedDomain,
-                vendor = classifyVendorSimple(context, matchedDomain) ?: DEFAULT_VENDOR,
-                source = if (matchedDomain in simpleIndex.userOwnedBlocked) RuleSource.IMPORTED else RuleSource.REFERENCE,
-                important = matchedDomain in simpleIndex.importantBlocked
-            )
+        val regexMatch = getRegexRules(context).firstOrNull {
+            it.source != RuleSource.UNSUPPORTED &&
+                !it.exceptionRule &&
+                matchesRegexRule(it, normalized) &&
+                (!hasException || isUserOwnedBlockingRule(it))
+        }
+        val simpleMatch = if (!hasException) {
+            candidates.firstOrNull { it in simpleIndex.blocked && it !in simpleIndex.exceptions }?.let { matchedDomain ->
+                BlockRule(
+                    id = "simple-index-$matchedDomain",
+                    domain = matchedDomain,
+                    vendor = classifyVendorSimple(context, matchedDomain) ?: DEFAULT_VENDOR,
+                    source = if (matchedDomain in simpleIndex.userOwnedBlocked) RuleSource.IMPORTED else RuleSource.REFERENCE,
+                    important = matchedDomain in simpleIndex.importantBlocked
+                )
+            }
+        } else {
+            candidates.firstOrNull { it in simpleIndex.exceptions && it in simpleIndex.blocked && it in simpleIndex.userOwnedBlocked }?.let { matchedDomain ->
+                BlockRule(
+                    id = "simple-index-$matchedDomain",
+                    domain = matchedDomain,
+                    vendor = classifyVendorSimple(context, matchedDomain) ?: DEFAULT_VENDOR,
+                    source = RuleSource.IMPORTED,
+                    important = matchedDomain in simpleIndex.importantBlocked
+                )
+            }
         }
         val match = domainMatch ?: regexMatch ?: simpleMatch
         if (isCoreTrafficProtectedDomain(normalized) && match?.let(::isUserOwnedBlockingRule) != true) return null
         return match
+    }
+
+    fun isDomainExcepted(context: Context, domain: String): Boolean {
+        val normalized = sanitizeDomain(domain) ?: return false
+        val result = buildDomainCandidates(normalized).any { it in getSimpleDomainIndex(context).exceptions }
+        if (result) {
+            LogRepository.append(context, "isDomainExcepted: $domain($normalized) -> true (exceptions=${getSimpleDomainIndex(context).exceptions.take(5).joinToString()})")
+        }
+        return result
     }
 
     internal fun isUserOwnedRule(rule: BlockRule): Boolean {
@@ -3348,6 +2415,9 @@ object RuleRepository {
         val cspValue = actionableRules.mapNotNull { it.cspValue }.firstOrNull()
         val redirectResource = actionableRules.mapNotNull { it.redirectResource }.firstOrNull()
         val jsInjectRules = actionableRules.flatMap { it.jsInjectRules }.toSet()
+        val cookieRemove = actionableRules.flatMap { it.cookieRemove }.toSet()
+        val cookieSet = actionableRules.flatMap { it.cookieSet }.toSet()
+        val matchedRuleSummaries = actionableRules.take(5).map(::buildRuleDebugSummary)
         val cosmeticSelectors = getCosmeticSelectors(
             context = context,
             host = normalizedHost,
@@ -3364,8 +2434,29 @@ object RuleRepository {
             cspValue = cspValue,
             redirectResource = redirectResource,
             jsInjectRules = jsInjectRules,
-            cosmeticSelectors = cosmeticSelectors
+            cosmeticSelectors = cosmeticSelectors,
+            cookieRemove = cookieRemove,
+            cookieSet = cookieSet,
+            block = importantActionableRules.isNotEmpty(),
+            emptyResponse = importantActionableRules.isNotEmpty() && importantActionableRules.any { it.emptyResponse },
+            matchedRuleSummaries = matchedRuleSummaries
         )
+    }
+
+    private fun buildRuleDebugSummary(rule: BlockRule): String {
+        val actions = mutableListOf<String>()
+        if (rule.important) actions += "block"
+        if (rule.emptyResponse) actions += "empty"
+        if (rule.redirectResource != null) actions += "redirect=${rule.redirectResource}"
+        if (rule.removeParams.isNotEmpty()) actions += "removeparam"
+        if (rule.removeRequestHeaders.isNotEmpty()) actions += "removeheader"
+        if (rule.replaceRules.isNotEmpty()) actions += "replace"
+        if (!rule.cspValue.isNullOrBlank()) actions += "csp"
+        if (rule.jsInjectRules.isNotEmpty()) actions += "scriptlet"
+        if (rule.cookieRemove.isNotEmpty() || rule.cookieSet.isNotEmpty()) actions += "cookie"
+        if (rule.toDomains.isNotEmpty()) actions += "to"
+        val actionText = actions.ifEmpty { listOf("match") }.joinToString("+")
+        return "${rule.domain}[$actionText] source=${rule.source} vendor=${rule.vendor}"
     }
 
     fun hasAdvancedUrlRule(
@@ -3453,7 +2544,7 @@ object RuleRepository {
         if (isBypassProtectionDomain(normalized)) return true
         if (hasMatchingRule(context, normalized)) return false
         // 小说内容 API 域名不拦截
-        if (novelContentApiDomains.contains(normalized) || novelContentApiDomains.any { normalized.endsWith(".$it") }) return false
+        if (VendorConfigData.novelContentApiDomains.contains(normalized) || VendorConfigData.novelContentApiDomains.any { normalized.endsWith(".$it") }) return false
         // 游戏核心服务不拦截（确保游戏正常运行）
         if (isGameCoreDomain(normalized)) return false
         // 社交 APP 核心服务不拦截（确保微信 QQ 正常）
@@ -3469,13 +2560,13 @@ object RuleRepository {
         // 增强小说 APP 广告识别 - 包含广告域名特征立即拦截
         if (hasAggressiveSignal && looksLikeAdDomain(normalized)) return true
         // 广告供应商域名一律拦截（针对小说 APP）
-        if (novelAggressiveVendorNames.contains(normalizedVendor)) return true
+        if (VendorConfigData.novelAggressiveVendorNames.contains(normalizedVendor)) return true
         // 包含 SDK、service、platform 等字样也拦截
         val hasSdkSignal = lower.contains("sdk") || lower.contains("service") || lower.contains("platform") || 
             lower.contains("manager") || lower.contains("network") || lower.contains("server")
         if (hasSdkSignal && hasAggressiveSignal) return true
         if (isProtectedNovelAppDomain(normalized)) return false
-        val matchesExactAggressiveDomain = buildDomainCandidates(normalized).any(novelAggressiveExactDomains::contains)
+        val matchesExactAggressiveDomain = buildDomainCandidates(normalized).any(VendorConfigData.novelAggressiveExactDomains::contains)
         if (matchesExactAggressiveDomain) return true
         // 增强广告域名识别
         return looksLikeAdDomain(normalized) && hasAggressiveNovelAdSignal(normalized)
@@ -3490,7 +2581,7 @@ object RuleRepository {
         val lowerPath = path?.lowercase().orEmpty()
         if (lowerPath.isBlank()) return false
         if (isUrlBlocked(context, normalizedHost, lowerPath, appName)) return true
-        return fanqieProtectedAdPathKeywords.any { lowerPath.contains(it) } || looksLikeSuspiciousPath(lowerPath)
+        return VendorConfigData.fanqieProtectedAdPathKeywords.any { lowerPath.contains(it) } || looksLikeSuspiciousPath(lowerPath)
     }
 
     fun isSensitiveAuthDomain(domain: String): Boolean {
@@ -3559,8 +2650,8 @@ object RuleRepository {
                     .remove(KEY_RULES)
                     .putInt(KEY_RULE_COUNT, keptCount)
                     .apply()
-                clearCaches()
                 cachedRuleCount = keptCount
+                cachedWhitelistHits.clear()
             } else {
                 tempFile.delete()
             }
@@ -3589,7 +2680,11 @@ object RuleRepository {
         }
         if (removedCount > 0) {
             writeRulesFile(context, deduplicated)
-            clearCaches()
+            if (deduplicated.size >= LARGE_RULE_CACHE_THRESHOLD) {
+                rebuildCachesFromRules(context, deduplicated)
+            } else {
+                updateRuleCache(deduplicated)
+            }
         }
         return removedCount
     }
@@ -3658,14 +2753,24 @@ object RuleRepository {
             defaultVendor = DEFAULT_VENDOR,
             genericAdVendor = GENERIC_AD_VENDOR,
             normalizeVendorName = ::normalizeVendorName,
-            vendorPatterns = vendorPatterns,
-            vendorKeywords = vendorKeywords,
-            vendorSdkIdentifiers = vendorSdkIdentifiers,
+            vendorPatterns = VendorConfigData.vendorPatterns,
+            vendorKeywords = VendorConfigData.vendorKeywords,
+            vendorSdkIdentifiers = VendorConfigData.vendorSdkIdentifiers,
             keywordMatches = ::keywordMatches,
             identifierMatches = ::identifierMatches,
             looksLikeAdDomain = ::looksLikeAdDomain
         )
         cachedVendorMap[normalized] = result
+        if (cachedVendorMap.size > MAX_CACHED_VENDOR_ENTRIES) {
+            val removeCount = cachedVendorMap.size / 4
+            val iter = cachedVendorMap.entries.iterator()
+            var removed = 0
+            while (removed < removeCount && iter.hasNext()) {
+                iter.next()
+                iter.remove()
+                removed++
+            }
+        }
         return result
     }
 
@@ -3677,8 +2782,8 @@ object RuleRepository {
             defaultVendor = DEFAULT_VENDOR,
             genericAdVendor = GENERIC_AD_VENDOR,
             normalizeVendorName = ::normalizeVendorName,
-            vendorPatterns = vendorPatterns,
-            vendorKeywords = vendorKeywords,
+            vendorPatterns = VendorConfigData.vendorPatterns,
+            vendorKeywords = VendorConfigData.vendorKeywords,
             vendorSdkIdentifiers = emptyMap(),
             keywordMatches = ::keywordMatches,
             identifierMatches = ::identifierMatches,
@@ -3691,7 +2796,7 @@ object RuleRepository {
         val hintMatches = RuleVendorSupport.classifyVendorByHints(
             hints = hints,
             normalizeVendorName = ::normalizeVendorName,
-            vendorSdkIdentifiers = vendorSdkIdentifiers,
+            vendorSdkIdentifiers = VendorConfigData.vendorSdkIdentifiers,
             identifierMatches = ::identifierMatches
         )
         hintMatches?.let { return it.also { v -> cachedVendorMap[normalized] = v } }
@@ -3706,7 +2811,7 @@ object RuleRepository {
         return RuleVendorSupport.classifyVendorByHints(
             hints = hints,
             normalizeVendorName = ::normalizeVendorName,
-            vendorSdkIdentifiers = vendorSdkIdentifiers,
+            vendorSdkIdentifiers = VendorConfigData.vendorSdkIdentifiers,
             identifierMatches = ::identifierMatches
         ) ?: fromDomain
     }
@@ -4067,7 +3172,7 @@ object RuleRepository {
         
         // 通用广告商识别
         if (normalizedVendor == GENERIC_AD_VENDOR) score += 3
-        if (normalizedVendor in highConfidenceAdSdkVendors) score += 2
+        if (normalizedVendor in VendorConfigData.highConfidenceAdSdkVendors) score += 2
         
         // 访问频率评分
         if (novelHits >= 3) score += 3 else if (novelHits >= 1) score += 2
@@ -4214,7 +3319,7 @@ object RuleRepository {
         val text = value?.trim()?.lowercase().orEmpty()
         if (text.isBlank()) return false
         val normalized = text.replace(alphanumericCnRegex, "")
-        return novelAppIdentifiers.any { identifierMatches(text, normalized, it) }
+        return VendorConfigData.novelAppIdentifiers.any { identifierMatches(text, normalized, it) }
     }
 
     fun isCommunityAppHint(value: String?): Boolean {
@@ -4258,39 +3363,10 @@ object RuleRepository {
         if (looksLikePushRecommendationAdDomain(normalized)) return true
         if (!isAggressiveAdAppHint(appName)) return false
         if (looksLikeAdDomain(normalized)) return true
-        return normalizedVendor in highConfidenceAdSdkVendors
+        return normalizedVendor in VendorConfigData.highConfidenceAdSdkVendors
     }
 
-    fun isNovelVendor(vendor: String): Boolean = novelVendorNames.contains(normalizeVendorName(vendor))
-
-    private val highConfidenceAdSdkVendors = setOf(
-        "穿山甲 (Pangle)",
-        "优量汇 (Tencent Marketing)",
-        "腾讯广告 (Tencent Ads)",
-        "TopOn 聚合广告 (TopOn)",
-        "TradPlus 聚合广告 (TradPlus)",
-        "Beizi 广告 (Beizi)",
-        "AdScope 聚合广告 (AdScope)",
-        "有米广告 (Youmi)",
-        "Sigmob (Sigmob)",
-        "Unity (Unity Ads)",
-        "AppLovin (AppLovin)",
-        "ironSource (ironSource)",
-        "Vungle (Liftoff)",
-        "Chartboost (Chartboost)",
-        "InMobi (InMobi)",
-        "Mintegral (Mintegral)",
-        "Meta 平台 (Meta Platforms)",
-        "PubMatic (PubMatic)",
-        "OpenX (OpenX)",
-        "Taboola (Taboola)",
-        "Outbrain (Outbrain)",
-        "AdColony (AdColony)",
-        "Ogury (Ogury)",
-        "Digital Turbine (DT Exchange)",
-        "Smaato (Smaato)",
-        "Tapjoy (Tapjoy)"
-    )
+    fun isNovelVendor(vendor: String): Boolean = VendorConfigData.novelVendorNames.contains(normalizeVendorName(vendor))
 
     fun looksLikeAdSdkInfraDomain(domain: String, vendor: String = DEFAULT_VENDOR): Boolean {
         return RuleAdDomainSupport.looksLikeAdSdkInfraDomain(
@@ -4299,8 +3375,8 @@ object RuleRepository {
             defaultVendor = DEFAULT_VENDOR,
             sanitizeDomain = ::sanitizeDomain,
             normalizeVendorName = ::normalizeVendorName,
-            highConfidenceAdSdkDomains = highConfidenceAdSdkDomains,
-            highConfidenceAdSdkVendors = highConfidenceAdSdkVendors
+            highConfidenceAdSdkDomains = VendorConfigData.highConfidenceAdSdkDomains,
+            highConfidenceAdSdkVendors = VendorConfigData.highConfidenceAdSdkVendors
         )
     }
 
@@ -4320,7 +3396,7 @@ object RuleRepository {
         if (isProtectedNovelAppDomain(normalized)) return false
         if (hasMatchingRulePlaceholder(normalized)) return true
         val normalizedVendor = normalizeVendorName(vendor)
-        if (novelAggressiveVendorNames.contains(normalizedVendor)) return true
+        if (VendorConfigData.novelAggressiveVendorNames.contains(normalizedVendor)) return true
         if (looksLikeAdDomain(normalized) && hasAggressiveNovelAdSignal(normalized)) return true
         val lower = normalized.lowercase()
         val strongNovelQuicSignals = listOf(
@@ -4358,7 +3434,7 @@ object RuleRepository {
         // 移除 looksLikeAdDomain 调用，避免与 isLowValueSuspiciousSampleDomain 形成循环
         return RuleProtectionSupport.matchesExactOrSubdomain(
             normalized,
-            buildDomainCandidates(normalized).toSet().intersect(novelAppProtectedSuffixes.toSet())
+            buildDomainCandidates(normalized).toSet().intersect(VendorConfigData.novelAppProtectedSuffixes.toSet())
         )
     }
 
@@ -4368,7 +3444,7 @@ object RuleRepository {
 
     private fun hasMatchingRulePlaceholder(domain: String): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
-        return buildDomainCandidates(normalized).any(novelAggressiveExactDomains::contains)
+        return buildDomainCandidates(normalized).any(VendorConfigData.novelAggressiveExactDomains::contains)
     }
 
     private fun keywordMatches(domain: String, normalizedTokens: String, keyword: String): Boolean {
@@ -4380,7 +3456,7 @@ object RuleRepository {
     }
 
     fun availableVendors(context: Context): List<String> {
-        return (vendorPatterns.keys + readCustomVendorMap(context).values + getRules(context).map { it.vendor })
+        return (VendorConfigData.vendorPatterns.keys + readCustomVendorMap(context).values + getRules(context).map { it.vendor })
             .map(::normalizeVendorName)
             .filter { it.isNotBlank() }
             .distinct()
@@ -4951,6 +4027,11 @@ object RuleRepository {
                 cspValue = modifierInfo.cspValue,
                 redirectResource = modifierInfo.redirectResource,
                 jsInjectRules = modifierInfo.jsinject?.let { setOf(it) }.orEmpty(),
+                cookieRemove = modifierInfo.cookieRemove,
+                cookieSet = modifierInfo.cookieSet,
+                toDomains = modifierInfo.toDomains,
+                cname = modifierInfo.cname,
+                emptyResponse = modifierInfo.emptyResponse,
                 vendorHints = lineContext.vendorHints
             )
         }
@@ -5050,6 +4131,11 @@ object RuleRepository {
                 cspValue = modifierInfo.cspValue,
                 redirectResource = modifierInfo.redirectResource,
                 jsInjectRules = modifierInfo.jsinject?.let { setOf(it) }.orEmpty(),
+                cookieRemove = modifierInfo.cookieRemove,
+                cookieSet = modifierInfo.cookieSet,
+                toDomains = modifierInfo.toDomains,
+                cname = modifierInfo.cname,
+                emptyResponse = modifierInfo.emptyResponse,
                 vendorHints = lineContext.vendorHints
             )
         }
@@ -5249,6 +4335,8 @@ object RuleRepository {
             "prevent-fetch", "ubo-prevent-fetch" -> buildPreventNetworkScriptlet("fetch", scriptArgs)
             "prevent-xhr", "prevent-xmlhttprequest", "ubo-prevent-xhr", "ubo-prevent-xmlhttprequest" -> buildPreventNetworkScriptlet("xhr", scriptArgs)
             "prevent-addeventlistener", "prevent-add-event-listener", "ubo-prevent-addeventlistener", "ubo-prevent-add-event-listener" -> buildPreventAddEventListenerScriptlet(scriptArgs)
+            "noeval", "ubo-noeval" -> BUILTIN_NOEVAL_SCRIPTLET
+            "nowebrtc", "ubo-nowebrtc" -> BUILTIN_NOWEBRTC_SCRIPTLET
             else -> null
         }
     }
@@ -6130,8 +5218,8 @@ object RuleRepository {
         return RuleAdDomainSupport.isProtectedByteDanceInfraDomain(
             domain = domain,
             sanitizeDomain = ::sanitizeDomain,
-            byteDanceInfraProtectedSuffixes = byteDanceInfraProtectedSuffixes,
-            novelAggressiveExactDomains = novelAggressiveExactDomains
+            byteDanceInfraProtectedSuffixes = VendorConfigData.byteDanceInfraProtectedSuffixes,
+            novelAggressiveExactDomains = VendorConfigData.novelAggressiveExactDomains
         )
     }
 
@@ -6426,6 +5514,86 @@ object RuleRepository {
         return (addressBytes[fullBytes].toInt() and mask) == (networkBytes[fullBytes].toInt() and mask)
     }
 
+    private fun getExistingDomainSet(context: Context): MutableSet<String> {
+        return getSimpleDomainIndex(context).userOwnedBlocked.toMutableSet()
+    }
+
+    private fun streamDomainSetFromFile(context: Context): MutableSet<String> {
+        val file = rulesFile(context)
+        if (!file.exists() || file.length() <= 2L) return linkedSetOf()
+        val domains = linkedSetOf<String>()
+        try {
+            file.bufferedReader(Charsets.UTF_8).use { reader ->
+                JsonReader(reader).use { jsonReader ->
+                    jsonReader.beginArray()
+                    while (jsonReader.hasNext()) {
+                        jsonReader.beginObject()
+                        while (jsonReader.hasNext()) {
+                            if (jsonReader.nextName() == "domain") {
+                                domains.add(jsonReader.nextString())
+                            } else {
+                                jsonReader.skipValue()
+                            }
+                        }
+                        jsonReader.endObject()
+                    }
+                    jsonReader.endArray()
+                }
+            }
+        } catch (e: Exception) {
+            LogRepository.append(context, "streamDomainSetFromFile failed: ${e.message ?: e.javaClass.simpleName}")
+            return linkedSetOf()
+        }
+        return domains
+    }
+
+    private fun appendRulesToFile(context: Context, newRules: List<BlockRule>) {
+        val normalizedNew = newRules.map(::normalizeRuleForSave)
+        val file = rulesFile(context)
+        synchronized(fileWriteLock) {
+            if (!file.exists() || file.length() <= 2L) {
+                writeRulesFile(context, normalizedNew)
+                updateRuleCache(normalizedNew)
+                return
+            }
+            val raf = java.io.RandomAccessFile(file, "rw")
+            try {
+                var bracketPos = file.length() - 1
+                while (bracketPos >= 0) {
+                    raf.seek(bracketPos)
+                    if (raf.read().toInt() == ']'.code) break
+                    bracketPos--
+                }
+                if (bracketPos < 0) {
+                    raf.close()
+                    LogRepository.append(context, "RuleRepository.appendRulesToFile: corrupted rules file, rebuilding with new rules only")
+                    writeRulesFile(context, normalizedNew)
+                    updateRuleCache(normalizedNew)
+                    return
+                }
+                raf.setLength(bracketPos)
+                raf.seek(bracketPos)
+                val bos = java.io.ByteArrayOutputStream()
+                normalizedNew.forEach { rule ->
+                    bos.write(','.code)
+                    bos.write(gson.toJson(rule).toByteArray(Charsets.UTF_8))
+                }
+                bos.write('\n'.code)
+                bos.write(']'.code)
+                raf.write(bos.toByteArray())
+            } finally {
+                raf.close()
+            }
+        }
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val oldCount = prefs.getInt(KEY_RULE_COUNT, -1)
+        prefs.edit().putInt(KEY_RULE_COUNT, if (oldCount >= 0) oldCount + normalizedNew.size else normalizedNew.size).apply()
+        clearCachesAfterAppend(normalizedNew.map { it.domain }.toSet())
+        synchronized(dnsBlockDecisionLock) {
+            dnsBlockDecisionCache.clear()
+        }
+    }
+
     private fun save(context: Context, rules: List<BlockRule>) {
         val startTime = System.currentTimeMillis()
         val normalizedRules = normalizeRulesForSave(rules)
@@ -6446,16 +5614,87 @@ object RuleRepository {
 
     private fun updateRuleCacheAfterSave(context: Context, rules: List<BlockRule>) {
         if (rules.size >= LARGE_RULE_CACHE_THRESHOLD) {
-            clearCaches()
-            cachedRuleCount = rules.size
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit()
-                .putInt(KEY_RULE_COUNT, rules.size)
-                .apply()
-            LogRepository.append(context, "RuleRepository.save: large rule set cached as count only, rules=${rules.size}")
+            synchronized(cacheLock) {
+                cachedRules = null
+                cachedRuleCount = rules.size
+                cachedBlockedDomains = null
+                cachedRuleMap = null
+                cachedSimpleDomainIndex = null
+                cachedTrieIndex = null
+                cachedRegexRules = null
+                cachedCosmeticRules = null
+                cachedIpCidrRules = null
+                cachedPortOnlyRules = null
+                cachedKeywordRules = null
+                cachedCombinedKeywordPattern = null
+                cachedRegexLiteralIndex = null
+                cachedCnameRuleIndex = null
+                cachedRuleInventory = null
+                cachedAppRuleIndex = null
+                cachedUniversalRuleMap = null
+                cachedCompiledRegexRules = emptyMap()
+                cachedWhitelistHits.clear()
+            }
+            buildAllCachesFromFile(context)
             return
         }
         updateRuleCache(rules)
+    }
+
+    private fun rebuildCachesFromRules(context: Context, rules: List<BlockRule>) {
+        synchronized(cacheLock) {
+            cachedRules = null
+            cachedRuleCount = rules.size
+            cachedBlockedDomains = emptySet()
+            val blocked = linkedSetOf<String>()
+            val userOwnedBlocked = linkedSetOf<String>()
+            val importantBlocked = linkedSetOf<String>()
+            val exceptions = linkedSetOf<String>()
+            rules.asSequence()
+                .filter(::isSimpleDomainRule)
+                .forEach { rule ->
+                    if (rule.exceptionRule) {
+                        exceptions += rule.domain
+                    } else {
+                        blocked += rule.domain
+                        if (isUserOwnedBlockingRule(rule)) userOwnedBlocked += rule.domain
+                        if (isImportantBlockingRule(rule)) importantBlocked += rule.domain
+                    }
+                }
+            cachedSimpleDomainIndex = SimpleDomainIndex(
+                blocked = (blocked - exceptions) + userOwnedBlocked,
+                userOwnedBlocked = userOwnedBlocked,
+                importantBlocked = importantBlocked - exceptions,
+                exceptions = exceptions
+            )
+            cachedTrieIndex = DomainTrieIndex(
+                blocked = (blocked - exceptions) + userOwnedBlocked,
+                userOwnedBlocked = userOwnedBlocked,
+                importantBlocked = importantBlocked - exceptions,
+                exceptions = exceptions
+            )
+            val nonSimpleRules = rules.asSequence()
+                .filterNot(::isSimpleDomainRule)
+                .toList()
+            cachedRuleMap = nonSimpleRules.groupBy { it.domain }
+            buildAppRuleIndex(nonSimpleRules)
+            cachedRegexRules = rules.filter { it.regexPattern != null }
+            cachedKeywordRules = rules.filter { it.keywordPattern != null }
+            cachedCombinedKeywordPattern = null
+            cachedRegexLiteralIndex = null
+            cachedCosmeticRules = rules.filter { it.cosmeticSelector != null }
+            cachedIpCidrRules = rules.filter { it.ipCidr != null }
+            cachedPortOnlyRules = rules.filter { it.domain == "*" && it.ipCidr.isNullOrBlank() }
+            cachedCnameRuleIndex = rules.filter { it.cname }.associateBy { it.domain }
+            cachedRuleInventory = null
+            cachedCompiledRegexRules = emptyMap()
+            cachedWhitelistHits.clear()
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_RULE_COUNT, rules.size)
+            .apply()
+        LogRepository.append(context, "RuleRepository.save: large rule set indexed, rules=${rules.size} memory=${runtimeMemorySnapshot()}")
     }
 
     private fun normalizeRulesForSave(rules: List<BlockRule>): List<BlockRule> {
@@ -6474,6 +5713,35 @@ object RuleRepository {
         } else {
             copyBlockRule(rule, id = stableId, vendor = vendor, source = source)
         }
+    }
+
+    private fun normalizeRuleFromStorage(rule: BlockRule): BlockRule? {
+        val id = runCatching { rule.id.trim() }.getOrNull()?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
+        val domain = runCatching { rule.domain.trim() }.getOrNull()?.takeIf { it.isNotBlank() } ?: return null
+        val vendor = runCatching { normalizeVendorName(rule.vendor) }.getOrNull() ?: DEFAULT_VENDOR
+        val source = runCatching { rule.source }.getOrNull() ?: RuleSource.IMPORTED
+        return copyBlockRule(
+            rule,
+            id = id,
+            domain = domain,
+            vendor = vendor,
+            source = if (source == RuleSource.REFERENCE) RuleSource.IMPORTED else source,
+            excludedDomainConstraints = runCatching { rule.excludedDomainConstraints }.getOrNull(),
+            denyallow = runCatching { rule.denyallow }.getOrNull(),
+            requestTypes = runCatching { rule.requestTypes }.getOrNull(),
+            appPackages = runCatching { rule.appPackages }.getOrNull(),
+            destinationPorts = runCatching { rule.destinationPorts }.getOrNull(),
+            sourcePorts = runCatching { rule.sourcePorts }.getOrNull(),
+            removeParams = runCatching { rule.removeParams }.getOrNull(),
+            removeParamRegexes = runCatching { rule.removeParamRegexes }.getOrNull(),
+            removeRequestHeaders = runCatching { rule.removeRequestHeaders }.getOrNull(),
+            setRequestHeaders = runCatching { rule.setRequestHeaders }.getOrNull(),
+            replaceRules = runCatching { rule.replaceRules }.getOrNull(),
+            jsInjectRules = runCatching { rule.jsInjectRules }.getOrNull(),
+            cookieRemove = runCatching { rule.cookieRemove }.getOrNull(),
+            cookieSet = runCatching { rule.cookieSet }.getOrNull(),
+            toDomains = runCatching { rule.toDomains }.getOrNull()
+        )
     }
 
     private inline fun List<BlockRule>.mapRulesPreservingInstances(transform: (BlockRule) -> BlockRule): List<BlockRule> {
@@ -6504,11 +5772,20 @@ object RuleRepository {
             JsonReader(reader).use { jsonReader ->
                 val rules = mutableListOf<BlockRule>()
                 jsonReader.beginArray()
+                var totalCount = 0
+                var skippedCount = 0
                 while (jsonReader.hasNext()) {
-                    gson.fromJson<BlockRule>(jsonReader, BlockRule::class.java)?.let(rules::add)
+                    val rule = gson.fromJson<BlockRule>(jsonReader, BlockRule::class.java)
+                        ?.let(::normalizeRuleFromStorage)
+                    totalCount += 1
+                    if (rule != null && rules.size < MAX_CACHEABLE_RULES && !isImportHeapLow()) {
+                        rules += rule
+                    } else {
+                        skippedCount += 1
+                    }
                 }
                 jsonReader.endArray()
-                LogRepository.append(context, "RuleRepository.readRulesFile: rules=${rules.size}, time=${System.currentTimeMillis() - startTime}ms")
+                LogRepository.append(context, "RuleRepository.readRulesFile: loaded=${rules.size}, skipped=$skippedCount, total=$totalCount, time=${System.currentTimeMillis() - startTime}ms")
                 rules
             }
         }
@@ -6663,8 +5940,27 @@ object RuleRepository {
             rewrite.tempFile.copyTo(rewrite.targetFile, overwrite = true)
             rewrite.tempFile.delete()
         }
-        clearCaches()
+        synchronized(cacheLock) {
+            cachedRules = null
+            cachedSimpleDomainIndex = null
+            cachedRuleMap = null
+            cachedRegexRules = null
+            cachedCosmeticRules = null
+            cachedIpCidrRules = null
+            cachedPortOnlyRules = null
+            cachedKeywordRules = null
+            cachedCombinedKeywordPattern = null
+            cachedRegexLiteralIndex = null
+            cachedCnameRuleIndex = null
+            cachedRuleInventory = null
+            cachedCompiledRegexRules = emptyMap()
+            cachedBlockedDomains = null
+            cachedAppRuleIndex = null
+            cachedUniversalRuleMap = null
+            cachedWhitelistHits.clear()
+        }
         cachedRuleCount = rewrite.ruleCount
+        buildAllCachesFromFile(context)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .remove(KEY_RULES)
@@ -6683,21 +5979,53 @@ object RuleRepository {
     }
 
     private fun clearCaches() {
-        cachedRules = null
-        cachedRuleCount = null
-        cachedBlockedDomains = null
-        cachedRuleMap = null
-        cachedSimpleDomainIndex = null
-        cachedRegexRules = null
-        cachedCosmeticRules = null
-        cachedIpCidrRules = null
-        cachedPortOnlyRules = null
-        cachedKeywordRules = null
-        cachedRuleInventory = null
-        cachedCompiledRegexRules = emptyMap()
-        cachedWhitelistHits.clear()
-        cachedAppRuleIndex = null
-        cachedUniversalRuleMap = null
+        synchronized(cacheLock) {
+            cachedRules = null
+            cachedRuleCount = null
+            cachedBlockedDomains = null
+            cachedRuleMap = null
+            cachedSimpleDomainIndex = null
+            cachedTrieIndex = null
+            cachedRegexRules = null
+            cachedCosmeticRules = null
+            cachedIpCidrRules = null
+            cachedPortOnlyRules = null
+            cachedKeywordRules = null
+            cachedCombinedKeywordPattern = null
+            cachedRegexLiteralIndex = null
+            cachedCnameRuleIndex = null
+            cachedRuleInventory = null
+            cachedCompiledRegexRules = emptyMap()
+            cachedWhitelistHits.clear()
+            cachedAppRuleIndex = null
+            cachedUniversalRuleMap = null
+        }
+    }
+
+    private fun clearWhitelistCache() {
+        synchronized(cacheLock) {
+            cachedWhitelistHits.clear()
+        }
+    }
+
+    private fun clearCachesAfterAppend(newDomains: Set<String>) {
+        synchronized(cacheLock) {
+            val index = cachedSimpleDomainIndex
+            if (index != null && newDomains.isNotEmpty()) {
+                cachedSimpleDomainIndex = index.copy(
+                    blocked = index.blocked + newDomains,
+                    userOwnedBlocked = index.userOwnedBlocked + newDomains
+                )
+                cachedTrieIndex = DomainTrieIndex(
+                    blocked = cachedSimpleDomainIndex!!.blocked,
+                    userOwnedBlocked = cachedSimpleDomainIndex!!.userOwnedBlocked,
+                    importantBlocked = cachedSimpleDomainIndex!!.importantBlocked,
+                    exceptions = cachedSimpleDomainIndex!!.exceptions
+                )
+            }
+            cachedRuleCount = null
+            cachedWhitelistHits.clear()
+        }
     }
 
     fun prepareForRuleImport(context: Context, reason: String) {
@@ -6710,6 +6038,9 @@ object RuleRepository {
             cachedIpCidrRules = null
             cachedPortOnlyRules = null
             cachedKeywordRules = null
+            cachedCombinedKeywordPattern = null
+            cachedRegexLiteralIndex = null
+            cachedCnameRuleIndex = null
             cachedRuleInventory = null
             cachedAppRuleIndex = null
             cachedUniversalRuleMap = null
@@ -6717,14 +6048,31 @@ object RuleRepository {
             cachedVendorMap.clear()
             cachedWhitelistHits.clear()
         }
-        System.gc()
-        LogRepository.append(context, "RuleRepository.prepareForRuleImport: reason=$reason, memory=${runtimeMemorySnapshot()}")
+        LogRepository.append(context, "RuleRepository.prepareForRuleImport: reason=$reason memory=${runtimeMemorySnapshot()}")
     }
 
     fun runtimeMemorySnapshot(): String {
         val runtime = Runtime.getRuntime()
         val used = runtime.totalMemory() - runtime.freeMemory()
         return "used=${formatMemoryBytes(used)}, free=${formatMemoryBytes(runtime.freeMemory())}, total=${formatMemoryBytes(runtime.totalMemory())}, max=${formatMemoryBytes(runtime.maxMemory())}"
+    }
+
+    private fun shouldStopStreamingImport(context: Context, addedCount: Int, maxNewRules: Int): Boolean {
+        if (addedCount >= maxNewRules) {
+            LogRepository.append(context, "Rule import stopped at safe rule limit: added=$addedCount, limit=$maxNewRules")
+            return true
+        }
+        if (isImportHeapLow()) {
+            LogRepository.append(context, "Rule import stopped before low-memory crash: added=$addedCount, memory=${runtimeMemorySnapshot()}")
+            return true
+        }
+        return false
+    }
+
+    private fun isImportHeapLow(): Boolean {
+        val runtime = Runtime.getRuntime()
+        val availableHeap = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+        return availableHeap < MIN_IMPORT_FREE_HEAP_BYTES
     }
 
     private fun formatMemoryBytes(bytes: Long): String {
@@ -6821,7 +6169,7 @@ object RuleRepository {
         return RuleVendorSupport.normalizeVendorName(
             vendor = vendor,
             defaultVendor = DEFAULT_VENDOR,
-            vendorAliases = vendorAliases
+            vendorAliases = VendorConfigData.vendorAliases
         )
     }
 
@@ -6839,6 +6187,10 @@ object RuleRepository {
         cachedRuleMap?.let { return it }
         synchronized(cacheLock) {
             cachedRuleMap?.let { return it }
+            if (rulesFile(context).exists()) {
+                buildAllCachesFromFile(context)
+                return cachedRuleMap ?: emptyMap()
+            }
             val rules = getRules(context)
             val nonSimpleRules = rules.asSequence()
                 .filterNot(::isSimpleDomainRule)
@@ -6846,7 +6198,7 @@ object RuleRepository {
             cachedRuleMap = nonSimpleRules.groupBy { it.domain }
             // 同步构建 App-Specific 规则索引和通用规则映射
             buildAppRuleIndex(nonSimpleRules)
-            return cachedRuleMap!!
+            return cachedRuleMap ?: emptyMap()
         }
     }
 
@@ -6880,6 +6232,10 @@ object RuleRepository {
         cachedSimpleDomainIndex?.let { return it }
         synchronized(cacheLock) {
             cachedSimpleDomainIndex?.let { return it }
+            if (rulesFile(context).exists()) {
+                buildAllCachesFromFile(context)
+                return cachedSimpleDomainIndex ?: SimpleDomainIndex(emptySet(), emptySet(), emptySet(), emptySet())
+            }
             val blocked = linkedSetOf<String>()
             val userOwnedBlocked = linkedSetOf<String>()
             val importantBlocked = linkedSetOf<String>()
@@ -6906,36 +6262,62 @@ object RuleRepository {
         }
     }
 
-    private fun isSimpleDomainRule(rule: BlockRule): Boolean {
-        return rule.source != RuleSource.UNSUPPORTED &&
+    private fun getTrieIndex(context: Context): DomainTrieIndex {
+        cachedTrieIndex?.let { return it }
+        synchronized(cacheLock) {
+            cachedTrieIndex?.let { return it }
+            val index = getSimpleDomainIndex(context)
+            val trie = DomainTrieIndex(
+                blocked = index.blocked,
+                userOwnedBlocked = index.userOwnedBlocked,
+                importantBlocked = index.importantBlocked,
+                exceptions = index.exceptions
+            )
+            cachedTrieIndex = trie
+            return trie
+        }
+    }
+
+    internal fun isSimpleDomainRule(rule: BlockRule): Boolean {
+        val rawDomain = runCatching { rule.domain.trim() }.getOrNull() ?: return false
+        if (rawDomain.isBlank()) return false
+        val domain = rawDomain.removePrefix("*.")
+        return runCatching { rule.source }.getOrNull() != RuleSource.UNSUPPORTED &&
+            !domain.contains("*") &&
             rule.dnsTypes == null &&
             rule.excludedDnsTypes == null &&
             !rule.thirdParty &&
             !rule.firstParty &&
             !rule.redirect &&
             rule.domainConstraints.isNullOrEmpty() &&
-            rule.excludedDomainConstraints.isEmpty() &&
-            rule.denyallow.isEmpty() &&
+            safeRuleSet(rule.excludedDomainConstraints).isEmpty() &&
+            safeRuleSet(rule.denyallow).isEmpty() &&
             !rule.urlblock &&
-            rule.requestTypes.isEmpty() &&
-            rule.appPackages.isEmpty() &&
-            rule.destinationPorts.isEmpty() &&
-            rule.sourcePorts.isEmpty() &&
+            safeRuleSet(rule.requestTypes).isEmpty() &&
+            safeRuleSet(rule.appPackages).isEmpty() &&
+            safeRuleSet(rule.destinationPorts).isEmpty() &&
+            safeRuleSet(rule.sourcePorts).isEmpty() &&
             rule.keywordPattern.isNullOrBlank() &&
             rule.pathPattern.isNullOrBlank() &&
             rule.ipCidr.isNullOrBlank() &&
             rule.regexPattern.isNullOrBlank() &&
             rule.cosmeticSelector.isNullOrBlank() &&
             !rule.cosmeticException &&
-            rule.removeParams.isEmpty() &&
-            rule.removeParamRegexes.isEmpty() &&
-            rule.removeRequestHeaders.isEmpty() &&
-            rule.setRequestHeaders.isEmpty() &&
-            rule.replaceRules.isEmpty() &&
+            safeRuleSet(rule.removeParams).isEmpty() &&
+            safeRuleSet(rule.removeParamRegexes).isEmpty() &&
+            safeRuleSet(rule.removeRequestHeaders).isEmpty() &&
+            safeRuleSet(rule.setRequestHeaders).isEmpty() &&
+            safeRuleSet(rule.replaceRules).isEmpty() &&
             rule.cspValue.isNullOrBlank() &&
             rule.redirectResource.isNullOrBlank() &&
-            rule.jsInjectRules.isEmpty()
+            safeRuleSet(rule.jsInjectRules).isEmpty() &&
+            safeRuleSet(rule.cookieRemove).isEmpty() &&
+            safeRuleSet(rule.cookieSet).isEmpty() &&
+            safeRuleSet(rule.toDomains).isEmpty() &&
+            !rule.emptyResponse
     }
+
+    private fun <T> safeRuleSet(value: Set<T>?): Set<T> = value.orEmpty()
 
     private fun getRegexRules(context: Context): List<BlockRule> {
         cachedRegexRules?.let { return it }
@@ -6961,6 +6343,16 @@ object RuleRepository {
         return all.filter { it.appPackages.isEmpty() || pkg in it.appPackages }
     }
 
+    fun getCnameRuleIndex(context: Context): Map<String, BlockRule> {
+        cachedCnameRuleIndex?.let { return it }
+        synchronized(cacheLock) {
+            cachedCnameRuleIndex?.let { return it }
+            val rules = getRules(context).filter { it.cname }
+            cachedCnameRuleIndex = rules.associateBy { it.domain }
+            return cachedCnameRuleIndex!!
+        }
+    }
+
     private fun getCosmeticRules(context: Context): List<BlockRule> {
         cachedCosmeticRules?.let { return it }
         synchronized(cacheLock) {
@@ -6981,6 +6373,53 @@ object RuleRepository {
         }
     }
 
+    private fun getCombinedKeywordMatcher(context: Context): java.util.regex.Pattern? {
+        cachedCombinedKeywordPattern?.let { return it.takeIf { it.pattern().isNotEmpty() } }
+        synchronized(cacheLock) {
+            cachedCombinedKeywordPattern?.let { return it.takeIf { it.pattern().isNotEmpty() } }
+            val keywords = getKeywordRules(context).mapNotNull { it.keywordPattern?.lowercase() }.distinct()
+            if (keywords.isEmpty()) {
+                cachedCombinedKeywordPattern = java.util.regex.Pattern.compile("")
+                return null
+            }
+            val escaped = keywords.map { java.util.regex.Pattern.quote(it) }
+            val combined = escaped.joinToString("|")
+            cachedCombinedKeywordPattern = java.util.regex.Pattern.compile(combined)
+            return cachedCombinedKeywordPattern
+        }
+    }
+
+    private fun getRegexLiteralIndex(context: Context): Map<String, List<BlockRule>> {
+        cachedRegexLiteralIndex?.let { return it }
+        synchronized(cacheLock) {
+            cachedRegexLiteralIndex?.let { return it }
+            val index = linkedMapOf<String, MutableList<BlockRule>>()
+            val unindexed = mutableListOf<BlockRule>()
+            for (rule in getRegexRules(context)) {
+                val fragment = extractRegexLiteralFragment(rule.regexPattern ?: continue)
+                if (fragment != null) {
+                    index.getOrPut(fragment) { mutableListOf() }.add(rule)
+                } else {
+                    unindexed.add(rule)
+                }
+            }
+            if (unindexed.isNotEmpty()) {
+                index[""] = unindexed
+            }
+            cachedRegexLiteralIndex = index
+            return index
+        }
+    }
+
+    private fun extractRegexLiteralFragment(pattern: String): String? {
+        val raw = pattern.replace("\\.", ".").replace("\\-", "-")
+        val clean = raw.removePrefix(".*").removePrefix("^").removeSuffix(".*").removeSuffix("$")
+        val match = regexLiteralDomainExtractor.find(clean) ?: return null
+        return match.value.lowercase().trim('.')
+    }
+
+    private val regexLiteralDomainExtractor = Regex("""[a-z0-9][a-z0-9.-]{4,}\.[a-z]{2,}""", RegexOption.IGNORE_CASE)
+
     private fun buildDomainCandidates(domain: String): Sequence<String> = sequence {
         yield(domain)
         var index = domain.indexOf('.')
@@ -6993,18 +6432,47 @@ object RuleRepository {
     private fun updateRuleCache(rules: List<BlockRule>) {
         cachedRules = rules
         cachedBlockedDomains = null
-        cachedSimpleDomainIndex = null
+        val blocked = linkedSetOf<String>()
+        val userOwnedBlocked = linkedSetOf<String>()
+        val importantBlocked = linkedSetOf<String>()
+        val exceptions = linkedSetOf<String>()
+        rules.asSequence()
+            .filter(::isSimpleDomainRule)
+            .forEach { rule ->
+                if (rule.exceptionRule) {
+                    exceptions += rule.domain
+                } else {
+                    blocked += rule.domain
+                    if (isUserOwnedBlockingRule(rule)) userOwnedBlocked += rule.domain
+                    if (isImportantBlockingRule(rule)) importantBlocked += rule.domain
+                }
+            }
+        cachedSimpleDomainIndex = SimpleDomainIndex(
+            blocked = (blocked - exceptions) + userOwnedBlocked,
+            userOwnedBlocked = userOwnedBlocked,
+            importantBlocked = importantBlocked - exceptions,
+            exceptions = exceptions
+        )
+        cachedTrieIndex = DomainTrieIndex(
+            blocked = (blocked - exceptions) + userOwnedBlocked,
+            userOwnedBlocked = userOwnedBlocked,
+            importantBlocked = importantBlocked - exceptions,
+            exceptions = exceptions
+        )
         cachedRuleMap = null
         cachedRegexRules = null
         cachedCosmeticRules = null
         cachedIpCidrRules = null
         cachedPortOnlyRules = null
         cachedKeywordRules = null
+        cachedCombinedKeywordPattern = null
+        cachedRegexLiteralIndex = null
         cachedCompiledRegexRules = emptyMap()
         cachedVendorMap.clear()
         cachedRuleInventory = null
         cachedAppRuleIndex = null
         cachedUniversalRuleMap = null
+        cachedCnameRuleIndex = null
     }
 
     private fun ruleMatches(
@@ -7051,6 +6519,13 @@ object RuleRepository {
                 scopedDomain == allowedDomain || scopedDomain.endsWith(".$allowedDomain")
             }
             if (!allowed) return false
+        }
+        if (rule.toDomains.isNotEmpty()) {
+            if (normalizedHost == null) return false
+            val matchesTo = rule.toDomains.any { toDomain ->
+                normalizedHost == toDomain || normalizedHost.endsWith(".$toDomain")
+            }
+            if (!matchesTo) return false
         }
         if (rule.thirdParty) {
             if (normalizedHost == null || normalizedRequestDomain == null) return false
@@ -7230,7 +6705,12 @@ object RuleRepository {
         val cspValue: String? = null,
         val redirectResource: String? = null,
         val jsInjectRules: Set<String> = emptySet(),
-        val cosmeticSelectors: List<String> = emptyList()
+        val cosmeticSelectors: List<String> = emptyList(),
+        val cookieRemove: Set<String> = emptySet(),
+        val cookieSet: Set<String> = emptySet(),
+        val block: Boolean = false,
+        val emptyResponse: Boolean = false,
+        val matchedRuleSummaries: List<String> = emptyList()
     )
 
     data class RemoteRuleRemovalCandidate(
@@ -7389,7 +6869,12 @@ object RuleRepository {
             replaceRules = (existing.replaceRules + incoming.replaceRules).toSet(),
             cspValue = incoming.cspValue ?: existing.cspValue,
             redirectResource = incoming.redirectResource ?: existing.redirectResource,
-            jsInjectRules = (existing.jsInjectRules + incoming.jsInjectRules).toSet()
+            jsInjectRules = (existing.jsInjectRules + incoming.jsInjectRules).toSet(),
+            cookieRemove = (existing.cookieRemove + incoming.cookieRemove).toSet(),
+            cookieSet = (existing.cookieSet + incoming.cookieSet).toSet(),
+            toDomains = (existing.toDomains + incoming.toDomains).toSet(),
+            cname = existing.cname || incoming.cname,
+            emptyResponse = existing.emptyResponse || incoming.emptyResponse
         )
     }
 
@@ -7428,6 +6913,11 @@ object RuleRepository {
         cspValue: String? = rule.cspValue,
         redirectResource: String? = rule.redirectResource,
         jsInjectRules: Set<String>? = rule.jsInjectRules,
+        cookieRemove: Set<String>? = rule.cookieRemove,
+        cookieSet: Set<String>? = rule.cookieSet,
+        toDomains: Set<String>? = rule.toDomains,
+        cname: Boolean = rule.cname,
+        emptyResponse: Boolean = rule.emptyResponse,
         remoteSourceId: String? = rule.remoteSourceId
     ): BlockRule {
         return BlockRule(
@@ -7464,6 +6954,11 @@ object RuleRepository {
             cspValue = cspValue,
             redirectResource = redirectResource,
             jsInjectRules = jsInjectRules.orEmpty(),
+            cookieRemove = cookieRemove.orEmpty(),
+            cookieSet = cookieSet.orEmpty(),
+            toDomains = toDomains.orEmpty(),
+            cname = cname,
+            emptyResponse = emptyResponse,
             remoteSourceId = remoteSourceId
         )
     }
@@ -7532,7 +7027,12 @@ object RuleRepository {
             replaceRules = (existing.replaceRules + incoming.replaceRules).toSet(),
             cspValue = incoming.cspValue ?: existing.cspValue,
             redirectResource = incoming.redirectResource ?: existing.redirectResource,
-            jsInjectRules = (existing.jsInjectRules + incoming.jsInjectRules).toSet()
+            jsInjectRules = (existing.jsInjectRules + incoming.jsInjectRules).toSet(),
+            cookieRemove = (existing.cookieRemove + incoming.cookieRemove).toSet(),
+            cookieSet = (existing.cookieSet + incoming.cookieSet).toSet(),
+            toDomains = (existing.toDomains + incoming.toDomains).toSet(),
+            cname = existing.cname || incoming.cname,
+            emptyResponse = existing.emptyResponse || incoming.emptyResponse
         )
     }
 
@@ -7681,6 +7181,11 @@ object RuleRepository {
         val redirectResource: String? = null,
         val jsInjectRules: Set<String> = emptySet(),
         val vendorHints: Set<String> = emptySet(),
+        val cookieRemove: Set<String> = emptySet(),
+        val cookieSet: Set<String> = emptySet(),
+        val toDomains: Set<String> = emptySet(),
+        val cname: Boolean = false,
+        val emptyResponse: Boolean = false,
         val isUnsupported: Boolean = false
     )
 

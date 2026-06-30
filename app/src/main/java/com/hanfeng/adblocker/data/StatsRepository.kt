@@ -302,6 +302,10 @@ object StatsRepository {
     private fun incrementMapInMemory(map: ConcurrentHashMap<String, AtomicInteger>, name: String) {
         val finalName = name.ifBlank { "未知来源" }
         map.computeIfAbsent(finalName) { AtomicInteger(0) }.incrementAndGet()
+        if (map.size > MAX_RANKING_ENTRIES * 5) {
+            val keys = map.keys().toList().dropLast(MAX_RANKING_ENTRIES)
+            keys.forEach { map.remove(it) }
+        }
     }
 
     private fun sortedRankingEntries(map: ConcurrentHashMap<String, AtomicInteger>): List<Map.Entry<String, AtomicInteger>> {

@@ -11,8 +11,8 @@ android {
         applicationId = "com.HanFeng"
         minSdk = 24
         targetSdk = 35
-        versionCode = 269
-        versionName = "2.6.9"
+        versionCode = 300
+        versionName = "2.10.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -28,6 +28,8 @@ object LogRepository {
     private const val LOG_EXPORT_FILE = "HanFeng-logs.zip"
     private const val LOG_CHANNEL_CAPACITY = 2048
     private const val LOG_SNAPSHOT_MAX_BYTES = 512 * 1024
+    private const val MAX_LOG_FILE_BYTES = 2L * 1024 * 1024
+    private const val LOG_TRUNCATE_KEEP_BYTES = 512L * 1024
     private val legacyLogExportNames = setOf("hanfeng-adblock-logs.zip")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var logChannel = Channel<String>(capacity = LOG_CHANNEL_CAPACITY)
@@ -37,7 +39,9 @@ object LogRepository {
     private val droppedLogCount = AtomicInteger(0)
     @Volatile private var currentLogSessionId: String? = null
     @Volatile private var lastWriterFlushAt = 0L
+    @Volatile private var lastFileTruncateAt = 0L
     private const val WRITER_FLUSH_INTERVAL_MILLIS = 2_000L
+    private const val FILE_TRUNCATE_CHECK_INTERVAL_MILLIS = 120_000L
     private val noisyLogPrefixes = listOf(
         "HTTP/2 frame ",
         "HTTP/2 headers decoded ",
@@ -119,6 +123,11 @@ object LogRepository {
                             bos.flush()
                             lastWriterFlushAt = now
                         }
+                        if (now - lastFileTruncateAt >= FILE_TRUNCATE_CHECK_INTERVAL_MILLIS) {
+                            bos.flush()
+                            truncateLogFileIfNeeded(ctx)
+                            lastFileTruncateAt = now
+                        }
                     }
                 } catch (error: Throwable) {
                     if (isActive) {
@@ -144,6 +153,30 @@ object LogRepository {
             file.parentFile?.mkdirs()
             runCatching { FileOutputStream(file, false).use { } }
             currentLogSessionId = sessionId
+        }
+    }
+
+    private fun truncateLogFileIfNeeded(context: Context) {
+        val file = logFile(context)
+        if (!file.exists() || file.length() <= MAX_LOG_FILE_BYTES) return
+        val keepStart = file.length() - LOG_TRUNCATE_KEEP_BYTES
+        val tempFile = File(file.parentFile, "${LOG_FILE}.tmp")
+        try {
+            file.inputStream().use { input ->
+                var remaining = keepStart
+                while (remaining > 0L) {
+                    val skipped = input.skip(remaining)
+                    if (skipped <= 0L) break
+                    remaining -= skipped
+                }
+                tempFile.outputStream().use { output ->
+                    input.copyTo(output, bufferSize = 8192)
+                }
+            }
+            tempFile.renameTo(file)
+            append(context, "Log file truncated from ${file.length()} bytes")
+        } catch (e: Exception) {
+            runCatching { tempFile.delete() }
         }
     }
 
@@ -312,6 +345,14 @@ object LogRepository {
         append(context, message)
 
         if (newType == DomainDecisionType.BLOCKED) {
+            val rules = RuleRepository.getRules(context)
+            val exceptionIds = rules.filter {
+                it.domain.equals(domain, ignoreCase = true) && it.source == RuleSource.MANUAL && it.exceptionRule
+            }.map { it.id }.toSet()
+            if (exceptionIds.isNotEmpty()) {
+                val removed = RuleRepository.removeRulesByIds(context, exceptionIds)
+                append(context, "已同步移除 $removed 条例外规则（转拦截）")
+            }
             val rule = RuleRepository.addRule(context, domain, RuleSource.MANUAL)
             if (rule != null) {
                 append(context, "已同步添加拦截规则: $domain")
@@ -319,11 +360,15 @@ object LogRepository {
         } else {
             val rules = RuleRepository.getRules(context)
             val manualIds = rules.filter {
-                it.domain.equals(domain, ignoreCase = true) && it.source == RuleSource.MANUAL
+                it.domain.equals(domain, ignoreCase = true) && it.source == RuleSource.MANUAL && !it.exceptionRule
             }.map { it.id }.toSet()
             if (manualIds.isNotEmpty()) {
                 val removed = RuleRepository.removeRulesByIds(context, manualIds)
                 append(context, "已同步移除 $removed 条拦截规则")
+            }
+            val exceptionRule = RuleRepository.addExceptionRule(context, domain)
+            if (exceptionRule != null) {
+                append(context, "已同步添加放行规则: $domain")
             }
         }
     }

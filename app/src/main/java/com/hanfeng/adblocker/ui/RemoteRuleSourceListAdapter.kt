@@ -47,7 +47,7 @@ class RemoteRuleSourceListAdapter(
                 append(item.url)
                 item.lastUpdatedAt.takeIf { it > 0L }?.let {
                     append("\n上次更新时间：")
-                    append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date(it)))
+                    append(dateFormatter.format(java.util.Date(it)))
                 }
                 item.lastError?.takeIf { it.isNotBlank() }?.let {
                     append("\n最近错误：")
@@ -87,6 +87,8 @@ class RemoteRuleSourceListAdapter(
     }
 
     private companion object {
+        private val dateFormatter = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+
         val DiffCallback = object : DiffUtil.ItemCallback<RemoteRuleSourceConfig>() {
             override fun areItemsTheSame(oldItem: RemoteRuleSourceConfig, newItem: RemoteRuleSourceConfig): Boolean {
                 return oldItem.id == newItem.id

@@ -111,7 +111,8 @@ class ShizukuEnhanceAppsActivity : BaseActivity() {
             val ok = applyPackage(packageName, checked)
             withContext(Dispatchers.Main) {
                 Toast.makeText(this@ShizukuEnhanceAppsActivity, if (ok) "已应用" else "应用失败，请查看日志", Toast.LENGTH_SHORT).show()
-                adapter.notifyDataSetChanged()
+                val pos = adapter.currentList.indexOfFirst { it.packageName == packageName }
+                if (pos >= 0) adapter.notifyItemChanged(pos)
             }
         }
     }
@@ -130,7 +131,7 @@ class ShizukuEnhanceAppsActivity : BaseActivity() {
             if (checked) selectedPackages += packageName else selectedPackages -= packageName
         }
         persistSelection()
-        adapter.notifyDataSetChanged()
+        adapter.notifyItemRangeChanged(0, adapter.itemCount)
         lifecycleScope.launch(Dispatchers.IO) {
             var success = 0
             targets.forEach { (packageName, checked) -> if (applyPackage(packageName, checked)) success++ }
@@ -148,7 +149,7 @@ class ShizukuEnhanceAppsActivity : BaseActivity() {
         }
         selectedPackages.clear()
         persistSelection()
-        adapter.notifyDataSetChanged()
+        adapter.notifyItemRangeChanged(0, adapter.itemCount)
         lifecycleScope.launch(Dispatchers.IO) {
             var success = 0
             targets.forEach { packageName -> if (applyPackage(packageName, false)) success++ }

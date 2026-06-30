@@ -15,6 +15,10 @@ object BridgeSocketSupport {
         protect: (Socket) -> Boolean,
         onProtectFailed: () -> Unit
     ): Socket {
+        BridgeConnectionPool.obtain(host, port)?.let { pooled ->
+            if (pooled.isConnected && !pooled.isClosed) return pooled
+            runCatching { pooled.close() }
+        }
         val socket = Socket()
         socket.tcpNoDelay = true
         if (!protect(socket)) {
@@ -24,6 +28,10 @@ object BridgeSocketSupport {
         }
         socket.connect(InetSocketAddress(host, port), timeoutMillis)
         return socket
+    }
+
+    fun recycleBridgeSocket(host: String, port: Int, socket: Socket) {
+        BridgeConnectionPool.recycle(host, port, socket)
     }
 
     fun launchWriter(

@@ -6,6 +6,9 @@ import java.net.InetAddress
 import java.util.LinkedHashMap
 
 object DnsRuntimeSupport {
+    private const val MIN_CACHE_TTL_MILLIS = 60_000L
+    private const val MIN_NEGATIVE_CACHE_TTL_MILLIS = 15_000L
+
     data class CachedDnsResponse(
         val payload: ByteArray,
         val expiresAt: Long
@@ -61,8 +64,14 @@ object DnsRuntimeSupport {
         maxEntries: Int = 256
     ) {
         val expiresAt = when {
-            DnsMessageParser.isCacheableResponse(response, question) -> now + DnsMessageParser.extractCacheTtlMillis(response)
-            DnsMessageParser.isNegativeCacheableResponse(response, question) -> now + DnsMessageParser.negativeCacheTtlMillis()
+            DnsMessageParser.isCacheableResponse(response, question) -> {
+                val ttl = DnsMessageParser.extractCacheTtlMillis(response)
+                now + ttl.coerceAtLeast(MIN_CACHE_TTL_MILLIS)
+            }
+            DnsMessageParser.isNegativeCacheableResponse(response, question) -> {
+                val nttl = DnsMessageParser.negativeCacheTtlMillis()
+                now + nttl.coerceAtLeast(MIN_NEGATIVE_CACHE_TTL_MILLIS)
+            }
             else -> return
         }
         val normalized = DnsMessageParser.normalizeResponseForCache(response)

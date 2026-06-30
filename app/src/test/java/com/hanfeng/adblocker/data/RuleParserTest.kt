@@ -242,6 +242,28 @@ class RuleParserTest {
     }
 
     @Test
+    fun `high value adguard modifiers are parsed for mitm directives`() {
+        val modifier = RuleModifierSupport.parseModifierInfo(
+            modifierPart = "important,empty,redirect=ubo-resource:noop.js,to=target.example|cdn.example,cookie=~adid,remove-request-header=X-Track",
+            unsupportedAdGuardModifiers = emptySet(),
+            ignorableAdGuardModifiers = emptySet(),
+            sanitizeAppPackageToken = { token -> token.takeIf { it.contains('.') } },
+            mapDnsTypeToken = { null },
+            normalizeDnsTypes = { it },
+            mergeDnsTypes = { left, right -> (left.orEmpty() + right.orEmpty()).takeIf { it.isNotEmpty() } }
+        )
+
+        assertFalse(modifier.invalid)
+        assertTrue(modifier.important)
+        assertTrue(modifier.emptyResponse)
+        assertTrue(modifier.redirect)
+        assertEquals("ubo-resource:noop.js", modifier.redirectResource)
+        assertEquals(setOf("target.example", "cdn.example"), modifier.toDomains)
+        assertEquals(setOf("adid"), modifier.cookieRemove)
+        assertEquals(setOf("x-track"), modifier.removeRequestHeaders)
+    }
+
+    @Test
     fun `adguard domain exclusions are parsed and matched`() {
         val modifier = RuleModifierSupport.parseModifierInfo(
             modifierPart = "domain=reader.example|~pay.reader.example|~login.reader.example",

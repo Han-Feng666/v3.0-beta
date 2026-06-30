@@ -25,6 +25,7 @@ object RuleModifierSupport {
         val urlblock: Boolean = false,
         val fromScoped: Boolean = false,
         val toScoped: Boolean = false,
+        val toDomains: Set<String> = emptySet(),
         val pathScoped: Boolean = false,
         val pathPattern: String? = null,
         val removeParams: Set<String> = emptySet(),
@@ -55,6 +56,8 @@ object RuleModifierSupport {
         val generichideException: Boolean = false,
         val dnsrewrite: String? = null,
         val ctags: Set<String> = emptySet(),
+        val cname: Boolean = false,
+        val emptyResponse: Boolean = false,
         val unsupportedModifiers: List<String> = emptyList(),
         val invalid: Boolean = false
     )
@@ -105,6 +108,7 @@ object RuleModifierSupport {
         var urlblock = false
         var fromScoped = false
         var toScoped = false
+        val toDomains = mutableSetOf<String>()
         var pathScoped = false
         var pathPattern: String? = null
         val removeParams = mutableSetOf<String>()
@@ -135,6 +139,8 @@ object RuleModifierSupport {
         var generichide = false
         var generichideException = false
         var dnsrewrite: String? = null
+        var cname = false
+        var emptyResponse = false
 
         modifierPart.split(',')
             .map { it.trim() }
@@ -220,7 +226,7 @@ object RuleModifierSupport {
                             }
                         }
                     }
-                    "removeheader" -> {
+                    "removeheader", "remove-header", "remove_headers", "remove-request-header", "remove-request-headers" -> {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
                         val headerNames = value.split('|')
                             .map { it.trim().lowercase() }
@@ -250,6 +256,10 @@ object RuleModifierSupport {
                     "to" -> {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
                         toScoped = true
+                        value.split('|')
+                            .map { it.trim().lowercase() }
+                            .filter { it.isNotBlank() && !it.startsWith("~") }
+                            .forEach(toDomains::add)
                     }
                     "path" -> {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
@@ -271,7 +281,17 @@ object RuleModifierSupport {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
                         jsinject = value
                     }
-                    "script", "stylesheet", "css", "image", "media", "font", "xmlhttprequest", "xhr", "subdocument", "sub_frame", "document", "main_frame", "object", "object-subrequest", "ping", "websocket", "webrtc", "other", "popup" -> {
+                    "popup" -> {
+                        requestTypeScoped = true
+                        requestTypes += "popup"
+                        important = true
+                    }
+                    "document", "main_frame" -> {
+                        requestTypeScoped = true
+                        requestTypes += "document"
+                        important = true
+                    }
+                    "script", "stylesheet", "css", "image", "media", "font", "xmlhttprequest", "xhr", "subdocument", "sub_frame", "object", "object-subrequest", "ping", "websocket", "webrtc", "other" -> {
                         requestTypeScoped = true
                         requestTypes += normalizeRequestTypeModifier(name)
                     }
@@ -339,6 +359,9 @@ object RuleModifierSupport {
                         if (tags.isEmpty()) return ModifierInfo(invalid = true)
                         ctags.addAll(tags)
                     }
+                    "cname" -> cname = true
+                    "empty" -> emptyResponse = true
+                    "mp4" -> Unit
                 }
             }
 
@@ -366,6 +389,7 @@ object RuleModifierSupport {
             urlblock = urlblock,
             fromScoped = fromScoped,
             toScoped = toScoped,
+            toDomains = toDomains.toSet(),
             pathScoped = pathScoped,
             pathPattern = pathPattern,
             removeParams = removeParams.toSet(),
@@ -395,7 +419,9 @@ object RuleModifierSupport {
             generichide = generichide,
             generichideException = generichideException,
             dnsrewrite = dnsrewrite,
-            ctags = ctags.toSet()
+            ctags = ctags.toSet(),
+            cname = cname,
+            emptyResponse = emptyResponse
         )
     }
 

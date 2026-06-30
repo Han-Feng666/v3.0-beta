@@ -130,6 +130,7 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         toggle.text = when {
             runtime.isRunning -> "停止拦截"
             revokedByOtherVpn && enabled -> "等待恢复"
+            enabled -> "正在开启"
             else -> "开启拦截"
         }
     }
@@ -148,10 +149,12 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         val workStatus = when {
             vpnRunning -> "运行中"
             revokedByOtherVpn && adBlockEnabled -> "等待恢复"
+            adBlockEnabled -> "启动中"
             else -> "未开启"
         }
         val interceptMode = when {
             revokedByOtherVpn -> "VPN 被系统替换，正在自动恢复"
+            !vpnRunning && adBlockEnabled -> "正在建立 VPN"
             !vpnRunning && !adBlockEnabled -> "未启用"
             httpDecryptEnabled && certificateInstalled -> "MITM+DNS 拦截"
             httpDecryptEnabled -> "DNS 拦截 (待装证书)"

@@ -71,6 +71,19 @@ object WhitelistRepository {
         }.also { cachedDisallowedPackages = it }
     }
 
+    fun getDisallowedPackagesFast(context: Context): Set<String> {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val whitelist = prefs.getStringSet(KEY_PACKAGES, emptySet())?.toSet().orEmpty()
+        val coexist = prefs.getStringSet(KEY_COEXIST_PACKAGES, emptySet())?.toSet().orEmpty()
+        val config = getLocalProxyCoexistConfig(context)
+        return linkedSetOf<String>().apply {
+            addAll(whitelist)
+            addAll(coexist)
+            config.controllerPackageName?.trim()?.takeIf { it.isNotBlank() }?.let(::add)
+            config.detectedPackageName?.trim()?.takeIf { it.isNotBlank() }?.let(::add)
+        }
+    }
+
     fun toggle(context: Context, packageName: String, enabled: Boolean) {
         val set = getPackages(context).toMutableSet()
         if (enabled) set += packageName else set -= packageName
@@ -103,6 +116,20 @@ object WhitelistRepository {
             .map { it.packageName }
             .toSet()
         return getLocalProxyTargetPackages(context, installedPackages)
+    }
+
+    fun getLocalProxyTargetPackagesFast(context: Context): Set<String> {
+        val config = getLocalProxyCoexistConfig(context)
+        if (!config.enabled) return emptySet()
+        val manualSelected = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getStringSet(KEY_COEXIST_PACKAGES, emptySet())
+            ?.toSet()
+            .orEmpty()
+        val controllerPackages = setOfNotNull(
+            config.controllerPackageName?.trim()?.takeIf { it.isNotBlank() },
+            config.detectedPackageName?.trim()?.takeIf { it.isNotBlank() }
+        )
+        return manualSelected.filterTo(linkedSetOf()) { it !in controllerPackages }
     }
 
     fun getMitmFullCaptureTargetPackages(context: Context): Set<String> {

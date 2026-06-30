@@ -12,6 +12,25 @@ import com.HanFeng.data.WhitelistRepository
 import com.HanFeng.security.CertificateAuthorityManager
 
 object NetworkRuntimeSettingsStore {
+    fun loadFast(context: Context): NetworkFeatureFlags {
+        val httpDecryptEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(context)
+        val mitmCertificateInstalled = HttpsMitmRepository.isCertificateInstalled(context)
+        val localProxyConfig = WhitelistRepository.getLocalProxyCoexistConfig(context)
+        val shizukuConnectionOwnerReady = runCatching { ShizukuConnectionOwnerRepository.isServiceAlive() }.getOrDefault(false)
+        val shizukuAdControlReady = runCatching { ShizukuAdControlRepository.isServiceAlive() }.getOrDefault(false)
+        return NetworkFeatureFlags(
+            httpDecryptEnabled = httpDecryptEnabled,
+            mitmCertificateInstalled = mitmCertificateInstalled,
+            shizukuConnectionOwnerReady = shizukuConnectionOwnerReady,
+            shizukuAdControlReady = shizukuAdControlReady,
+            shizukuStrictAppAdBlockEnabled = shizukuAdControlReady &&
+                AppSettingsRepository.isShizukuStrictAppAdBlockEnabled(context),
+            localProxyConfig = localProxyConfig,
+            localProxyTargetPackages = WhitelistRepository.getLocalProxyTargetPackagesFast(context),
+            lightweightPassThroughMode = true
+        )
+    }
+
     fun load(context: Context): NetworkFeatureFlags {
         val httpDecryptEnabled = FeatureSettingsRepository.isHttpDecryptEnabled(context)
         val mitmCertificateInstalled = if (httpDecryptEnabled) {

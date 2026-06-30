@@ -1,8 +1,12 @@
 package com.HanFeng.ui
 
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.net.Uri
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -15,6 +19,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 open class BaseActivity : AppCompatActivity() {
+    companion object {
+        private val hideBackgroundHandler = Handler(Looper.getMainLooper())
+        private var startedActivityCount = 0
+    }
 
     protected data class ShizukuReadyState(
         val status: ShizukuRepository.Status,
@@ -29,12 +37,38 @@ open class BaseActivity : AppCompatActivity() {
     }
 
     protected fun applyHideBackgroundPolicy(enabled: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            runCatching {
+                val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                am.appTasks.forEach { task ->
+                    task.setExcludeFromRecents(enabled)
+                }
+                LogRepository.append(this, "applyHideBackgroundPolicy: enabled=$enabled tasks=${am.appTasks.size}")
+            }.onFailure {
+                LogRepository.append(this, "applyHideBackgroundPolicy excludeFromRecents failed: ${it.message}")
+            }
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (enabled) {
                 setRecentsScreenshotEnabled(false)
             } else {
                 setRecentsScreenshotEnabled(true)
             }
+        }
+    }
+
+    private fun removeTaskFromRecentsIfHidden() {
+        if (!AppSettingsRepository.isHideBackgroundEnabled(this)) return
+        applyHideBackgroundPolicy(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            runCatching {
+                finishAndRemoveTask()
+                LogRepository.append(this, "HideBackground removed task from recents")
+            }.onFailure {
+                LogRepository.append(this, "HideBackground finishAndRemoveTask failed: ${it.message ?: it.javaClass.simpleName}")
+            }
+        } else {
+            runCatching { finish() }
         }
     }
 
@@ -45,11 +79,28 @@ open class BaseActivity : AppCompatActivity() {
         applyHideBackgroundPolicy(hideBackgroundEnabled)
     }
 
+    override fun onStart() {
+        super.onStart()
+        startedActivityCount += 1
+        hideBackgroundHandler.removeCallbacksAndMessages(null)
+    }
+
     override fun onResume() {
         super.onResume()
         val hideBackgroundEnabled = AppSettingsRepository.isHideBackgroundEnabled(this)
         LogRepository.append(this, "BaseActivity onResume: hideBackgroundEnabled=$hideBackgroundEnabled")
         applyHideBackgroundPolicy(hideBackgroundEnabled)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
+        if (startedActivityCount > 0 || isChangingConfigurations) return
+        hideBackgroundHandler.postDelayed({
+            if (startedActivityCount == 0) {
+                removeTaskFromRecentsIfHidden()
+            }
+        }, 450L)
     }
 
     protected fun showShortToast(message: String) {

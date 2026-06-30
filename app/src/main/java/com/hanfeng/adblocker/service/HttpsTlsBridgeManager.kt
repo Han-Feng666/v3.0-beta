@@ -379,6 +379,7 @@ object HttpsTlsBridgeManager {
                 TlsMitmSessionManager.updateHttp2Observation(context, session.flowKey, Http2FrameLogger.Direction.SERVER_TO_CLIENT, http2State)
                 val directives = logHttp2Events(context, session, inspection.events, "server")
                 applyHttp2Directives(context, session, directives, output, resetPeer = "client")
+                flushPendingHttp2ClientRsts(context, session, output)
                 val parsedFrameBytes = inspection.parsedFrames.sumOf { it.rawBytes.size }
                 if (parsedFrameBytes != payload.size && directives.isNotEmpty()) {
                     logHttp2TailPreserved(context, session, "server", parsedFrameBytes, payload.size)
@@ -1097,6 +1098,9 @@ object HttpsTlsBridgeManager {
             }
             if (directive.sendRst && control.resetSentStreams.add(directive.streamId)) {
                 writeHttp2RstStream(output, directive.streamId)
+                if (resetPeer == "upstream") {
+                    control.pendingClientRstStreams.add(directive.streamId)
+                }
                 recordHttp2TerminalBlockedStat(context, session, control, directive.streamId, 50 * 1024)
                 logHttp2StreamReset(context, session, directive, resetPeer)
             }
@@ -1543,6 +1547,20 @@ object HttpsTlsBridgeManager {
         writeAndFlush(output, frame)
     }
 
+    private fun flushPendingHttp2ClientRsts(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        output: OutputStream
+    ) = synchronized(http2StateLock) {
+        val control = http2FlowControls[session.flowKey] ?: return@synchronized
+        if (control.pendingClientRstStreams.isEmpty()) return@synchronized
+        val streamsToFlush = control.pendingClientRstStreams.toList()
+        control.pendingClientRstStreams.clear()
+        for (streamId in streamsToFlush) {
+            writeHttp2RstStream(output, streamId)
+        }
+    }
+
     private fun flushHttp2Summary(
         context: Context,
         flowKey: String,
@@ -1650,6 +1668,7 @@ object HttpsTlsBridgeManager {
         val syntheticRespondedStreams: MutableSet<Int> = linkedSetOf(),
         val terminalBlockedStreams: MutableSet<Int> = linkedSetOf(),
         val terminalStatsRecorded: MutableSet<Int> = linkedSetOf(),
+        val pendingClientRstStreams: MutableSet<Int> = linkedSetOf(),
         var goAwaySeen: Boolean = false
     )
 

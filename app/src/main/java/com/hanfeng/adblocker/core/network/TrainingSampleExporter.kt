@@ -11,6 +11,7 @@ import java.io.FileWriter
 
 object TrainingSampleExporter {
     private const val TRAINING_FILE = "training_samples.jsonl"
+    private const val MAX_TRAINING_FILE_BYTES = 50L * 1024 * 1024
     private val gson = Gson()
     private val queryKeyRegex = Regex("[?&]([^=&?#]+)=?")
     private val jsonKeyRegex = Regex("\\\"([^\\\"]{1,48})\\\"\\s*:")
@@ -80,7 +81,9 @@ object TrainingSampleExporter {
 
     private fun append(context: Context, sample: TrainingSample) {
         runCatching {
-            FileWriter(trainingFile(context), true).use { writer ->
+            val file = trainingFile(context)
+            if (file.exists() && file.length() >= MAX_TRAINING_FILE_BYTES) return@runCatching
+            FileWriter(file, true).use { writer ->
                 writer.append(gson.toJson(sample)).append('\n')
             }
         }.onFailure {
