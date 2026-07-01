@@ -32,7 +32,7 @@ object BridgeLifecycleSupport {
     }
 
     fun <TSession> registerConnectedSession(
-        cache: LinkedHashMap<String, TSession>,
+        cache: MutableMap<String, TSession>,
         flowKey: String,
         session: TSession
     ) {

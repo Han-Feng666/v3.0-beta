@@ -26,7 +26,7 @@ object DnsRuntimeSupport {
     )
 
     fun readCachedDnsResponse(
-        cache: LinkedHashMap<String, CachedDnsResponse>,
+        cache: MutableMap<String, CachedDnsResponse>,
         question: DnsQuestion,
         queryPayload: ByteArray,
         now: Long,
@@ -41,7 +41,7 @@ object DnsRuntimeSupport {
     }
 
     fun readStaleCachedDnsResponse(
-        cache: LinkedHashMap<String, CachedDnsResponse>,
+        cache: MutableMap<String, CachedDnsResponse>,
         question: DnsQuestion,
         queryPayload: ByteArray,
         now: Long,
@@ -57,7 +57,7 @@ object DnsRuntimeSupport {
     }
 
     fun cacheDnsResponse(
-        cache: LinkedHashMap<String, CachedDnsResponse>,
+        cache: MutableMap<String, CachedDnsResponse>,
         question: DnsQuestion,
         response: ByteArray,
         now: Long,

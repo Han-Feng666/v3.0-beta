@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.PowerManager
 import android.util.Log
+import com.HanFeng.data.LogRepository
 import java.util.concurrent.TimeUnit
 
 /**
@@ -183,6 +184,7 @@ class ShizukuBackgroundRestrictor(private val context: Context) {
                 else -> STANDBY_FREQUENT
             }
         } catch (e: Exception) {
+            LogRepository.append(context, "ShizukuBackgroundRestrictor.getStandbyMode failed: ${e.message ?: e.javaClass.simpleName}")
             STANDBY_FREQUENT
         }
     }

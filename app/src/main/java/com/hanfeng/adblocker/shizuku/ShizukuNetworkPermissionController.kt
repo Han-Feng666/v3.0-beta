@@ -3,6 +3,7 @@ package com.hanfeng.adblocker.shizuku
 import android.content.Context
 import android.content.pm.PackageManager
 import android.util.Log
+import com.HanFeng.data.LogRepository
 import java.lang.reflect.Method
 import java.util.concurrent.TimeUnit
 
@@ -111,6 +112,7 @@ class ShizukuNetworkPermissionController(private val context: Context) {
                 result.output.contains("allow", ignoreCase = true) &&
                 !result.output.contains("ignore", ignoreCase = true)
         } catch (e: Exception) {
+            LogRepository.append(context, "ShizukuNetworkPermissionController.isNetworkEnabled failed: ${e.message ?: e.javaClass.simpleName}")
             true // 默认允许
         }
     }

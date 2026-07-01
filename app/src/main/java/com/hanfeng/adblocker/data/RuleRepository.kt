@@ -218,7 +218,7 @@ object RuleRepository {
         "b.nstool.ntes53.netease.com"
     )
     private val gson = Gson()
-    private val timeFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+    private val timeFormatter = ThreadLocal.withInitial { SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US) }
     private val cacheLock = Any()
     private val fileWriteLock = Any()
     private val domainValidationRegex = Regex("[a-z0-9._-]+")
@@ -703,21 +703,22 @@ object RuleRepository {
         synchronized(cacheLock) {
             val current = cachedSimpleDomainIndex
             if (current != null) {
-                cachedSimpleDomainIndex = current.copy(
+                val updated = current.copy(
                     blocked = current.blocked - domain,
                     userOwnedBlocked = current.userOwnedBlocked - domain,
                     exceptions = current.exceptions + domain
                 )
-                LogRepository.append(context, "addExceptionRule: $domain added to exceptions cache, size=${cachedSimpleDomainIndex?.exceptions?.size ?: 0}")
+                cachedSimpleDomainIndex = updated
+                cachedTrieIndex = DomainTrieIndex(
+                    blocked = updated.blocked,
+                    userOwnedBlocked = updated.userOwnedBlocked,
+                    importantBlocked = updated.importantBlocked,
+                    exceptions = updated.exceptions
+                )
+                LogRepository.append(context, "addExceptionRule: $domain added to exceptions cache, size=${updated.exceptions.size}")
             } else {
                 LogRepository.append(context, "addExceptionRule: cachedSimpleDomainIndex is null, cache correction skipped for $domain")
             }
-            cachedTrieIndex = DomainTrieIndex(
-                blocked = cachedSimpleDomainIndex!!.blocked,
-                userOwnedBlocked = cachedSimpleDomainIndex!!.userOwnedBlocked,
-                importantBlocked = cachedSimpleDomainIndex!!.importantBlocked,
-                exceptions = cachedSimpleDomainIndex!!.exceptions
-            )
             cachedRuleCount = null
             cachedWhitelistHits.clear()
         }
@@ -6012,15 +6013,16 @@ object RuleRepository {
         synchronized(cacheLock) {
             val index = cachedSimpleDomainIndex
             if (index != null && newDomains.isNotEmpty()) {
-                cachedSimpleDomainIndex = index.copy(
+                val updated = index.copy(
                     blocked = index.blocked + newDomains,
                     userOwnedBlocked = index.userOwnedBlocked + newDomains
                 )
+                cachedSimpleDomainIndex = updated
                 cachedTrieIndex = DomainTrieIndex(
-                    blocked = cachedSimpleDomainIndex!!.blocked,
-                    userOwnedBlocked = cachedSimpleDomainIndex!!.userOwnedBlocked,
-                    importantBlocked = cachedSimpleDomainIndex!!.importantBlocked,
-                    exceptions = cachedSimpleDomainIndex!!.exceptions
+                    blocked = updated.blocked,
+                    userOwnedBlocked = updated.userOwnedBlocked,
+                    importantBlocked = updated.importantBlocked,
+                    exceptions = updated.exceptions
                 )
             }
             cachedRuleCount = null
@@ -6147,7 +6149,7 @@ object RuleRepository {
 
     private fun formatTimestamp(timestamp: Long): String {
         if (timestamp <= 0L) return "未知"
-        return timeFormatter.format(Date(timestamp))
+        return timeFormatter.get().format(Date(timestamp))
     }
 
     private fun normalizeSampleAppName(appName: String?): String {
@@ -6348,8 +6350,9 @@ object RuleRepository {
         synchronized(cacheLock) {
             cachedCnameRuleIndex?.let { return it }
             val rules = getRules(context).filter { it.cname }
-            cachedCnameRuleIndex = rules.associateBy { it.domain }
-            return cachedCnameRuleIndex!!
+            val index = rules.associateBy { it.domain }
+            cachedCnameRuleIndex = index
+            return index
         }
     }
 

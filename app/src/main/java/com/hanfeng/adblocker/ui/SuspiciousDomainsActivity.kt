@@ -35,6 +35,7 @@ class SuspiciousDomainsActivity : BaseActivity() {
     private var addedDomains: Set<String> = emptySet()
     private var hasChanges = false
     private val selectedDomains = linkedSetOf<String>()
+    // SimpleDateFormat accessed only from main thread; no ThreadLocal needed
     private val dateFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
     private lateinit var adapter: SuspiciousDomainAdapter
 

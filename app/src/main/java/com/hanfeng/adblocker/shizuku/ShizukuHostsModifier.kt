@@ -176,6 +176,7 @@ class ShizukuHostsModifier {
             val result = runShellCommand("getent hosts $hostname")
             result.output.contains("127.0.0.1") || result.output.contains("::1")
         } catch (e: Exception) {
+            Log.e(TAG, "ShizukuHostsModifier.verifyHostsBlock failed: ${e.message ?: e.javaClass.simpleName}", e)
             false
         }
     }

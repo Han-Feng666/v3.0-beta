@@ -111,27 +111,27 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var startInProgress = false
     @Volatile private var foregroundShown = false
     @Volatile private var activeTunGeneration = 0L
-    private val appNameCache = ConcurrentHashMap<String, String>(256)
-    private val domainAppCache = ConcurrentHashMap<String, String>(256)
-    private val sourcePortAppCache = ConcurrentHashMap<String, String>(256)
-    private val ownerUidCache = ConcurrentHashMap<String, Int>(512)
-    private val ownerUidFailureCache = ConcurrentHashMap<String, Long>(512)
-    private val appLabelCache = ConcurrentHashMap<Int, String>(128)
-    private val vendorHintCache = ConcurrentHashMap<String, String>(512)
-    private val dnsResponseCache = LinkedHashMap<String, DnsRuntimeSupport.CachedDnsResponse>(4096, 0.75f, true)
-    private val decisionLogCache = LinkedHashMap<String, Long>(256, 0.75f, true)
-    private val adIpTargetCache = LinkedHashMap<String, AdIpTarget>(1024, 0.75f, true)
-    private val httpDecryptIpCache = LinkedHashMap<String, HttpDecryptTarget>(512, 0.75f, true)
-    private val httpsDecryptIpCache = LinkedHashMap<String, HttpsDecryptTarget>(512, 0.75f, true)
-    private val quicRouteCache = LinkedHashMap<String, QuicRouteTarget>(1024, 0.75f, true)
-    private val httpsProxyFlowCache = LinkedHashMap<String, HttpsProxyFlow>(256, 0.75f, true)
-    private val httpsBridgeSocketCache = LinkedHashMap<String, HttpsBridgeSocketSession>(128, 0.75f, true)
-    private val localProxyTcpFlowCache = LinkedHashMap<String, LocalProxyTcpFlow>(256, 0.75f, true)
-    private val localProxyBridgeSocketCache = LinkedHashMap<String, LocalProxyBridgeSocketSession>(128, 0.75f, true)
-    private val passthroughTcpFlowCache = LinkedHashMap<String, PassthroughTcpFlow>(512, 0.75f, true)
-    private val passthroughTcpSocketCache = LinkedHashMap<String, PassthroughTcpSocketSession>(256, 0.75f, true)
-    private val passthroughUdpSessionCache = LinkedHashMap<String, PassthroughUdpSession>(256, 0.75f, true)
-    private val localProxyTargetAppCache = ConcurrentHashMap<String, Boolean>(512)
+    private val appNameCache = ConcurrentHashMap<String, String>(VpnConstants.APP_NAME_CACHE_MAX_SIZE)
+    private val domainAppCache = ConcurrentHashMap<String, String>(VpnConstants.DOMAIN_APP_CACHE_MAX_SIZE)
+    private val sourcePortAppCache = ConcurrentHashMap<String, String>(VpnConstants.SOURCE_PORT_APP_CACHE_MAX_SIZE)
+    private val ownerUidCache = ConcurrentHashMap<String, Int>(VpnConstants.OWNER_UID_CACHE_MAX_SIZE)
+    private val ownerUidFailureCache = ConcurrentHashMap<String, Long>(VpnConstants.OWNER_UID_FAILURE_CACHE_MAX_SIZE)
+    private val appLabelCache = ConcurrentHashMap<Int, String>(VpnConstants.APP_LABEL_CACHE_MAX_SIZE)
+    private val vendorHintCache = ConcurrentHashMap<String, String>(VpnConstants.VENDOR_HINT_CACHE_MAX_SIZE)
+    private val dnsResponseCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, DnsRuntimeSupport.CachedDnsResponse>(VpnConstants.DNS_RESPONSE_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, DnsRuntimeSupport.CachedDnsResponse>
+    private val decisionLogCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, Long>(VpnConstants.DECISION_LOG_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, Long>
+    private val adIpTargetCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, AdIpTarget>(VpnConstants.AD_IP_TARGET_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, AdIpTarget>
+    private val httpDecryptIpCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, HttpDecryptTarget>(VpnConstants.HTTP_DECRYPT_IP_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, HttpDecryptTarget>
+    private val httpsDecryptIpCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, HttpsDecryptTarget>(VpnConstants.HTTPS_DECRYPT_IP_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, HttpsDecryptTarget>
+    private val quicRouteCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, QuicRouteTarget>(VpnConstants.QUIC_ROUTE_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, QuicRouteTarget>
+    private val httpsProxyFlowCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, HttpsProxyFlow>(VpnConstants.HTTPS_PROXY_FLOW_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, HttpsProxyFlow>
+    private val httpsBridgeSocketCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, HttpsBridgeSocketSession>(VpnConstants.HTTPS_BRIDGE_SOCKET_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, HttpsBridgeSocketSession>
+    private val localProxyTcpFlowCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, LocalProxyTcpFlow>(VpnConstants.LOCAL_PROXY_TCP_FLOW_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, LocalProxyTcpFlow>
+    private val localProxyBridgeSocketCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, LocalProxyBridgeSocketSession>(VpnConstants.LOCAL_PROXY_BRIDGE_SOCKET_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, LocalProxyBridgeSocketSession>
+    private val passthroughTcpFlowCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, PassthroughTcpFlow>(VpnConstants.PASSTHROUGH_TCP_FLOW_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, PassthroughTcpFlow>
+    private val passthroughTcpSocketCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, PassthroughTcpSocketSession>(VpnConstants.PASSTHROUGH_TCP_SOCKET_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, PassthroughTcpSocketSession>
+    private val passthroughUdpSessionCache = java.util.Collections.synchronizedMap(LinkedHashMap<String, PassthroughUdpSession>(VpnConstants.PASSTHROUGH_UDP_SESSION_CACHE_MAX_SIZE, 0.75f, true)) as MutableMap<String, PassthroughUdpSession>
+    private val localProxyTargetAppCache = ConcurrentHashMap<String, Boolean>(VpnConstants.LOCAL_PROXY_TARGET_APP_CACHE_MAX_SIZE)
     @Volatile private var tunDebugWindowStartedAt = 0L
     @Volatile private var tunDebugPacketsInWindow = 0
     @Volatile private var tunDebugBytesInWindow = 0L
@@ -147,11 +147,11 @@ class AdBlockVpnService : VpnService() {
     // DNS socket 连接池 - 复用 socket 避免每次创建开销
     private val dnsSocketPool = ConcurrentLinkedQueue<Pair<InetAddress, DatagramSocket>>()
     private val dnsSocketPoolLock = Any()
-    private val localDnsV4 = "10.99.0.2"
-    private val localDnsV6 = "fd66:66::2"
-    private val staleCacheGraceMillis = 60_000L
-    private val dnsServerCacheTtlMillis = 15_000L
-    private val routeCachePruneIntervalMillis = 60_000L
+    private val localDnsV4 = VpnConstants.LOCAL_DNS_V4
+    private val localDnsV6 = VpnConstants.LOCAL_DNS_V6
+    private val staleCacheGraceMillis = VpnConstants.STALE_CACHE_GRACE_MILLIS
+    private val dnsServerCacheTtlMillis = VpnConstants.DNS_SERVER_CACHE_TTL_MILLIS
+    private val routeCachePruneIntervalMillis = VpnConstants.ROUTE_CACHE_PRUNE_INTERVAL_MILLIS
     private var lastHttpRouteReloadAt = 0L
     @Volatile private var lastHttpDecryptPruneAt = 0L
     @Volatile private var lastHttpsDecryptPruneAt = 0L
@@ -161,8 +161,8 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var tunOutputStream: FileOutputStream? = null
 
     // DNS Async Worker — 将阻塞的 DNS 上游查询从主线程剥离
-    private val dnsTaskIn = LinkedBlockingQueue<DnsAsyncTask>(512)
-    private val dnsResultOut = LinkedBlockingQueue<DnsAsyncResult>(512)
+    private val dnsTaskIn = LinkedBlockingQueue<DnsAsyncTask>(VpnConstants.DNS_ASYNC_TASK_QUEUE_CAPACITY)
+    private val dnsResultOut = LinkedBlockingQueue<DnsAsyncResult>(VpnConstants.DNS_ASYNC_RESULT_QUEUE_CAPACITY)
     @Volatile private var dnsWorkerActive = false
     private var dnsWorkerThread: Thread? = null
 
@@ -1029,6 +1029,7 @@ class AdBlockVpnService : VpnService() {
             }
     }
 
+    @Suppress("DEPRECATION")
     private fun selectEligibleUnderlyingNetworks(connectivityManager: ConnectivityManager): List<Network> {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return listOfNotNull(connectivityManager.activeNetwork)
@@ -1064,6 +1065,7 @@ class AdBlockVpnService : VpnService() {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun describeUnderlyingNetworks(): String {
         val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return "none"
         val networks = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -1207,7 +1209,7 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
-    private fun runPacketLoop(tunGeneration: Long) {
+    private suspend fun runPacketLoop(tunGeneration: Long) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
         dnsWorkerActive = true
         dnsTaskIn.clear()
@@ -1232,14 +1234,14 @@ class AdBlockVpnService : VpnService() {
                         if (idleMs >= 3000L && packetWakelock?.isHeld == true) {
                             releasePacketWakelock()
                         }
-                        Thread.sleep(20L)
+                        delay(20L)
                         continue
                     }
                     idleMs = 0L
                     lastPacketTimestamp = now
                     acquirePacketWakelock(powerManager, wakelockTag, tunGeneration)
                     if (!recordTunPacketForDiagnostics(buffer, length, tunGeneration)) {
-                        Thread.sleep(TUN_STORM_BACKOFF_MILLIS)
+                        delay(TUN_STORM_BACKOFF_MILLIS)
                         continue
                     }
                     runCatching {
@@ -3465,8 +3467,8 @@ class AdBlockVpnService : VpnService() {
     }
 
     private data class BridgeReaderConfig<TSession, TFlow>(
-        val flowCache: LinkedHashMap<String, TFlow>,
-        val sessionCache: LinkedHashMap<String, TSession>,
+        val flowCache: MutableMap<String, TFlow>,
+        val sessionCache: MutableMap<String, TSession>,
         val onPayload: (ByteArray) -> Unit,
         val onFailure: (Throwable) -> Unit,
         val onResetNotSent: () -> Unit,
@@ -3965,7 +3967,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> handleSyntheticSynOpen(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         request: com.HanFeng.model.PacketInfo,
         sequenceNumber: Long,
@@ -3991,7 +3993,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> handleSyntheticAckEstablish(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         now: Long,
         updateFlow: (TFlow) -> TFlow
@@ -4003,8 +4005,8 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow, TSession> handleSyntheticClientFin(
-        flowCache: LinkedHashMap<String, TFlow>,
-        sessionCache: LinkedHashMap<String, TSession>,
+        flowCache: MutableMap<String, TFlow>,
+        sessionCache: MutableMap<String, TSession>,
         flowKey: String,
         request: com.HanFeng.model.PacketInfo,
         clientSequenceNumber: Long,
@@ -4694,7 +4696,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TSession, TConnected> ensureBridgeSocketConnected(
-        sessionCache: LinkedHashMap<String, TSession>,
+        sessionCache: MutableMap<String, TSession>,
         flowKey: String,
         bridgeHost: String?,
         bridgePort: Int?,
@@ -4719,7 +4721,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TSession> forwardPayloadToBridge(
-        sessionCache: LinkedHashMap<String, TSession>,
+        sessionCache: MutableMap<String, TSession>,
         flowKey: String,
         payload: ByteArray,
         writePayload: (TSession, ByteArray) -> Unit,
@@ -4828,8 +4830,8 @@ class AdBlockVpnService : VpnService() {
     private fun <TSession, TFlow> runBridgeReader(
         session: TSession,
         input: InputStream,
-        flowCache: LinkedHashMap<String, TFlow>,
-        sessionCache: LinkedHashMap<String, TSession>,
+        flowCache: MutableMap<String, TFlow>,
+        sessionCache: MutableMap<String, TSession>,
         flowKey: String,
         onPayload: (ByteArray) -> Unit,
         onFailure: (Throwable) -> Unit,
@@ -4884,7 +4886,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> handleSyntheticSynOpenAndReturnTrue(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         request: com.HanFeng.model.PacketInfo,
         sequenceNumber: Long,
@@ -4910,7 +4912,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> handleSyntheticAckEstablishAndReturnTrue(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         now: Long,
         ensureBridge: () -> Unit,
@@ -4930,8 +4932,8 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow, TSession> handleSyntheticClientFinAndReturnTrue(
-        flowCache: LinkedHashMap<String, TFlow>,
-        sessionCache: LinkedHashMap<String, TSession>,
+        flowCache: MutableMap<String, TFlow>,
+        sessionCache: MutableMap<String, TSession>,
         flowKey: String,
         request: com.HanFeng.model.PacketInfo,
         clientSequenceNumber: Long,
@@ -4961,7 +4963,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> handleSyntheticClientPayloadResult(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         current: TFlow,
         request: com.HanFeng.model.PacketInfo,
@@ -5010,7 +5012,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> handleSyntheticServerAckResult(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         current: TFlow,
         sequenceNumber: Long,
@@ -5676,7 +5678,7 @@ class AdBlockVpnService : VpnService() {
     private fun buildSyntheticAction(action: () -> Boolean): () -> Boolean = action
 
     private fun <TFlow> buildSynOpenAction(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         request: com.HanFeng.model.PacketInfo,
         sequenceNumber: Long,
@@ -5700,7 +5702,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> buildAckEstablishAction(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         now: Long,
         ensureBridge: () -> Unit,
@@ -5718,8 +5720,8 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow, TSession : ClosableBridgeSession> buildClientFinAction(
-        flowCache: LinkedHashMap<String, TFlow>,
-        sessionCache: LinkedHashMap<String, TSession>,
+        flowCache: MutableMap<String, TFlow>,
+        sessionCache: MutableMap<String, TSession>,
         flowKey: String,
         request: com.HanFeng.model.PacketInfo,
         clientSequenceNumber: Long,
@@ -5748,7 +5750,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> buildClientPayloadAction(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         current: TFlow,
         request: com.HanFeng.model.PacketInfo,
@@ -5798,7 +5800,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> buildServerAckAction(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         current: TFlow,
         sequenceNumber: Long,
@@ -5923,8 +5925,8 @@ class AdBlockVpnService : VpnService() {
     }
 
     private data class SyntheticHandshakeAssembly<TFlow, TSession : ClosableBridgeSession>(
-        val flowCache: LinkedHashMap<String, TFlow>,
-        val sessionCache: LinkedHashMap<String, TSession>,
+        val flowCache: MutableMap<String, TFlow>,
+        val sessionCache: MutableMap<String, TSession>,
         val flowKey: String,
         val current: TFlow,
         val request: com.HanFeng.model.PacketInfo,
@@ -5951,8 +5953,8 @@ class AdBlockVpnService : VpnService() {
     )
 
     private data class SyntheticHandshakeAssemblyConfig<TFlow, TSession : ClosableBridgeSession>(
-        val flowCache: LinkedHashMap<String, TFlow>,
-        val sessionCache: LinkedHashMap<String, TSession>,
+        val flowCache: MutableMap<String, TFlow>,
+        val sessionCache: MutableMap<String, TSession>,
         val selectors: SyntheticFlowSelectors<TFlow>,
         val ensureBridge: () -> Unit,
         val isBridgeConnected: () -> Boolean,
@@ -5972,8 +5974,8 @@ class AdBlockVpnService : VpnService() {
     )
 
     private fun <TFlow, TSession : ClosableBridgeSession> buildSyntheticHandshakeAssemblyBase(
-        flowCache: LinkedHashMap<String, TFlow>,
-        sessionCache: LinkedHashMap<String, TSession>,
+        flowCache: MutableMap<String, TFlow>,
+        sessionCache: MutableMap<String, TSession>,
         flowKey: String,
         current: TFlow,
         request: com.HanFeng.model.PacketInfo,
@@ -6373,7 +6375,7 @@ class AdBlockVpnService : VpnService() {
     )
 
     private data class SyntheticClientPayloadContext<TFlow>(
-        val flowCache: LinkedHashMap<String, TFlow>,
+        val flowCache: MutableMap<String, TFlow>,
         val flowKey: String,
         val current: TFlow,
         val request: com.HanFeng.model.PacketInfo,
@@ -6393,7 +6395,7 @@ class AdBlockVpnService : VpnService() {
     )
 
     private data class SyntheticServerAckContext<TFlow>(
-        val flowCache: LinkedHashMap<String, TFlow>,
+        val flowCache: MutableMap<String, TFlow>,
         val flowKey: String,
         val current: TFlow,
         val sequenceNumber: Long,
@@ -6408,7 +6410,7 @@ class AdBlockVpnService : VpnService() {
     )
 
     private fun <TFlow> handleSyntheticClientPayload(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         current: TFlow,
         request: com.HanFeng.model.PacketInfo,
@@ -6474,7 +6476,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> handleSyntheticServerAck(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         current: TFlow,
         sequenceNumber: Long,
@@ -6665,7 +6667,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> resolveBridgeFlowSequenceContext(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         serverInitialSequenceOf: (TFlow) -> Long?,
         serverNextSequenceOf: (TFlow) -> Long?,
@@ -6688,7 +6690,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> resolveFlowFromCache(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String
     ): TFlow? {
         return synchronized(flowCache) {
@@ -6720,7 +6722,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> updateBridgeFinFlow(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         sequenceState: BridgeSequenceState,
         updateFlow: (TFlow, BridgeTerminalStateSupport.BridgeFinTransition) -> TFlow
@@ -6807,7 +6809,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> updateBridgePayloadFlow(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         flow: TFlow,
         payload: ByteArray,
@@ -6843,7 +6845,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> emitBridgePayloadCommon(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         request: com.HanFeng.model.PacketInfo,
         payload: ByteArray,
@@ -6876,7 +6878,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> emitBridgeFinCommon(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         request: com.HanFeng.model.PacketInfo,
         selectors: BridgeFlowSelectors<TFlow>,
@@ -6900,8 +6902,8 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow, TSession : Any> closeBridgeFlowCommon(
-        flowCache: LinkedHashMap<String, TFlow>,
-        sessionCache: LinkedHashMap<String, TSession>,
+        flowCache: MutableMap<String, TFlow>,
+        sessionCache: MutableMap<String, TSession>,
         flowKey: String,
         message: String,
         logKey: String
@@ -6920,7 +6922,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun <TFlow> emitBridgeResetCommon(
-        flowCache: LinkedHashMap<String, TFlow>,
+        flowCache: MutableMap<String, TFlow>,
         flowKey: String,
         request: com.HanFeng.model.PacketInfo,
         message: String,

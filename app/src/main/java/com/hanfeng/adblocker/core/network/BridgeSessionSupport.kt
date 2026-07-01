@@ -4,7 +4,7 @@ import java.util.LinkedHashMap
 
 object BridgeSessionSupport {
     fun <T> removeAndClose(
-        cache: LinkedHashMap<String, T>,
+        cache: MutableMap<String, T>,
         key: String,
         close: (T) -> Unit
     ) {

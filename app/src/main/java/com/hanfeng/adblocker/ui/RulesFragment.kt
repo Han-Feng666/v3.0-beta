@@ -80,6 +80,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     private var cachedRulesSignature: Int = 0
     private var cachedGroupedRules = linkedMapOf<String, List<BlockRule>>()
     private val selectedRulesById = linkedMapOf<String, BlockRule>()
+    // SimpleDateFormat accessed only from main thread; no ThreadLocal needed
     private val remoteTimeFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
     private data class ProgressDialogHandle(

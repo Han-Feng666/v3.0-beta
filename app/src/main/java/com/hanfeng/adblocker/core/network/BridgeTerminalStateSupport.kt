@@ -25,8 +25,8 @@ object BridgeTerminalStateSupport {
     }
 
     fun <TFlow, TSession> closeFlow(
-        flowCache: LinkedHashMap<String, TFlow>,
-        sessionCache: LinkedHashMap<String, TSession>,
+        flowCache: MutableMap<String, TFlow>,
+        sessionCache: MutableMap<String, TSession>,
         flowKey: String,
         closeSession: (TSession) -> Unit
     ) {

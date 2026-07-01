@@ -2,7 +2,7 @@ package com.HanFeng.core.network
 
 object FlowCacheSupport {
     fun <T> putPruned(
-        cache: LinkedHashMap<String, T>,
+        cache: MutableMap<String, T>,
         key: String,
         value: T,
         maxSize: Int
@@ -14,7 +14,7 @@ object FlowCacheSupport {
     }
 
     fun <T> updateIfPresent(
-        cache: LinkedHashMap<String, T>,
+        cache: MutableMap<String, T>,
         key: String,
         update: (T) -> T
     ): T? {
@@ -26,20 +26,20 @@ object FlowCacheSupport {
         }
     }
 
-    fun <T> remove(cache: LinkedHashMap<String, T>, key: String): T? {
+    fun <T> remove(cache: MutableMap<String, T>, key: String): T? {
         synchronized(cache) {
             return cache.remove(key)
         }
     }
 
-    fun <T> clear(cache: LinkedHashMap<String, T>, onRemove: (T) -> Unit = {}) {
+    fun <T> clear(cache: MutableMap<String, T>, onRemove: (T) -> Unit = {}) {
         synchronized(cache) {
             cache.values.forEach(onRemove)
             cache.clear()
         }
     }
 
-    private fun <T> pruneLocked(cache: LinkedHashMap<String, T>, maxSize: Int) {
+    private fun <T> pruneLocked(cache: MutableMap<String, T>, maxSize: Int) {
         while (cache.size > maxSize) {
             val firstKey = cache.entries.firstOrNull()?.key ?: break
             cache.remove(firstKey)

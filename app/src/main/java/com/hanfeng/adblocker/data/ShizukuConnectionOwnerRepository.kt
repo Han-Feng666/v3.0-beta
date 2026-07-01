@@ -5,10 +5,13 @@ import android.content.Context
 import android.content.ServiceConnection
 import android.os.Build
 import android.os.IBinder
-import android.os.SystemClock
 import com.HanFeng.shizuku.ConnectionOwnerUserService
 import com.HanFeng.shizuku.IConnectionOwnerService
 import rikka.shizuku.Shizuku
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 
 object ShizukuConnectionOwnerRepository {
     private const val BIND_RETRY_INTERVAL_MILLIS = 1500L
@@ -120,15 +123,23 @@ object ShizukuConnectionOwnerRepository {
     private fun getService(context: Context): IConnectionOwnerService? {
         liveService()?.let { return it }
         ensureBound(context)
-        val deadline = SystemClock.elapsedRealtime() + BIND_WAIT_TIMEOUT_MILLIS
-        while (binding && SystemClock.elapsedRealtime() < deadline) {
-            liveService()?.let { return it }
-            SystemClock.sleep(BIND_WAIT_STEP_MILLIS)
+        val result = runBlocking {
+            try {
+                withTimeout(BIND_WAIT_TIMEOUT_MILLIS) {
+                    while (binding) {
+                        liveService()?.let { return@withTimeout it }
+                        delay(BIND_WAIT_STEP_MILLIS)
+                    }
+                    null
+                }
+            } catch (_: TimeoutCancellationException) {
+                null
+            }
         }
-        if (binding) {
+        if (result == null && binding) {
             maybeLog(context, "Wait Shizuku connection owner service timeout after ${BIND_WAIT_TIMEOUT_MILLIS}ms")
         }
-        return liveService()
+        return result ?: liveService()
     }
 
     private fun hasLiveService(): Boolean = liveService() != null

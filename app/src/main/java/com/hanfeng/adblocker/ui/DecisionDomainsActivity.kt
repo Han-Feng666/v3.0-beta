@@ -31,6 +31,7 @@ class DecisionDomainsActivity : BaseActivity() {
     private lateinit var adapter: DecisionDomainAdapter
     private var allEntries: List<LogRepository.DomainDecisionEntry> = emptyList()
     private var filter: LogRepository.DomainDecisionType? = null
+    // SimpleDateFormat accessed only from main thread; no ThreadLocal needed
     private val dateFormat = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
 
     override fun onCreate(savedInstanceState: Bundle?) {

@@ -48,7 +48,7 @@ object StatsRepository {
     private const val KEY_BLOCK_SOURCE = "block_source"
     private const val MAX_RANKING_ENTRIES = 300
     private val gson = Gson()
-    private val dayFormatter = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+    private val dayFormatter = ThreadLocal.withInitial { SimpleDateFormat("yyyy-MM-dd", Locale.US) }
     private val updatesInternal = MutableLiveData(0L)
 
     val updates: LiveData<Long> = updatesInternal
@@ -92,7 +92,7 @@ object StatsRepository {
         synchronized(this) {
             if (initialized) return@synchronized
             val prefs = prefs(context)
-            val today = dayFormatter.format(Date())
+            val today = dayFormatter.get().format(Date())
             val savedDate = prefs.getString(KEY_TODAY_DATE, null)
             if (savedDate != today) {
                 writeTodayReset(prefs, today)
@@ -120,7 +120,7 @@ object StatsRepository {
 
     private fun ensureDayReset(context: Context) {
         val prefs = prefs(context)
-        val today = dayFormatter.format(Date())
+        val today = dayFormatter.get().format(Date())
         if (prefs.getString(KEY_TODAY_DATE, null) != today) {
             writeTodayReset(prefs, today)
             // Reset in-memory day counter

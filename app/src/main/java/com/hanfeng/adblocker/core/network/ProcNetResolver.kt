@@ -27,6 +27,9 @@ object ProcNetResolver {
         val source: String
     )
 
+    private const val MAX_CACHE_SIZE = 2048
+    private const val EVICTION_RATIO = 0.25
+
     private val cache = ConcurrentHashMap<String, Result>()
 
     fun resolve(packet: PacketInfo, now: Long = System.currentTimeMillis()): Result? {
@@ -59,7 +62,11 @@ object ProcNetResolver {
             source = match.source,
             expiresAt = now + ttl
         )
-        if (cache.size > 2048) cache.clear()
+        if (cache.size > MAX_CACHE_SIZE) {
+            val numToEvict = (MAX_CACHE_SIZE * EVICTION_RATIO).toInt()
+            val toRemove = cache.keys.asSequence().take(numToEvict).toList()
+            toRemove.forEach { cache.remove(it) }
+        }
         cache[key] = result
         return result
     }

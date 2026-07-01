@@ -5,10 +5,13 @@ import android.content.Context
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
-import android.os.SystemClock
 import com.HanFeng.shizuku.IAdControlService
 import com.HanFeng.shizuku.ShizukuAdControlUserService
 import rikka.shizuku.Shizuku
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 
 object ShizukuAdControlRepository {
     private const val BIND_RETRY_INTERVAL_MILLIS = 1500L
@@ -89,12 +92,20 @@ object ShizukuAdControlRepository {
     fun ensureBoundAndWait(context: Context): Boolean {
         if (hasLiveService()) return true
         ensureBound(context)
-        val deadline = SystemClock.elapsedRealtime() + BIND_WAIT_TIMEOUT_MILLIS
-        while (binding && SystemClock.elapsedRealtime() < deadline) {
-            if (hasLiveService()) return true
-            SystemClock.sleep(BIND_WAIT_STEP_MILLIS)
+        val result = runBlocking {
+            try {
+                withTimeout(BIND_WAIT_TIMEOUT_MILLIS) {
+                    while (binding) {
+                        if (hasLiveService()) return@withTimeout true
+                        delay(BIND_WAIT_STEP_MILLIS)
+                    }
+                    false
+                }
+            } catch (_: TimeoutCancellationException) {
+                false
+            }
         }
-        return hasLiveService() || checkServiceHealth(context)
+        return result || checkServiceHealth(context)
     }
 
     fun invalidateService() {
@@ -337,15 +348,23 @@ object ShizukuAdControlRepository {
     private fun getService(context: Context): IAdControlService? {
         liveService()?.let { return it }
         ensureBound(context)
-        val deadline = SystemClock.elapsedRealtime() + BIND_WAIT_TIMEOUT_MILLIS
-        while (binding && SystemClock.elapsedRealtime() < deadline) {
-            liveService()?.let { return it }
-            SystemClock.sleep(BIND_WAIT_STEP_MILLIS)
+        val result = runBlocking {
+            try {
+                withTimeout(BIND_WAIT_TIMEOUT_MILLIS) {
+                    while (binding) {
+                        liveService()?.let { return@withTimeout it }
+                        delay(BIND_WAIT_STEP_MILLIS)
+                    }
+                    null
+                }
+            } catch (_: TimeoutCancellationException) {
+                null
+            }
         }
-        if (binding) {
+        if (result == null && binding) {
             maybeLog(context, "Wait Shizuku ad control service timeout after ${BIND_WAIT_TIMEOUT_MILLIS}ms")
         }
-        return liveService()
+        return result ?: liveService()
     }
 
     private fun hasLiveService(): Boolean = liveService() != null

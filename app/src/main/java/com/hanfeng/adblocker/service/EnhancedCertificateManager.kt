@@ -2,6 +2,7 @@ package com.hanfeng.adblocker.service
 
 import android.content.Context
 import android.util.Log
+import com.HanFeng.data.LogRepository
 import java.io.File
 import java.io.FileInputStream
 import java.security.KeyStore
@@ -72,6 +73,7 @@ class EnhancedCertificateManager(private val context: Context) {
             val systemCertFile = File("/system/etc/security/cacerts/", getCertificateHash(certFile) + ".0")
             systemCertFile.exists()
         } catch (e: Exception) {
+            LogRepository.append(context, "EnhancedCertificateManager.checkSystemTrust failed: ${e.message ?: e.javaClass.simpleName}")
             false
         }
     }
@@ -94,6 +96,7 @@ class EnhancedCertificateManager(private val context: Context) {
             val subjectKeyIdentifier = cert.subjectX500Principal.name.hashCode().toString(16).padStart(8, '0')
             return subjectKeyIdentifier.take(8)
         } catch (e: Exception) {
+            LogRepository.append(context, "EnhancedCertificateManager.getCertificateHash failed: ${e.message ?: e.javaClass.simpleName}")
             "7a4b2c1d"
         }
     }
@@ -128,6 +131,7 @@ class EnhancedCertificateManager(private val context: Context) {
             val method = clazz.getMethod("isPreV11")
             !(method.invoke(null) as Boolean)
         } catch (e: Exception) {
+            LogRepository.append(context, "EnhancedCertificateManager.canInstallViaShizuku failed: ${e.message ?: e.javaClass.simpleName}")
             false
         }
     }

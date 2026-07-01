@@ -4,7 +4,7 @@ import java.util.LinkedHashMap
 
 object DecisionLogSupport {
     fun shouldLogLocked(
-        cache: LinkedHashMap<String, Long>,
+        cache: MutableMap<String, Long>,
         key: String,
         now: Long,
         minIntervalMillis: Long,

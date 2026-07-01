@@ -25,8 +25,8 @@ object BridgeReaderSupport {
     }
 
     fun <TFlow, TSession> completeBridgeReader(
-        flowCache: LinkedHashMap<String, TFlow>,
-        sessionCache: LinkedHashMap<String, TSession>,
+        flowCache: MutableMap<String, TFlow>,
+        sessionCache: MutableMap<String, TSession>,
         flowKey: String,
         now: Long,
         closeSession: (TSession) -> Unit,

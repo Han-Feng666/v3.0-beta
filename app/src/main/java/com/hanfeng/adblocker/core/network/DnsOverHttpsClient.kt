@@ -48,6 +48,7 @@ object DnsOverHttpsClient {
         }.getOrNull()
     }
 
+    @Suppress("DEPRECATION")
     private fun selectNonVpnNetwork(context: Context): android.net.Network? {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return null
         val nonVpn = cm.allNetworks.firstOrNull { network ->
