@@ -254,7 +254,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         }
         binding.btnPasteRule.setOnClickListener { pasteRuleInput() }
         binding.btnClearInput.setOnClickListener { clearRuleInput() }
-        binding.btnRuleActions.setOnClickListener { launchImportRulePicker() }
+        binding.btnRuleActions.setOnClickListener { showRuleActionPanel() }
         binding.btnDecisionDomains.setOnClickListener { openDecisionDomainsPage() }
         binding.btnJoinGroup.setOnClickListener { openRemoteRuleSourcesPage() }
         binding.btnSuspiciousDomains.setOnClickListener { openSuspiciousDomainsPage() }
@@ -1171,19 +1171,23 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         .map { it.id.trim() }
                         .filter { it.isNotEmpty() }
                         .toSet()
-                    val removedCount = RuleRepository.removeRules(actionContext, selectedIdsSnapshot, snapshot)
-                    LogRepository.append(actionContext, "Requested remove=${snapshot.size} actualRemoved=$removedCount")
-                    if (removedCount <= 0) {
-                        Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        val removedCount = withContext(Dispatchers.IO) {
+                            RuleRepository.removeRules(actionContext.applicationContext, selectedIdsSnapshot, snapshot)
+                        }
+                        LogRepository.append(actionContext, "Requested remove=${snapshot.size} actualRemoved=$removedCount")
+                        if (removedCount <= 0) {
+                            Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
+                            invalidateRuleListCache()
+                            refreshListSoon()
+                            return@launch
+                        }
+                        Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
                         invalidateRuleListCache()
+                        exitSelection()
                         refreshListSoon()
-                        return@setPositiveButton
+                        reloadVpnIfRunning(true)
                     }
-                    Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
-                    invalidateRuleListCache()
-                    exitSelection()
-                    refreshListSoon()
-                    reloadVpnIfRunning(true)
                 }
                 .setNegativeButton("取消", null)
                 .showSafely(dialogContext, "Show rule delete confirmation dialog failed")
@@ -1199,7 +1203,22 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun confirmDeleteAllRules() {
         val ctx = context ?: return
-        val allRules = RuleRepository.getRules(ctx)
+        val progress = showProgressDialog("删除所有规则", "正在读取规则列表...")
+        viewLifecycleOwner.lifecycleScope.launch {
+            val allRules = runCatching {
+                withContext(Dispatchers.IO) { RuleRepository.getRules(ctx.applicationContext) }
+            }.onFailure { error ->
+                dismissProgressDialog(progress)
+                LogRepository.append(ctx, "Load rules for delete all failed: ${error.message ?: error.javaClass.simpleName}")
+                if (isAdded) Toast.makeText(ctx, "读取规则失败：${error.message ?: error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+            }.getOrNull() ?: return@launch
+            dismissProgressDialog(progress)
+            if (!isAdded) return@launch
+            showDeleteAllRulesDialog(ctx, allRules)
+        }
+    }
+
+    private fun showDeleteAllRulesDialog(ctx: Context, allRules: List<BlockRule>) {
         if (allRules.isEmpty()) {
             Toast.makeText(ctx, "当前没有规则可删除", Toast.LENGTH_SHORT).show()
             return
@@ -1257,8 +1276,8 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 .setPositiveButton("删除全部") { _, _ ->
                     val actionContext = context ?: return@setPositiveButton
                     lifecycleScope.launch {
-                        val removedCount = withContext(Dispatchers.Default) {
-                            RuleRepository.removeAllRules(actionContext)
+                        val removedCount = withContext(Dispatchers.IO) {
+                            RuleRepository.removeAllRules(actionContext.applicationContext)
                         }
                         LogRepository.append(actionContext, "Requested removeAll actualRemoved=$removedCount")
                         if (removedCount <= 0) {
@@ -1290,11 +1309,6 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             ruleExportPermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             return
         }
-        val allRules = RuleRepository.getRules(ctx)
-        if (allRules.isEmpty()) {
-            Toast.makeText(ctx, "当前没有规则可导出", Toast.LENGTH_SHORT).show()
-            return
-        }
 
         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.CHINA)
             .format(java.util.Date())
@@ -1303,7 +1317,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         lifecycleScope.launch {
             val progressDialog = android.app.ProgressDialog(ctx).apply {
                 setTitle("导出规则")
-                setMessage("正在导出 ${allRules.size} 条规则...")
+                setMessage("正在准备导出规则...")
                 isIndeterminate = true
                 setCancelable(false)
             }
@@ -1356,19 +1370,26 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             .map { it.id.trim() }
             .filter { it.isNotEmpty() }
             .toSet()
-        val removedCount = RuleRepository.removeRules(actionContext, selectedIdsSnapshot, snapshot)
-        LogRepository.append(actionContext, "Requested direct remove=${snapshot.size} actualRemoved=$removedCount")
-        if (removedCount <= 0) {
-            Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
+        binding.btnDeleteSelected.isEnabled = false
+        viewLifecycleOwner.lifecycleScope.launch {
+            val removedCount = withContext(Dispatchers.IO) {
+                RuleRepository.removeRules(actionContext.applicationContext, selectedIdsSnapshot, snapshot)
+            }
+            if (!isAdded) return@launch
+            _binding?.btnDeleteSelected?.isEnabled = true
+            LogRepository.append(actionContext, "Requested direct remove=${snapshot.size} actualRemoved=$removedCount")
+            if (removedCount <= 0) {
+                Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
+                invalidateRuleListCache()
+                refreshListSoon()
+                return@launch
+            }
+            Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
             invalidateRuleListCache()
+            exitSelection()
             refreshListSoon()
-            return
+            reloadVpnIfRunning(true)
         }
-        Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
-        invalidateRuleListCache()
-        exitSelection()
-        refreshListSoon()
-        reloadVpnIfRunning(true)
     }
 
     private fun resolveSelectedRules(): List<BlockRule> {
