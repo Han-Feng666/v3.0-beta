@@ -45,6 +45,13 @@ data class BlockRule(
     val specifichide: Boolean = false,
     val generichide: Boolean = false,
     val dnsrewrite: String? = null,
+    val fromDomains: Set<String> = emptySet(),
+    val excludedFromDomains: Set<String> = emptySet(),
+    val network: Boolean = false,
+    val blockIpv6: Boolean = false,
+    val blockIpv4: Boolean = false,
+    val ctags: Set<String> = emptySet(),
+    val generichideException: Boolean = false,
     val remoteSourceId: String? = null
 )
 

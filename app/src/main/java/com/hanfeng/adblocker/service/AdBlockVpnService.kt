@@ -152,7 +152,7 @@ class AdBlockVpnService : VpnService() {
     private val staleCacheGraceMillis = VpnConstants.STALE_CACHE_GRACE_MILLIS
     private val dnsServerCacheTtlMillis = VpnConstants.DNS_SERVER_CACHE_TTL_MILLIS
     private val routeCachePruneIntervalMillis = VpnConstants.ROUTE_CACHE_PRUNE_INTERVAL_MILLIS
-    private var lastHttpRouteReloadAt = 0L
+    @Volatile private var lastHttpRouteReloadAt = 0L
     @Volatile private var lastHttpDecryptPruneAt = 0L
     @Volatile private var lastHttpsDecryptPruneAt = 0L
     @Volatile private var lastQuicRoutePruneAt = 0L
@@ -271,9 +271,9 @@ class AdBlockVpnService : VpnService() {
     @Volatile private var activeFullCaptureMode = FullCaptureRoutingSupport.Mode.NONE
     private val passthroughHealthLock = Any()
     @Volatile private var mitmFullCaptureDisabledUntil = 0L
-    private var passthroughHealthWindowStartedAt = 0L
-    private var passthroughHealthAttempts = 0
-    private var passthroughHealthFailures = 0
+    @Volatile private var passthroughHealthWindowStartedAt = 0L
+    @Volatile private var passthroughHealthAttempts = 0
+    @Volatile private var passthroughHealthFailures = 0
     @Volatile private var networkCallbackRegistered = false
     @Volatile private var lastForegroundNotificationRefreshAt = 0L
     @Volatile private var lastAppliedUnderlyingNetworkSummary: String? = null
@@ -788,12 +788,33 @@ class AdBlockVpnService : VpnService() {
         synchronized(passthroughTcpFlowCache) { passthroughTcpFlowCache.clear() }
         FlowCacheSupport.clear(passthroughTcpSocketCache) { it.close() }
         FlowCacheSupport.clear(passthroughUdpSessionCache) { it.close() }
-        upstreamServerStates.clear()
+        synchronized(upstreamServerStates) { upstreamServerStates.clear() }
         cachedDnsServers = null
         dnsSocketPool.forEach { (_, socket) -> socket.close() }
         dnsSocketPool.clear()
         lastUnderlyingNetworkRefreshAt = 0L
         lastForegroundNotificationRefreshAt = 0L
+    }
+
+    private fun evictConcurrentCache() {
+        val caches = listOf(
+            appNameCache to VpnConstants.APP_NAME_CACHE_MAX_SIZE,
+            domainAppCache to VpnConstants.DOMAIN_APP_CACHE_MAX_SIZE,
+            sourcePortAppCache to VpnConstants.SOURCE_PORT_APP_CACHE_MAX_SIZE,
+            ownerUidCache to VpnConstants.OWNER_UID_CACHE_MAX_SIZE,
+            ownerUidFailureCache to VpnConstants.OWNER_UID_FAILURE_CACHE_MAX_SIZE,
+            appLabelCache to VpnConstants.APP_LABEL_CACHE_MAX_SIZE,
+            vendorHintCache to VpnConstants.VENDOR_HINT_CACHE_MAX_SIZE,
+            localProxyTargetAppCache to VpnConstants.LOCAL_PROXY_TARGET_APP_CACHE_MAX_SIZE
+        )
+        for ((cache, max) in caches) {
+            if (cache.size <= max) continue
+            val excess = cache.size - max
+            val keysToEvict = cache.keys().toList().take(excess)
+            for (key in keysToEvict) {
+                cache.remove(key)
+            }
+        }
     }
 
     private fun cancelPendingRuntimeJobs() {
@@ -1225,6 +1246,7 @@ class AdBlockVpnService : VpnService() {
                 }
                 val buffer = ByteArray(32767)
                 var idleMs = 0L
+                var packetCount = 0L
                 while (scope.isActive && isRunning) {
                     val length = input.read(buffer)
                     val now = System.currentTimeMillis()
@@ -1244,11 +1266,15 @@ class AdBlockVpnService : VpnService() {
                         delay(TUN_STORM_BACKOFF_MILLIS)
                         continue
                     }
-                    runCatching {
+                    try {
                         handlePacket(buffer, length, output)
                         drainDnsAsyncResults(output, tunGeneration)
-                    }.onFailure { error ->
-                        LogRepository.append(this, "Packet handling failed: ${error.message ?: error.javaClass.simpleName}")
+                        packetCount++
+                        if ((packetCount and 1023L) == 0L) {
+                            evictConcurrentCache()
+                        }
+                    } catch (t: Throwable) {
+                        LogRepository.append(this, "Packet handling failed: ${t.message ?: t.javaClass.simpleName}")
                     }
                 }
                 if (tunGeneration == activeTunGeneration) {

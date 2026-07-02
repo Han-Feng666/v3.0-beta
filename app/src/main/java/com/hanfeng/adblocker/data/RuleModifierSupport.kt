@@ -58,6 +58,8 @@ object RuleModifierSupport {
         val specifichide: Boolean = false,
         val dnsrewrite: String? = null,
         val ctags: Set<String> = emptySet(),
+        val fromDomains: Set<String> = emptySet(),
+        val excludedFromDomains: Set<String> = emptySet(),
         val cname: Boolean = false,
         val emptyResponse: Boolean = false,
         val unsupportedModifiers: List<String> = emptyList(),
@@ -109,6 +111,8 @@ object RuleModifierSupport {
         val denyallow = mutableSetOf<String>()
         var urlblock = false
         var fromScoped = false
+        val fromDomains = mutableSetOf<String>()
+        val excludedFromDomains = mutableSetOf<String>()
         var toScoped = false
         val toDomains = mutableSetOf<String>()
         var pathScoped = false
@@ -256,6 +260,16 @@ object RuleModifierSupport {
                     "from" -> {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
                         fromScoped = true
+                        value.split('|')
+                            .map { it.trim().lowercase() }
+                            .filter { it.isNotBlank() }
+                            .forEach { token ->
+                                if (token.startsWith("~")) {
+                                    token.removePrefix("~").takeIf { it.isNotBlank() }?.let(excludedFromDomains::add)
+                                } else {
+                                    fromDomains.add(token)
+                                }
+                            }
                     }
                     "to" -> {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
@@ -436,6 +450,8 @@ object RuleModifierSupport {
             specifichide = specifichide,
             dnsrewrite = dnsrewrite,
             ctags = ctags.toSet(),
+            fromDomains = fromDomains.toSet(),
+            excludedFromDomains = excludedFromDomains.toSet(),
             cname = cname,
             emptyResponse = emptyResponse
         )

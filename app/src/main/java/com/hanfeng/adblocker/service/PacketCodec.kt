@@ -108,10 +108,13 @@ object PacketCodec {
         }
     }
 
+    private const val MAX_IPV6_EXTENSION_HEADERS = 8
+
     private fun parseIpv6Transport(packet: ByteArray, length: Int): Ipv6TransportInfo? {
         var nextHeader = packet[6].toInt() and 0xFF
         var offset = 40
-        while (true) {
+        var extHeaderCount = 0
+        while (extHeaderCount < MAX_IPV6_EXTENSION_HEADERS) {
             when (nextHeader) {
                 0, 43, 60 -> {
                     if (offset + 2 > length) return null
@@ -119,6 +122,7 @@ object PacketCodec {
                     if (offset + headerLength > length) return null
                     nextHeader = packet[offset].toInt() and 0xFF
                     offset += headerLength
+                    extHeaderCount++
                 }
                 44 -> {
                     if (offset + 8 > length) return null
@@ -126,6 +130,7 @@ object PacketCodec {
                     if (fragmentOffset != 0) return null
                     nextHeader = packet[offset].toInt() and 0xFF
                     offset += 8
+                    extHeaderCount++
                 }
                 51 -> {
                     if (offset + 2 > length) return null
@@ -133,6 +138,7 @@ object PacketCodec {
                     if (offset + headerLength > length) return null
                     nextHeader = packet[offset].toInt() and 0xFF
                     offset += headerLength
+                    extHeaderCount++
                 }
                 50 -> {
                     return null
@@ -143,6 +149,7 @@ object PacketCodec {
                 }
             }
         }
+        return null
     }
 
     private fun buildIpv4UdpResponse(request: PacketInfo, responsePayload: ByteArray): ByteArray {

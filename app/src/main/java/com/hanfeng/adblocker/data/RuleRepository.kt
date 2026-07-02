@@ -1656,6 +1656,13 @@ object RuleRepository {
             specifichide = parsedRule.specifichide,
             generichide = parsedRule.generichide,
             dnsrewrite = parsedRule.dnsrewrite,
+            fromDomains = parsedRule.fromDomains,
+            excludedFromDomains = parsedRule.excludedFromDomains,
+            network = parsedRule.network,
+            blockIpv6 = parsedRule.blockIpv6,
+            blockIpv4 = parsedRule.blockIpv4,
+            ctags = parsedRule.ctags,
+            generichideException = parsedRule.generichideException,
             remoteSourceId = remoteSourceId
         )
     }
@@ -4099,6 +4106,13 @@ object RuleRepository {
                 specifichide = modifierInfo.specifichide,
                 generichide = modifierInfo.generichide,
                 dnsrewrite = modifierInfo.dnsrewrite,
+                fromDomains = modifierInfo.fromDomains,
+                excludedFromDomains = modifierInfo.excludedFromDomains,
+                network = modifierInfo.network,
+                blockIpv6 = modifierInfo.blockIpv6,
+                blockIpv4 = modifierInfo.blockIpv4,
+                ctags = modifierInfo.ctags,
+                generichideException = modifierInfo.generichideException,
                 vendorHints = lineContext.vendorHints
             )
         }
@@ -4207,6 +4221,13 @@ object RuleRepository {
                 specifichide = modifierInfo.specifichide,
                 generichide = modifierInfo.generichide,
                 dnsrewrite = modifierInfo.dnsrewrite,
+                fromDomains = modifierInfo.fromDomains,
+                excludedFromDomains = modifierInfo.excludedFromDomains,
+                network = modifierInfo.network,
+                blockIpv6 = modifierInfo.blockIpv6,
+                blockIpv4 = modifierInfo.blockIpv4,
+                ctags = modifierInfo.ctags,
+                generichideException = modifierInfo.generichideException,
                 vendorHints = lineContext.vendorHints
             )
         }
@@ -6386,7 +6407,14 @@ object RuleRepository {
             safeRuleSet(rule.cookieRemove).isEmpty() &&
             safeRuleSet(rule.cookieSet).isEmpty() &&
             safeRuleSet(rule.toDomains).isEmpty() &&
-            !rule.emptyResponse
+            !rule.emptyResponse &&
+            safeRuleSet(rule.fromDomains).isEmpty() &&
+            safeRuleSet(rule.excludedFromDomains).isEmpty() &&
+            !rule.network &&
+            !rule.blockIpv6 &&
+            !rule.blockIpv4 &&
+            safeRuleSet(rule.ctags).isEmpty() &&
+            !rule.generichideException
     }
 
     private fun <T> safeRuleSet(value: Set<T>?): Set<T> = value.orEmpty()
@@ -6560,6 +6588,7 @@ object RuleRepository {
         if (!matchesRequestContext(rule, host, requestDomain)) return false
         if (!matchesRequestType(rule.requestTypes, requestType)) return false
         if (qType == null) return true
+        if (!matchesIpVersionConstraint(rule, qType)) return false
         val dnsTypes = normalizeDnsTypes(rule.dnsTypes)
         val excludedDnsTypes = normalizeDnsTypes(rule.excludedDnsTypes)
         if (excludedDnsTypes != null && excludedDnsTypes.contains(qType)) return false
@@ -6620,7 +6649,26 @@ object RuleRepository {
                 hostRoot == requestRoot
             if (!sameSite) return false
         }
+        if (rule.fromDomains.isNotEmpty()) {
+            val fromDomain = contextDomain ?: return false
+            val allowed = rule.fromDomains.any { allowedDomain ->
+                fromDomain == allowedDomain || fromDomain.endsWith(".$allowedDomain")
+            }
+            if (!allowed) return false
+        }
+        if (rule.excludedFromDomains.isNotEmpty() && contextDomain != null) {
+            if (rule.excludedFromDomains.any { excluded -> contextDomain == excluded || contextDomain.endsWith(".$excluded") }) {
+                return false
+            }
+        }
         return true
+    }
+
+    private fun matchesIpVersionConstraint(rule: BlockRule, qType: Int): Boolean {
+        if (!rule.blockIpv6 && !rule.blockIpv4) return true
+        if (rule.blockIpv6 && qType == 28) return true
+        if (rule.blockIpv4 && qType == 1) return true
+        return false
     }
 
     private fun sanitizeAppPackageToken(value: String): String? {
@@ -7122,6 +7170,13 @@ object RuleRepository {
             specifichide = existing.specifichide || incoming.specifichide,
             generichide = existing.generichide || incoming.generichide,
             dnsrewrite = incoming.dnsrewrite ?: existing.dnsrewrite,
+            fromDomains = (existing.fromDomains + incoming.fromDomains).toSet(),
+            excludedFromDomains = (existing.excludedFromDomains + incoming.excludedFromDomains).toSet(),
+            network = existing.network || incoming.network,
+            blockIpv6 = existing.blockIpv6 || incoming.blockIpv6,
+            blockIpv4 = existing.blockIpv4 || incoming.blockIpv4,
+            ctags = (existing.ctags + incoming.ctags).toSet(),
+            generichideException = existing.generichideException || incoming.generichideException,
             important = existing.important || incoming.important
         )
     }
@@ -7280,6 +7335,13 @@ object RuleRepository {
         val specifichide: Boolean = false,
         val generichide: Boolean = false,
         val dnsrewrite: String? = null,
+        val fromDomains: Set<String> = emptySet(),
+        val excludedFromDomains: Set<String> = emptySet(),
+        val network: Boolean = false,
+        val blockIpv6: Boolean = false,
+        val blockIpv4: Boolean = false,
+        val ctags: Set<String> = emptySet(),
+        val generichideException: Boolean = false,
         val isUnsupported: Boolean = false
     )
 
