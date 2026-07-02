@@ -438,7 +438,6 @@ object RuleRepository {
     // 小说内容 API 白名单 (这些域名/子域名专门提供小说内容，不拦截)
     private val unsupportedAdGuardModifiers = emptySet<String>()
     private val ignorableAdGuardModifiers = setOf(
-        "all",
         "content",
         "extension"
     )
@@ -1653,6 +1652,10 @@ object RuleRepository {
             toDomains = parsedRule.toDomains,
             cname = parsedRule.cname,
             emptyResponse = parsedRule.emptyResponse,
+            genericblock = parsedRule.genericblock,
+            specifichide = parsedRule.specifichide,
+            generichide = parsedRule.generichide,
+            dnsrewrite = parsedRule.dnsrewrite,
             remoteSourceId = remoteSourceId
         )
     }
@@ -1902,18 +1905,13 @@ object RuleRepository {
         sourcePort: Int? = null
     ): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
-        val candidates = buildDomainCandidates(normalized).toList()
         val simpleIndex = getSimpleDomainIndex(context)
         val trie = getTrieIndex(context)
         val simpleImportantBlock = trie.hasImportantBlock(normalized)
         if (simpleImportantBlock) return true
         val simpleUserOwnedBlock = trie.hasUserOwnedBlock(normalized)
-        if (isCoreTrafficProtectedDomain(normalized) && !simpleUserOwnedBlock) {
-            val hasSimpleOnly = candidates.any { it in simpleIndex.blocked || it in simpleIndex.exceptions }
-            if (hasSimpleOnly && getRuleMap(context).isEmpty() && getRegexRules(context).isEmpty() && getKeywordRules(context).isEmpty()) return false
-        }
         getRuleMap(context)  // triggers buildAppRuleIndex
-        val matchingRules = candidates.asSequence()
+        val matchingRules = buildDomainCandidates(normalized)
             .flatMap { candidate -> getFilteredRulesForApp(context, candidate, appName).asSequence() }
             .filter {
                 it.source != RuleSource.UNSUPPORTED &&
@@ -1929,6 +1927,7 @@ object RuleRepository {
         var regexImportant = false
         var regexUserOwned = false
         var regexGeneral = false
+        var regexGenericblockEx = false
         val pkg = appName?.let { extractPackageName(it) }
         val regexIndex = getRegexLiteralIndex(context)
         val candidateRegexRules = regexIndex.entries.asSequence()
@@ -1942,12 +1941,14 @@ object RuleRepository {
             if (isImportantBlockingRule(rule)) { regexImportant = true; break }
             if (isUserOwnedBlockingRule(rule)) regexUserOwned = true
             if (!rule.exceptionRule) regexGeneral = true
+            if (rule.exceptionRule && rule.genericblock) regexGenericblockEx = true
         }
 
         // 合并关键词规则扫描：使用组合正则预过滤后仅扫描命中的规则
         var keywordImportant = false
         var keywordUserOwned = false
         var keywordGeneral = false
+        var keywordGenericblockEx = false
         val combinedKwMatcher = getCombinedKeywordMatcher(context)
         if (combinedKwMatcher != null && combinedKwMatcher.matcher(lowerDomain).find()) {
             for (rule in getFilteredKeywordRules(context, appName)) {
@@ -1957,6 +1958,7 @@ object RuleRepository {
                 if (isImportantBlockingRule(rule)) { keywordImportant = true; break }
                 if (isUserOwnedBlockingRule(rule)) keywordUserOwned = true
                 if (!rule.exceptionRule) keywordGeneral = true
+                if (rule.exceptionRule && rule.genericblock) keywordGenericblockEx = true
             }
         }
 
@@ -1964,25 +1966,71 @@ object RuleRepository {
         if (hasImportantBlock) return true
         val hasUserOwnedBlock = simpleUserOwnedBlock || matchingRules.any(::isUserOwnedBlockingRule) || regexUserOwned || keywordUserOwned
         if (isCoreTrafficProtectedDomain(normalized) && !hasUserOwnedBlock) return false
-        if (!hasUserOwnedBlock && (trie.hasException(normalized) || matchingRules.any { it.exceptionRule })) return false
+        val hasGenericblockEx = matchingRules.any { it.exceptionRule && it.genericblock } || regexGenericblockEx || keywordGenericblockEx
+        if (!hasUserOwnedBlock && (trie.hasException(normalized) || matchingRules.any { it.exceptionRule }) && !hasGenericblockEx) return false
         if (hasUserOwnedBlock) return true
-        val matched = trie.hasBlocked(normalized) || matchingRules.any { !it.exceptionRule } || regexGeneral || keywordGeneral
+        val matched = if (hasGenericblockEx && !hasUserOwnedBlock) {
+            matchingRules.any { rule -> !rule.exceptionRule && !isGenericRule(rule) } ||
+                candidateRegexRules.any { rule -> !rule.exceptionRule && !isGenericRule(rule) && matchesRegexRule(rule, normalized) } ||
+                keywordGeneral
+        } else {
+            trie.hasBlocked(normalized) || matchingRules.any { !it.exceptionRule } || regexGeneral || keywordGeneral
+        }
         if (matched) return true
         if (isWhitelistedDomain(normalized)) return false
         return false
     }
 
+    private data class RegexScanResult(
+        val hasUserOwnedBlock: Boolean = false,
+        val hasImportantBlock: Boolean = false,
+        val hasExceptionMatch: Boolean = false,
+        val hasGeneralMatch: Boolean = false,
+        val hasGenericblockException: Boolean = false
+    )
+
+    private fun scanRegexRules(
+        rules: List<BlockRule>,
+        appName: String?,
+        normalizedHost: String,
+        requestDomain: String?,
+        effectiveRequestType: String?,
+        destinationPort: Int?,
+        sourcePort: Int?,
+        fullUrl: String
+    ): RegexScanResult {
+        var scanUserBlock = false
+        var scanImportant = false
+        var scanException = false
+        var scanGeneral = false
+        var scanGenericblockException = false
+        for (rule in rules) {
+            if (rule.source == RuleSource.UNSUPPORTED) continue
+            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) continue
+            if (!matchesPortScope(rule.destinationPorts, destinationPort)) continue
+            if (!matchesPortScope(rule.sourcePorts, sourcePort)) continue
+            if (!matchesRegexRule(rule, fullUrl)) continue
+            if (isUserOwnedBlockingRule(rule)) scanUserBlock = true
+            if (isImportantBlockingRule(rule)) { scanImportant = true; break }
+            if (rule.exceptionRule) {
+                scanException = true
+                if (rule.genericblock) scanGenericblockException = true
+            }
+            if (!rule.exceptionRule) scanGeneral = true
+        }
+        return RegexScanResult(scanUserBlock, scanImportant, scanException, scanGeneral, scanGenericblockException)
+    }
+
     // 性能优化：快速拦截检查（跳过关键词规则，仅匹配精确规则和正则规则）
     fun isBlockedFast(context: Context, domain: String, qType: Int? = null): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
-        val candidates = buildDomainCandidates(normalized).toList()
         val simpleIndex = getSimpleDomainIndex(context)
         val trie = getTrieIndex(context)
         val simpleImportantBlock = trie.hasImportantBlock(normalized)
         if (simpleImportantBlock) return true
         val simpleUserOwnedBlock = trie.hasUserOwnedBlock(normalized)
         getRuleMap(context)  // triggers buildAppRuleIndex
-        val matchingRules = candidates.asSequence()
+        val matchingRules = buildDomainCandidates(normalized)
             .flatMap { candidate -> getFilteredRulesForApp(context, candidate, null).asSequence() }
             .filter { it.source != RuleSource.UNSUPPORTED && ruleMatches(it, qType, null) && it.destinationPorts.isEmpty() && it.sourcePorts.isEmpty() }
             .toList()
@@ -1991,6 +2039,7 @@ object RuleRepository {
         var regexImportant = false
         var regexUserOwned = false
         var regexGeneral = false
+        var regexGenericblockEx = false
         val fastLowerDomain = normalized.lowercase()
         val fastRegexIndex = getRegexLiteralIndex(context)
         val fastCandidateRegexRules = fastRegexIndex.entries.asSequence()
@@ -2003,15 +2052,24 @@ object RuleRepository {
             if (isImportantBlockingRule(rule)) { regexImportant = true; break }
             if (isUserOwnedBlockingRule(rule)) regexUserOwned = true
             if (!rule.exceptionRule) regexGeneral = true
+            if (rule.exceptionRule && rule.genericblock) regexGenericblockEx = true
         }
 
         val hasUserOwnedBlock = simpleUserOwnedBlock || matchingRules.any(::isUserOwnedBlockingRule) || regexUserOwned
         val hasImportantBlock = simpleImportantBlock || matchingRules.any(::isImportantBlockingRule) || regexImportant
         if (hasImportantBlock) return true
         if (isCoreTrafficProtectedDomain(normalized) && !hasUserOwnedBlock) return false
-        if (!hasUserOwnedBlock && (trie.hasException(normalized) || matchingRules.any { it.exceptionRule })) return false
+        val hasGenericblockEx = matchingRules.any { it.exceptionRule && it.genericblock } || regexGenericblockEx
+        if (!hasUserOwnedBlock && (trie.hasException(normalized) || matchingRules.any { it.exceptionRule }) && !hasGenericblockEx) return false
         if (hasUserOwnedBlock) return true
-        val matched = trie.hasBlocked(normalized) || matchingRules.any { !it.exceptionRule } || regexGeneral
+        val matched = if (hasGenericblockEx && !hasUserOwnedBlock) {
+            matchingRules.any { rule -> !rule.exceptionRule && !isGenericRule(rule) } ||
+                fastCandidateRegexRules.any { rule ->
+                    !rule.exceptionRule && !isGenericRule(rule) && matchesRegexRule(rule, normalized)
+                }
+        } else {
+            trie.hasBlocked(normalized) || matchingRules.any { !it.exceptionRule } || regexGeneral
+        }
         if (matched) return true
         if (isWhitelistedDomain(normalized)) return false
         return false
@@ -2028,7 +2086,6 @@ object RuleRepository {
         requestType: String? = null
     ): Boolean {
         val normalizedHost = sanitizeDomain(host) ?: return false
-        val candidates = buildDomainCandidates(normalizedHost).toList()
         val simpleIndex = getSimpleDomainIndex(context)
         val trie = getTrieIndex(context)
         val simpleImportantBlock = trie.hasImportantBlock(normalizedHost)
@@ -2038,7 +2095,7 @@ object RuleRepository {
         val fullUrl = "$host$path".lowercase()
         val effectiveRequestType = requestType?.trim()?.lowercase()?.takeIf { it.isNotBlank() }
             ?: inferRequestTypeFromPath(path)
-        val matchingRules = candidates.asSequence()
+        val matchingRules = buildDomainCandidates(normalizedHost)
             .flatMap { candidate -> getFilteredRulesForApp(context, candidate, appName).asSequence() }
             .filter { rule ->
                 if (rule.source == RuleSource.UNSUPPORTED) return@filter false
@@ -2057,39 +2114,27 @@ object RuleRepository {
                 rule.appPackages.isEmpty() || matchesAppPackage(rule.appPackages, appName)
             }
             .toList()
-        val hasUserOwnedBlock = simpleUserOwnedBlock || matchingRules.any(::isUserOwnedBlockingRule) || getFilteredRegexRules(context, appName).any { rule ->
-            if (!isUserOwnedBlockingRule(rule)) return@any false
-            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
-            if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
-            if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@any false
-            matchesRegexRule(rule, fullUrl)
-        }
-        val hasImportantBlock = simpleImportantBlock || matchingRules.any(::isImportantBlockingRule) || getFilteredRegexRules(context, appName).any { rule ->
-            if (!isImportantBlockingRule(rule)) return@any false
-            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
-            if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
-            if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@any false
-            matchesRegexRule(rule, fullUrl)
-        }
+        val filteredRegexRules = getFilteredRegexRules(context, appName)
+        val regexScan = scanRegexRules(filteredRegexRules, appName, normalizedHost, requestDomain, effectiveRequestType, destinationPort, sourcePort, fullUrl)
+        val hasUserOwnedBlock = simpleUserOwnedBlock || matchingRules.any(::isUserOwnedBlockingRule) || regexScan.hasUserOwnedBlock
+        val hasImportantBlock = simpleImportantBlock || matchingRules.any(::isImportantBlockingRule) || regexScan.hasImportantBlock
         if (hasImportantBlock) return true
         if (isCoreTrafficProtectedDomain(normalizedHost) && !hasUserOwnedBlock) return false
-        val hasExceptionMatch = trie.hasException(normalizedHost) || matchingRules.any { it.exceptionRule } || getFilteredRegexRules(context, appName).any { rule ->
-            if (rule.source == RuleSource.UNSUPPORTED) return@any false
-            if (!rule.exceptionRule) return@any false
-            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
-            if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
-            if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@any false
-            matchesRegexRule(rule, fullUrl)
-        }
-        if (!hasUserOwnedBlock && hasExceptionMatch) return false
+        val hasExceptionMatch = trie.hasException(normalizedHost) || matchingRules.any { it.exceptionRule } || regexScan.hasExceptionMatch
+        val hasGenericblockException = matchingRules.any { it.exceptionRule && it.genericblock } || regexScan.hasGenericblockException
+        if (!hasUserOwnedBlock && hasExceptionMatch && !hasGenericblockException) return false
         if (hasUserOwnedBlock) return true
-        val matched = trie.hasBlocked(normalizedHost) || matchingRules.any { !it.exceptionRule } || getFilteredRegexRules(context, appName).any { rule ->
-            if (rule.source == RuleSource.UNSUPPORTED) return@any false
-            if (rule.exceptionRule) return@any false
-            if (!ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType)) return@any false
-            if (!matchesPortScope(rule.destinationPorts, destinationPort)) return@any false
-            if (!matchesPortScope(rule.sourcePorts, sourcePort)) return@any false
-            matchesRegexRule(rule, fullUrl)
+        val matched = if (hasGenericblockException && !hasUserOwnedBlock) {
+            matchingRules.any { rule -> !rule.exceptionRule && !isGenericRule(rule) } ||
+                filteredRegexRules.any { rule ->
+                    !rule.exceptionRule && !isGenericRule(rule) &&
+                        ruleMatches(rule, null, appName, normalizedHost, requestDomain, effectiveRequestType) &&
+                        matchesPortScope(rule.destinationPorts, destinationPort) &&
+                        matchesPortScope(rule.sourcePorts, sourcePort) &&
+                        matchesRegexRule(rule, fullUrl)
+                }
+        } else {
+            trie.hasBlocked(normalizedHost) || matchingRules.any { !it.exceptionRule } || regexScan.hasGeneralMatch
         }
         if (matched) return true
         if (isWhitelistedDomain(normalizedHost)) return false
@@ -2097,7 +2142,12 @@ object RuleRepository {
     }
 
     private fun inferRequestTypeFromPath(path: String): String? {
-        val cleanPath = path.substringBefore('?').substringBefore('#').lowercase()
+        val cleanPath = buildString {
+            for (ch in path) {
+                if (ch == '?' || ch == '#') break
+                append(ch.lowercaseChar())
+            }
+        }
         return when {
             cleanPath.endsWith(".js") || cleanPath.endsWith(".mjs") -> "script"
             cleanPath.endsWith(".css") -> "stylesheet"
@@ -2366,6 +2416,10 @@ object RuleRepository {
         return rule.important && !rule.exceptionRule && rule.source != RuleSource.UNSUPPORTED
     }
 
+    private fun isGenericRule(rule: BlockRule): Boolean {
+        return rule.domainConstraints.isNullOrEmpty()
+    }
+
     private fun isCoreTrafficProtectedDomain(domain: String): Boolean {
         return isWhitelistedDomain(domain) ||
             isSensitiveAuthDomain(domain) ||
@@ -2528,10 +2582,18 @@ object RuleRepository {
             .filter { it.cosmeticException || it.source == RuleSource.UNSUPPORTED }
             .mapNotNull { it.cosmeticSelector }
             .toSet()
+        val hasGenerichide = buildDomainCandidates(normalizedHost)
+            .flatMap { candidate -> getRuleMap(context)[candidate].orEmpty() }
+            .any { rule ->
+                rule.generichide && rule.source != RuleSource.UNSUPPORTED &&
+                    !rule.exceptionRule &&
+                    ruleMatches(rule, null, appName, normalizedHost, requestDomain)
+            }
         return matchedRules
             .asSequence()
             .filter { it.source != RuleSource.UNSUPPORTED }
             .filterNot { it.cosmeticException }
+            .filterNot { hasGenerichide && it.domain == COSMETIC_RULE_DOMAIN }
             .mapNotNull { it.cosmeticSelector }
             .filterNot(excludedSelectors::contains)
             .distinct()
@@ -4033,6 +4095,10 @@ object RuleRepository {
                 toDomains = modifierInfo.toDomains,
                 cname = modifierInfo.cname,
                 emptyResponse = modifierInfo.emptyResponse,
+                genericblock = modifierInfo.genericblock,
+                specifichide = modifierInfo.specifichide,
+                generichide = modifierInfo.generichide,
+                dnsrewrite = modifierInfo.dnsrewrite,
                 vendorHints = lineContext.vendorHints
             )
         }
@@ -4137,6 +4203,10 @@ object RuleRepository {
                 toDomains = modifierInfo.toDomains,
                 cname = modifierInfo.cname,
                 emptyResponse = modifierInfo.emptyResponse,
+                genericblock = modifierInfo.genericblock,
+                specifichide = modifierInfo.specifichide,
+                generichide = modifierInfo.generichide,
+                dnsrewrite = modifierInfo.dnsrewrite,
                 vendorHints = lineContext.vendorHints
             )
         }
@@ -6877,7 +6947,11 @@ object RuleRepository {
             cookieSet = (existing.cookieSet + incoming.cookieSet).toSet(),
             toDomains = (existing.toDomains + incoming.toDomains).toSet(),
             cname = existing.cname || incoming.cname,
-            emptyResponse = existing.emptyResponse || incoming.emptyResponse
+            emptyResponse = existing.emptyResponse || incoming.emptyResponse,
+            genericblock = existing.genericblock || incoming.genericblock,
+            specifichide = existing.specifichide || incoming.specifichide,
+            generichide = existing.generichide || incoming.generichide,
+            dnsrewrite = incoming.dnsrewrite ?: existing.dnsrewrite
         )
     }
 
@@ -6921,6 +6995,10 @@ object RuleRepository {
         toDomains: Set<String>? = rule.toDomains,
         cname: Boolean = rule.cname,
         emptyResponse: Boolean = rule.emptyResponse,
+        genericblock: Boolean = rule.genericblock,
+        specifichide: Boolean = rule.specifichide,
+        generichide: Boolean = rule.generichide,
+        dnsrewrite: String? = rule.dnsrewrite,
         remoteSourceId: String? = rule.remoteSourceId
     ): BlockRule {
         return BlockRule(
@@ -6962,6 +7040,10 @@ object RuleRepository {
             toDomains = toDomains.orEmpty(),
             cname = cname,
             emptyResponse = emptyResponse,
+            genericblock = genericblock,
+            specifichide = specifichide,
+            generichide = generichide,
+            dnsrewrite = dnsrewrite,
             remoteSourceId = remoteSourceId
         )
     }
@@ -7035,7 +7117,12 @@ object RuleRepository {
             cookieSet = (existing.cookieSet + incoming.cookieSet).toSet(),
             toDomains = (existing.toDomains + incoming.toDomains).toSet(),
             cname = existing.cname || incoming.cname,
-            emptyResponse = existing.emptyResponse || incoming.emptyResponse
+            emptyResponse = existing.emptyResponse || incoming.emptyResponse,
+            genericblock = existing.genericblock || incoming.genericblock,
+            specifichide = existing.specifichide || incoming.specifichide,
+            generichide = existing.generichide || incoming.generichide,
+            dnsrewrite = incoming.dnsrewrite ?: existing.dnsrewrite,
+            important = existing.important || incoming.important
         )
     }
 
@@ -7189,6 +7276,10 @@ object RuleRepository {
         val toDomains: Set<String> = emptySet(),
         val cname: Boolean = false,
         val emptyResponse: Boolean = false,
+        val genericblock: Boolean = false,
+        val specifichide: Boolean = false,
+        val generichide: Boolean = false,
+        val dnsrewrite: String? = null,
         val isUnsupported: Boolean = false
     )
 

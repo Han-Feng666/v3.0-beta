@@ -2,6 +2,7 @@ package com.HanFeng.dns
 
 import com.HanFeng.model.DnsQuestion
 import java.io.ByteArrayOutputStream
+import java.net.InetAddress
 
 object DnsMessageParser {
     private const val TYPE_A = 1
@@ -50,6 +51,28 @@ object DnsMessageParser {
         val data = if (question.qType == 28) ByteArray(16) else ByteArray(4)
         out.write(shortBytes(data.size))
         out.write(data)
+        return out.toByteArray()
+    }
+
+    fun buildRewriteResponse(queryPayload: ByteArray, question: DnsQuestion, rewriteIp: String): ByteArray? {
+        if (question.qType != 1 && question.qType != 28) {
+            return buildSinkholeResponse(queryPayload, question)
+        }
+        val address = runCatching { InetAddress.getByName(rewriteIp) }.getOrNull() ?: return null
+        val addrBytes = address.address
+        if ((question.qType == 1 && addrBytes.size != 4) || (question.qType == 28 && addrBytes.size != 16)) {
+            return null
+        }
+        val out = ByteArrayOutputStream()
+        out.writeHeader(queryPayload, rCode = 0, answerCount = 1)
+        val questionBytes = encodeQuestion(question.domain, question.qType)
+        out.write(questionBytes)
+        out.write(byteArrayOf(0xC0.toByte(), 0x0C))
+        out.write(shortBytes(question.qType))
+        out.write(byteArrayOf(0x00, 0x01))
+        out.write(byteArrayOf(0x00, 0x00, 0x00, 0x3C))
+        out.write(shortBytes(addrBytes.size))
+        out.write(addrBytes)
         return out.toByteArray()
     }
 

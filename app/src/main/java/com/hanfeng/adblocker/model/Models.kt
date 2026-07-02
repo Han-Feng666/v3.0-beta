@@ -41,6 +41,10 @@ data class BlockRule(
     val toDomains: Set<String> = emptySet(),
     val cname: Boolean = false,
     val emptyResponse: Boolean = false,
+    val genericblock: Boolean = false,
+    val specifichide: Boolean = false,
+    val generichide: Boolean = false,
+    val dnsrewrite: String? = null,
     val remoteSourceId: String? = null
 )
 

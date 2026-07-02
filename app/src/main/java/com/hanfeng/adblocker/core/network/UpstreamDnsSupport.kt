@@ -3,14 +3,27 @@ package com.HanFeng.core.network
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.concurrent.thread
 
 object UpstreamDnsSupport {
     private const val DNS_RACE_CONCURRENCY = 3
     private const val DNS_RACE_TIMEOUT_MS = 2500L
+
+    private val dnsRaceExecutor = Executors.newFixedThreadPool(DNS_RACE_CONCURRENCY) { runnable ->
+        Thread(runnable).apply {
+            name = "dns-race-worker"
+            isDaemon = true
+            priority = Thread.NORM_PRIORITY
+        }
+    }
+
+    private val dnsRecvBuffer = ThreadLocal.withInitial { ByteArray(4096) }
 
     data class UpstreamDnsResult(
         val server: InetAddress,
@@ -45,17 +58,17 @@ object UpstreamDnsSupport {
     ): UpstreamDnsResult? {
         val resultRef = AtomicReference<UpstreamDnsResult>()
         val done = AtomicBoolean(false)
-        val threads = wave.map { server ->
-            thread(name = "dns-race-${server.hostAddress}") {
-                if (done.get()) return@thread
+        val futures = wave.map { server ->
+            dnsRaceExecutor.submit<Unit> {
+                if (done.get()) return@submit
                 repeat(2) { attempt ->
-                    if (done.get()) return@thread
+                    if (done.get()) return@submit
                     val socket = acquireSocket(server) ?: return@repeat
                     runCatching {
                         socket.soTimeout = if (attempt == 0) 800 else 1200
                         socket.connect(server, 53)
                         socket.send(DatagramPacket(payload, payload.size))
-                        val recvBuf = ByteArray(4096)
+                        val recvBuf = dnsRecvBuffer.get()
                         val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
                         socket.receive(recvPacket)
                         if (done.compareAndSet(false, true)) {
@@ -74,9 +87,9 @@ object UpstreamDnsSupport {
                 }
             }
         }
-        threads.forEach { it.join(DNS_RACE_TIMEOUT_MS) }
+        futures.forEach { runCatching { it.get(DNS_RACE_TIMEOUT_MS, TimeUnit.MILLISECONDS) } }
         if (!done.get()) {
-            threads.forEach { if (it.isAlive) it.interrupt() }
+            futures.forEach { it.cancel(true) }
         }
         return resultRef.get()
     }

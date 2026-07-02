@@ -1492,6 +1492,44 @@ class AdBlockVpnService : VpnService() {
         output.write(PacketCodec.buildUdpResponse(info, upstreamResponse))
     }
 
+    private fun handleDnsRewriteResponse(
+        info: com.HanFeng.model.PacketInfo,
+        question: DnsQuestion,
+        rewriteTarget: String,
+        output: FileOutputStream,
+        vendor: String,
+        appName: String
+    ) {
+        val rewriteIp = if (looksLikeIpAddress(rewriteTarget)) {
+            rewriteTarget
+        } else {
+            resolveUpstreamIp(rewriteTarget) ?: "0.0.0.0"
+        }
+        val rewriteResponse = DnsMessageParser.buildRewriteResponse(info.payload, question, rewriteIp)
+        if (rewriteResponse != null) {
+            output.write(PacketCodec.buildUdpResponse(info, rewriteResponse))
+            StatsRepository.recordBlockedDns(this, vendor, appName, 512, source = StatsRepository.BlockSource.DNS_RULE)
+            logDecisionOnce(
+                key = "dns-rewrite:${question.domain}:${question.qType}:${appName}",
+                message = "DNS rewrite domain=${question.domain} -> $rewriteTarget ($rewriteIp) qType=${question.qType} app=$appName vendor=$vendor",
+                minIntervalMillis = 20_000L
+            )
+        } else {
+            output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
+            StatsRepository.recordBlockedDns(this, vendor, appName, 512, source = StatsRepository.BlockSource.DNS_RULE)
+        }
+    }
+
+    private fun looksLikeIpAddress(value: String): Boolean {
+        return runCatching { java.net.InetAddress.getByName(value) }.isSuccess &&
+            (value.count { it == '.' } == 3 || value.contains(':'))
+    }
+
+    private fun resolveUpstreamIp(domain: String): String? {
+        val addresses = runCatching { java.net.InetAddress.getAllByName(domain) }.getOrNull()
+        return addresses?.firstOrNull()?.hostAddress
+    }
+
     private fun handleManagedDnsQuery(
         info: com.HanFeng.model.PacketInfo,
         question: DnsQuestion,
@@ -1524,6 +1562,11 @@ class AdBlockVpnService : VpnService() {
         }
 
         if (domainContext.matchedRule != null && !protectedQuestion) {
+            val rewriteTarget = domainContext.matchedRule.dnsrewrite
+            if (!rewriteTarget.isNullOrBlank()) {
+                handleDnsRewriteResponse(info, question, rewriteTarget, output, vendor, appName)
+                return
+            }
             output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
             StatsRepository.recordBlockedDns(this, vendor, appName, 512, source = StatsRepository.BlockSource.DNS_RULE)
             logDecisionOnce(
@@ -1626,7 +1669,18 @@ class AdBlockVpnService : VpnService() {
         }
 
         if (domainContext.matchedRule != null && !protectedQuestion) {
-            val sinkhole = DnsMessageParser.buildSinkholeResponse(task.payload, question)
+            val rewriteTarget = domainContext.matchedRule.dnsrewrite
+            val rewrittenResponse = if (!rewriteTarget.isNullOrBlank()) {
+                val rewriteIp = if (looksLikeIpAddress(rewriteTarget)) {
+                    rewriteTarget
+                } else {
+                    resolveUpstreamIp(rewriteTarget) ?: "0.0.0.0"
+                }
+                DnsMessageParser.buildRewriteResponse(task.payload, question, rewriteIp)
+            } else {
+                null
+            }
+            val sinkhole = rewrittenResponse ?: DnsMessageParser.buildSinkholeResponse(task.payload, question)
             if (sinkhole != null) {
                 dnsResultOut.offer(DnsAsyncResult(
                     generation = task.generation,

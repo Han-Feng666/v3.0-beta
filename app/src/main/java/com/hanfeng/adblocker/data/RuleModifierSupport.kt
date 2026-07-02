@@ -54,6 +54,8 @@ object RuleModifierSupport {
         val blockIpv4: Boolean = false,
         val generichide: Boolean = false,
         val generichideException: Boolean = false,
+        val genericblock: Boolean = false,
+        val specifichide: Boolean = false,
         val dnsrewrite: String? = null,
         val ctags: Set<String> = emptySet(),
         val cname: Boolean = false,
@@ -138,6 +140,8 @@ object RuleModifierSupport {
         var blockIpv4 = false
         var generichide = false
         var generichideException = false
+        var genericblock = false
+        var specifichide = false
         var dnsrewrite: String? = null
         var cname = false
         var emptyResponse = false
@@ -286,6 +290,10 @@ object RuleModifierSupport {
                         requestTypes += "popup"
                         important = true
                     }
+                    "all" -> {
+                        requestTypeScoped = true
+                        requestTypes.clear()
+                    }
                     "document", "main_frame" -> {
                         requestTypeScoped = true
                         requestTypes += "document"
@@ -349,9 +357,15 @@ object RuleModifierSupport {
                     "blockipv4" -> blockIpv4 = true
                     "generichide" -> generichide = true
                     "generichide-exception" -> generichideException = true
+                    "genericblock" -> {
+                        genericblock = true
+                        important = true
+                    }
+                    "specifichide" -> specifichide = true
                     "dnsrewrite" -> {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
                         dnsrewrite = value
+                        important = true
                     }
                     "ctags" -> {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
@@ -418,6 +432,8 @@ object RuleModifierSupport {
             blockIpv4 = blockIpv4,
             generichide = generichide,
             generichideException = generichideException,
+            genericblock = genericblock,
+            specifichide = specifichide,
             dnsrewrite = dnsrewrite,
             ctags = ctags.toSet(),
             cname = cname,
