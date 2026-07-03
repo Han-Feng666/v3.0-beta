@@ -51,6 +51,8 @@ class SettingsActivity : BaseActivity() {
     private lateinit var switchStealthStripParams: Switch
     private lateinit var switchStealthHideReferer: Switch
     private lateinit var switchStealthRemoveFingerprintHeaders: Switch
+    private lateinit var switchAdFreeReward: Switch
+    private lateinit var textAdFreeRewardDesc: TextView
     private lateinit var btnManageCustomTrackingParams: Button
     private lateinit var textCustomTrackingParamsPreview: TextView
     private lateinit var btnManageCustomTrackingHeaders: Button
@@ -115,6 +117,8 @@ class SettingsActivity : BaseActivity() {
         switchStealthStripParams = findViewById(R.id.switchStealthStripParams)
         switchStealthHideReferer = findViewById(R.id.switchStealthHideReferer)
         switchStealthRemoveFingerprintHeaders = findViewById(R.id.switchStealthRemoveFingerprintHeaders)
+        switchAdFreeReward = findViewById(R.id.switchAdFreeReward)
+        textAdFreeRewardDesc = findViewById(R.id.textAdFreeRewardDesc)
         btnManageCustomTrackingParams = findViewById(R.id.btnManageCustomTrackingParams)
         textCustomTrackingParamsPreview = findViewById(R.id.textCustomTrackingParamsPreview)
         btnManageCustomTrackingHeaders = findViewById(R.id.btnManageCustomTrackingHeaders)
@@ -150,6 +154,7 @@ class SettingsActivity : BaseActivity() {
         switchStealthStripParams.isChecked = FeatureSettingsRepository.isStealthStripTrackingParamsEnabled(this)
         switchStealthHideReferer.isChecked = FeatureSettingsRepository.isStealthHideRefererEnabled(this)
         switchStealthRemoveFingerprintHeaders.isChecked = FeatureSettingsRepository.isStealthRemoveFingerprintHeadersEnabled(this)
+        switchAdFreeReward.isChecked = FeatureSettingsRepository.isAdFreeRewardEnabled(this)
         updateShizukuActionState()
 
         switchShizuku.setOnCheckedChangeListener { _, isChecked ->
@@ -191,6 +196,9 @@ class SettingsActivity : BaseActivity() {
         }
         switchStealthRemoveFingerprintHeaders.setOnCheckedChangeListener { _, isChecked ->
             FeatureSettingsRepository.setStealthRemoveFingerprintHeadersEnabled(this, isChecked)
+        }
+        switchAdFreeReward.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setAdFreeRewardEnabled(this, isChecked)
         }
         btnManageCustomTrackingParams.setOnClickListener {
             showCustomParamsDialog()
@@ -279,6 +287,7 @@ class SettingsActivity : BaseActivity() {
         syncShizukuSwitch()
         syncHideBackgroundSwitch()
         syncStealthModeSwitch()
+        syncAdFreeRewardSwitch()
         updateShizukuActionState()
         refreshShizukuActionStateAsync(force = false)
         prewarmShizukuIfPossible()
@@ -401,6 +410,16 @@ class SettingsActivity : BaseActivity() {
             switchStealthRemoveFingerprintHeaders.setOnCheckedChangeListener { _, isChecked ->
                 FeatureSettingsRepository.setStealthRemoveFingerprintHeadersEnabled(this, isChecked)
             }
+        }
+    }
+
+    private fun syncAdFreeRewardSwitch() {
+        val enabled = FeatureSettingsRepository.isAdFreeRewardEnabled(this)
+        if (switchAdFreeReward.isChecked == enabled) return
+        switchAdFreeReward.setOnCheckedChangeListener(null)
+        switchAdFreeReward.isChecked = enabled
+        switchAdFreeReward.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setAdFreeRewardEnabled(this, isChecked)
         }
     }
 

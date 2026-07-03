@@ -1551,6 +1551,39 @@ class AdBlockVpnService : VpnService() {
             (value.count { it == '.' } == 3 || value.contains(':'))
     }
 
+    private val adFreeRewardDomainTokens = listOf(
+        "reward_verify", "rewardverify", "reward_confirm", "rewardconfirm",
+        "reward_callback", "rewardcallback", "reward_report", "rewardreport",
+        "reward_unlock", "rewardunlock", "unlock_by_ad", "unlockbyad",
+        "ad_reward", "adreward", "verify_reward", "verifyreward",
+        "callback_reward", "callbackreward", "watch_ad_unlock", "watchadunlock",
+        "chapter_unlock", "chapterunlock", "reward_complete", "rewardcomplete",
+        "reward_finish", "rewardfinish", "reward_success", "rewardsuccess"
+    )
+
+    private val adFreeRewardVendorTokens = listOf(
+        "pangolin", "pangle", "bytedance", "byteimg", "snssdk",
+        "gdt", "guangdiantong", "tencent", "qq.com",
+        "baidu", "tanx", "kuaishou", "ksapisrv",
+        "sigmob", "mintegral", "vungle", "unity3d",
+        "ironsrc", "applovin", "chartboost", "inmobi",
+        "admob", "doubleclick", "googleadservices"
+    )
+
+    private fun looksLikeAdFreeRewardDomain(domain: String): Boolean {
+        val lower = domain.trim().lowercase()
+        if (lower.isBlank()) return false
+        val hasRewardToken = adFreeRewardDomainTokens.any { lower.contains(it) }
+        if (hasRewardToken) return true
+        val vendorMatch = adFreeRewardVendorTokens.any { lower.contains(it) }
+        if (!vendorMatch) return false
+        val trackingKeywords = listOf("log", "verify", "reward", "callback", "report", "track", "event", "stat")
+        val isTrackingDomain = trackingKeywords.any { lower.contains(it) }
+        if (isTrackingDomain) return true
+        val pathKeywords = listOf("unlock", "confirm", "complete", "finish", "success", "check")
+        return pathKeywords.any { lower.contains(it) }
+    }
+
     private fun resolveUpstreamIp(domain: String): String? {
         val addresses = runCatching { java.net.InetAddress.getAllByName(domain) }.getOrNull()
         return addresses?.firstOrNull()?.hostAddress
@@ -1587,7 +1620,11 @@ class AdBlockVpnService : VpnService() {
                 RuleRepository.isSensitiveAuthDomain(question.domain)
         }
 
-        if (domainContext.matchedRule != null && !protectedQuestion) {
+        val adFreeRewardProtection = !protectedQuestion &&
+            FeatureSettingsRepository.isAdFreeRewardEnabled(this) &&
+            looksLikeAdFreeRewardDomain(question.domain)
+
+        if (domainContext.matchedRule != null && !protectedQuestion && !adFreeRewardProtection) {
             val rewriteTarget = domainContext.matchedRule.dnsrewrite
             if (!rewriteTarget.isNullOrBlank()) {
                 handleDnsRewriteResponse(info, question, rewriteTarget, output, vendor, appName)
@@ -1603,7 +1640,7 @@ class AdBlockVpnService : VpnService() {
             return
         }
 
-        if (!protectedQuestion && shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)) {
+        if (!protectedQuestion && !adFreeRewardProtection && shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)) {
             output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
             StatsRepository.recordBlockedDns(this, vendor, appName, 512, source = StatsRepository.BlockSource.URL_HEURISTIC)
             logDecisionOnce(
@@ -1694,7 +1731,11 @@ class AdBlockVpnService : VpnService() {
                 RuleRepository.isSensitiveAuthDomain(question.domain)
         }
 
-        if (domainContext.matchedRule != null && !protectedQuestion) {
+        val adFreeRewardProtection = !protectedQuestion &&
+            FeatureSettingsRepository.isAdFreeRewardEnabled(this) &&
+            looksLikeAdFreeRewardDomain(question.domain)
+
+        if (domainContext.matchedRule != null && !protectedQuestion && !adFreeRewardProtection) {
             val rewriteTarget = domainContext.matchedRule.dnsrewrite
             val rewrittenResponse = if (!rewriteTarget.isNullOrBlank()) {
                 val rewriteIp = if (looksLikeIpAddress(rewriteTarget)) {
@@ -1723,7 +1764,7 @@ class AdBlockVpnService : VpnService() {
             return null
         }
 
-        if (!protectedQuestion && shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)) {
+        if (!protectedQuestion && !adFreeRewardProtection && shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)) {
             val sinkhole = DnsMessageParser.buildSinkholeResponse(task.payload, question)
             if (sinkhole != null) {
                 dnsResultOut.offer(DnsAsyncResult(

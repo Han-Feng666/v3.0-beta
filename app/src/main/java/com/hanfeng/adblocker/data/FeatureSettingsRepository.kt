@@ -20,8 +20,10 @@ object FeatureSettingsRepository {
     private const val KEY_CUSTOM_TRACKING_PARAMS = "custom_tracking_params"
     private const val KEY_CUSTOM_TRACKING_HEADERS = "custom_tracking_headers"
     private const val KEY_PENDING_FEEDBACK_RULES = "pending_feedback_rules"
+    private const val KEY_AD_FREE_REWARD_ENABLED = "ad_free_reward_enabled"
     private const val MAX_PENDING_FEEDBACK_RULES = 50
     private val gson = Gson()
+    @Volatile private var cachedAdFreeRewardEnabled: Boolean? = null
     @Volatile private var cachedAdBlockEnabled: Boolean? = null
     @Volatile private var cachedHttpDecryptEnabled: Boolean? = null
     @Volatile private var cachedVpnRevokedByOtherVpn: Boolean? = null
@@ -251,6 +253,21 @@ object FeatureSettingsRepository {
 
     fun removePendingFeedbackRule(context: Context, id: String) {
         savePendingFeedbackRules(context, getPendingFeedbackRules(context).filterNot { it.id == id })
+    }
+
+    fun isAdFreeRewardEnabled(context: Context): Boolean {
+        cachedAdFreeRewardEnabled?.let { return it }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_AD_FREE_REWARD_ENABLED, false)
+            .also { cachedAdFreeRewardEnabled = it }
+    }
+
+    fun setAdFreeRewardEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_AD_FREE_REWARD_ENABLED, enabled)
+            .apply()
+        cachedAdFreeRewardEnabled = enabled
     }
 
     private fun savePendingFeedbackRules(context: Context, rules: List<PendingFeedbackRule>) {
