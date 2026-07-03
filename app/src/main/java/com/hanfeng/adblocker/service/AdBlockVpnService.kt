@@ -1562,9 +1562,9 @@ class AdBlockVpnService : VpnService() {
     )
 
     private val adFreeRewardVendorTokens = listOf(
-        "pangolin", "pangle", "bytedance", "byteimg", "snssdk",
-        "gdt", "guangdiantong", "tencent", "qq.com",
-        "baidu", "tanx", "kuaishou", "ksapisrv",
+        "pangolin", "pangle", "snssdk",
+        "gdt", "guangdiantong",
+        "tanx", "kuaishou",
         "sigmob", "mintegral", "vungle", "unity3d",
         "ironsrc", "applovin", "chartboost", "inmobi",
         "admob", "doubleclick", "googleadservices"
@@ -1577,11 +1577,8 @@ class AdBlockVpnService : VpnService() {
         if (hasRewardToken) return true
         val vendorMatch = adFreeRewardVendorTokens.any { lower.contains(it) }
         if (!vendorMatch) return false
-        val trackingKeywords = listOf("log", "verify", "reward", "callback", "report", "track", "event", "stat")
-        val isTrackingDomain = trackingKeywords.any { lower.contains(it) }
-        if (isTrackingDomain) return true
-        val pathKeywords = listOf("unlock", "confirm", "complete", "finish", "success", "check")
-        return pathKeywords.any { lower.contains(it) }
+        val rewardKeywords = listOf("reward", "verify", "callback", "unlock", "confirm")
+        return rewardKeywords.any { lower.contains(it) }
     }
 
     private fun resolveUpstreamIp(domain: String): String? {

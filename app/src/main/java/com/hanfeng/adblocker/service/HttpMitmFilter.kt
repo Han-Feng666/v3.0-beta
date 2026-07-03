@@ -1746,7 +1746,8 @@ object HttpMitmFilter {
             bodySignalScore = bodySignalScore,
             protectedNovelTarget = environment.protectedNovelTarget,
             aggressiveNovelTarget = environment.aggressiveNovelTarget,
-            vendor = environment.vendor
+            vendor = environment.vendor,
+            context = environment.context
         )?.let { return it }
         inspectCommentAdBodyBranch(
             decisionContext = bodyDecisionContext,
@@ -2045,8 +2046,13 @@ object HttpMitmFilter {
         bodySignalScore: Int,
         protectedNovelTarget: Boolean,
         aggressiveNovelTarget: Boolean,
-        vendor: String
+        vendor: String,
+        context: android.content.Context
     ): String? {
+        val adFreeRewardEnabled = FeatureSettingsRepository.isAdFreeRewardEnabled(context)
+        if (adFreeRewardEnabled && novelSignals.rewardUnlockHits >= 1) {
+            return "neutralized-body-reward-unlock"
+        }
         if (novelSignals.rewardUnlockHits >= 2 && (protectedNovelTarget || aggressiveNovelTarget || bodySignalScore >= 1)) {
             return "neutralized-body-reward-unlock"
         }
