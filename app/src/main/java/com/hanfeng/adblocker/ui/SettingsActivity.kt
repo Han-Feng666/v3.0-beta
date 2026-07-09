@@ -66,6 +66,9 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnExportLogs: Button
     private lateinit var btnExportRules: Button
     private lateinit var btnExportCertificate: Button
+    private lateinit var btnInstallSystemCert: Button
+    private lateinit var btnModifyDeviceId: Button
+    private lateinit var btnModifySerial: Button
     private lateinit var btnBack: Button
     private lateinit var settingsRoot: View
     private var cachedShizukuServiceHealthy = false
@@ -75,6 +78,8 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnHostsEditor: Button
     private lateinit var btnNetworkPermission: Button
     private lateinit var btnBackgroundRestrict: Button
+    private lateinit var btnRootScript: Button
+    private lateinit var btnRootHide: Button
     
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode != ShizukuRepository.REQUEST_CODE) return@OnRequestPermissionResultListener
@@ -132,12 +137,17 @@ class SettingsActivity : BaseActivity() {
         btnExportLogs = findViewById(R.id.btnExportLogs)
         btnExportRules = findViewById(R.id.btnExportRules)
         btnExportCertificate = findViewById(R.id.btnExportCertificate)
+        btnInstallSystemCert = findViewById(R.id.btnInstallSystemCert)
+        btnModifyDeviceId = findViewById(R.id.btnModifyDeviceId)
+        btnModifySerial = findViewById(R.id.btnModifySerial)
         btnBack = findViewById(R.id.btnBack)
         
         // Shizuku 增强
         btnHostsEditor = findViewById(R.id.btnHostsEditor)
         btnNetworkPermission = findViewById(R.id.btnNetworkPermission)
         btnBackgroundRestrict = findViewById(R.id.btnBackgroundRestrict)
+        btnRootScript = findViewById(R.id.btnRootScript)
+        btnRootHide = findViewById(R.id.btnRootHide)
 
         val initialTopPadding = settingsRoot.paddingTop
         val initialBottomPadding = settingsRoot.paddingBottom
@@ -234,6 +244,16 @@ class SettingsActivity : BaseActivity() {
         btnExportCertificate.setOnClickListener {
             exportCertificateToUser()
         }
+        btnInstallSystemCert.setOnClickListener {
+            installCertificateToSystem()
+        }
+        btnModifyDeviceId.setOnClickListener {
+            showModifyDeviceIdDialog()
+        }
+        btnModifySerial.setOnClickListener {
+            showModifySerialDialog()
+        }
+        refreshSystemCertStatus()
         
         // Shizuku 增强功能按钮
         btnHostsEditor.setOnClickListener {
@@ -266,6 +286,14 @@ class SettingsActivity : BaseActivity() {
                     .putExtra(ShizukuEnhanceAppsActivity.EXTRA_MODE, ShizukuEnhanceAppsActivity.MODE_BACKGROUND),
                 failureMessage = "打开后台限制管理失败"
             )
+        }
+
+        btnRootScript.setOnClickListener {
+            launchActivitySafely(Intent(this, RootScriptActivity::class.java), failureMessage = "打开 Root 脚本执行失败")
+        }
+
+        btnRootHide.setOnClickListener {
+            launchActivitySafely(Intent(this, RootHideActivity::class.java), failureMessage = "打开 Root 隐藏失败")
         }
         
         textShizukuStatus.setOnClickListener {
@@ -714,6 +742,298 @@ class SettingsActivity : BaseActivity() {
             }
         }
     }
+
+    private fun installCertificateToSystem() {
+        if (!com.hanfeng.adblocker.shizuku.SystemCertInstaller.isRootAvailable()) {
+            StableDialog.builder(this)
+                .setTitle("需要 Root 权限")
+                .setMessage("安装证书到系统需要 Root 权限，请确保设备已获取 Root。")
+                .setPositiveButton("确定", null)
+                .showSafely(this, "root-unavailable-cert-install")
+            return
+        }
+        StableDialog.builder(this)
+            .setTitle("安装证书到系统")
+            .setMessage("将 MITM CA 证书安装到系统信任库。\n\n支持的安装方式：\n- 直接写入 /system（需可读写系统分区）\n- Magisk 模块（需安装 Magisk/KernelSU）\n- bind mount 挂载覆盖\n- Conscrypt 模块（Android 14+）\n\n安装成功后可拦截更多 HTTPS 广告。部分设备需重启后生效。\n\n是否继续？")
+            .setPositiveButton("安装") { _, _ -> performSystemCertInstall() }
+            .setNegativeButton("取消", null)
+            .showSafely(this, "confirm-system-cert-install")
+    }
+
+    private fun performSystemCertInstall() {
+        lifecycleScope.launch {
+            try {
+                val installer = com.hanfeng.adblocker.shizuku.SystemCertInstaller(this@SettingsActivity)
+                val result = withContext(Dispatchers.Default) { installer.installToSystem() }
+                withContext(Dispatchers.Main) {
+                    when (result) {
+                        is com.hanfeng.adblocker.shizuku.SystemCertInstaller.InstallResult.Success -> {
+                            val rebootHint = if (result.needsReboot) "\n\n建议重启设备使证书完全生效。" else "\n\n证书刷新信号已发送，无需重启。"
+                            StableDialog.builder(this@SettingsActivity)
+                                .setTitle("安装成功")
+                                .setMessage("证书已通过 ${result.method} 方式安装到系统。\n证书 hash: ${result.hashName}$rebootHint")
+                                .setPositiveButton("确定", null)
+                                .showSafely(this@SettingsActivity, "system-cert-install-success")
+                            refreshSystemCertStatus()
+                        }
+                        is com.hanfeng.adblocker.shizuku.SystemCertInstaller.InstallResult.Failure -> {
+                            StableDialog.builder(this@SettingsActivity)
+                                .setTitle("安装失败")
+                                .setMessage("${result.reason}\n\n已尝试: ${result.triedMethods.joinToString(", ")}")
+                                .setPositiveButton("确定", null)
+                                .showSafely(this@SettingsActivity, "system-cert-install-failed")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("错误")
+                        .setMessage("安装过程出错: ${e.message}")
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "system-cert-install-error")
+                }
+            }
+        }
+    }
+
+    private fun refreshSystemCertStatus() {
+        if (!com.hanfeng.adblocker.shizuku.SystemCertInstaller.isRootAvailable()) {
+            btnInstallSystemCert.text = "安装证书到系统 (Root)"
+            return
+        }
+        lifecycleScope.launch {
+            val installer = com.hanfeng.adblocker.shizuku.SystemCertInstaller(this@SettingsActivity)
+            val status = withContext(Dispatchers.Default) { installer.checkCurrentInstallStatus() }
+            withContext(Dispatchers.Main) {
+                val text = when (status) {
+                    is com.hanfeng.adblocker.shizuku.SystemCertInstaller.CertInstallStatus.INSTALLED ->
+                        "证书已安装到系统 (Root)"
+                    is com.hanfeng.adblocker.shizuku.SystemCertInstaller.CertInstallStatus.NOT_INSTALLED ->
+                        "安装证书到系统 (Root)"
+                    is com.hanfeng.adblocker.shizuku.SystemCertInstaller.CertInstallStatus.NOT_GENERATED ->
+                        "安装证书到系统 (Root) — 请先生成证书"
+                }
+                btnInstallSystemCert.text = text
+            }
+        }
+    }
+
+    private fun showModifyDeviceIdDialog() {
+        if (!com.hanfeng.adblocker.shizuku.DeviceIdModifier.isRootAvailable()) {
+            StableDialog.builder(this)
+                .setTitle("需要 Root 权限")
+                .setMessage("修改 Android ID 需要 Root 权限。")
+                .setPositiveButton("确定", null)
+                .showSafely(this, "root-unavailable-device-id")
+            return
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16.dp, 16.dp, 16.dp, 8.dp)
+        }
+        val etInput = EditText(this).apply {
+            hint = "正在读取..."
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or android.text.InputType.TYPE_CLASS_TEXT
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+        }
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 8.dp, 0, 0)
+        }
+        val btnRandom = Button(this).apply {
+            text = "随机"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp }
+        }
+        val btnReset = Button(this).apply {
+            text = "恢复默认"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp }
+        }
+        btnRow.addView(btnRandom)
+        btnRow.addView(btnReset)
+        container.addView(etInput)
+        container.addView(btnRow)
+
+        val dialog = StableDialog.builder(this)
+            .setTitle("修改 Android ID")
+            .setMessage("当前 Android ID（16 位十六进制）：")
+            .setView(container)
+            .setPositiveButton("确认修改") { _, _ ->
+                val newId = etInput.text.toString().trim()
+                if (newId.isBlank()) {
+                    showShortToast("请输入 Android ID")
+                    return@setPositiveButton
+                }
+                executeDeviceIdChange(newId)
+            }
+            .setNegativeButton("取消", null)
+            .create()
+
+        dialog.show()
+        btnRandom.setOnClickListener {
+            etInput.setText(com.hanfeng.adblocker.shizuku.DeviceIdModifier.generateRandomAndroidId())
+            etInput.setSelection(etInput.text.length)
+        }
+        btnReset.setOnClickListener {
+            etInput.setText("")
+            etInput.hint = "正在恢复..."
+            Thread {
+                val result = com.hanfeng.adblocker.shizuku.DeviceIdModifier().readAndroidId()
+                runOnUiThread {
+                    val currentId = if (result.exitCode == 0 && result.output.isNotBlank()) result.output.trim() else "(无法读取)"
+                    etInput.setText(currentId)
+                    etInput.setSelection(etInput.text.length)
+                }
+            }.start()
+        }
+
+        Thread {
+            val result = com.hanfeng.adblocker.shizuku.DeviceIdModifier().readAndroidId()
+            runOnUiThread {
+                val currentId = if (result.exitCode == 0 && result.output.isNotBlank()) result.output.trim() else "(无法读取)"
+                etInput.setText(currentId)
+                etInput.setSelection(etInput.text.length)
+                dialog.setMessage("当前 Android ID（16 位十六进制）：")
+            }
+        }.start()
+    }
+
+    private fun executeDeviceIdChange(newId: String) {
+        lifecycleScope.launch {
+            val modifier = com.hanfeng.adblocker.shizuku.DeviceIdModifier()
+            val result = withContext(Dispatchers.Default) { modifier.writeAndroidId(newId) }
+            withContext(Dispatchers.Main) {
+                if (result.exitCode == 0) {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改成功")
+                        .setMessage("Android ID 已修改为:\n$newId\n\n部分应用需清除数据或重启设备才能看到新的 Android ID。")
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "device-id-changed")
+                } else {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改失败")
+                        .setMessage(result.output.ifBlank { "修改失败 (exit=${result.exitCode})" })
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "device-id-change-failed")
+                }
+            }
+        }
+    }
+
+    private fun showModifySerialDialog() {
+        if (!com.hanfeng.adblocker.shizuku.DeviceIdModifier.isRootAvailable()) {
+            StableDialog.builder(this)
+                .setTitle("需要 Root 权限")
+                .setMessage("修改主板序列号需要 Root 权限。")
+                .setPositiveButton("确定", null)
+                .showSafely(this, "root-unavailable-serial")
+            return
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16.dp, 16.dp, 16.dp, 8.dp)
+        }
+        val etInput = EditText(this).apply {
+            hint = "正在读取..."
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+        }
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 8.dp, 0, 0)
+        }
+        val btnRandom = Button(this).apply {
+            text = "随机"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp }
+        }
+        val btnReset = Button(this).apply {
+            text = "恢复默认"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp }
+        }
+        btnRow.addView(btnRandom)
+        btnRow.addView(btnReset)
+        container.addView(etInput)
+        container.addView(btnRow)
+
+        val dialog = StableDialog.builder(this)
+            .setTitle("修改主板序列号")
+            .setMessage("当前主板序列号：")
+            .setView(container)
+            .setPositiveButton("确认修改") { _, _ ->
+                val newSerial = etInput.text.toString().trim()
+                if (newSerial.isBlank()) {
+                    showShortToast("请输入序列号")
+                    return@setPositiveButton
+                }
+                executeSerialChange(newSerial)
+            }
+            .setNegativeButton("取消", null)
+            .create()
+
+        dialog.show()
+        btnRandom.setOnClickListener {
+            etInput.setText(com.hanfeng.adblocker.shizuku.DeviceIdModifier.generateRandomSerial())
+            etInput.setSelection(etInput.text.length)
+        }
+        btnReset.setOnClickListener {
+            etInput.setText("")
+            etInput.hint = "正在恢复..."
+            Thread {
+                val result = com.hanfeng.adblocker.shizuku.DeviceIdModifier().readSerialNo()
+                runOnUiThread {
+                    etInput.setText(result.output.trim())
+                    etInput.setSelection(etInput.text.length)
+                }
+            }.start()
+        }
+
+        Thread {
+            val result = com.hanfeng.adblocker.shizuku.DeviceIdModifier().readSerialNo()
+            runOnUiThread {
+                val currentSerial = result.output.trim().ifBlank { "(无法读取)" }
+                etInput.setText(currentSerial)
+                etInput.setSelection(etInput.text.length)
+                dialog.setMessage("当前主板序列号：")
+            }
+        }.start()
+    }
+
+    private fun executeSerialChange(newSerial: String) {
+        lifecycleScope.launch {
+            val modifier = com.hanfeng.adblocker.shizuku.DeviceIdModifier()
+            val result = withContext(Dispatchers.Default) { modifier.writeSerialNo(newSerial) }
+            withContext(Dispatchers.Main) {
+                if (result.exitCode == 0) {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改成功")
+                        .setMessage("主板序列号已修改为:\n$newSerial\n\n重启设备后生效。")
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "serial-changed")
+                } else {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改失败")
+                        .setMessage(result.output.ifBlank { "修改失败 (exit=${result.exitCode})" })
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "serial-change-failed")
+                }
+            }
+        }
+    }
+
+    private val Int.dp: Int
+        get() = (this * resources.displayMetrics.density).toInt()
 
     private fun needsLegacyStoragePermission(): Boolean {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&

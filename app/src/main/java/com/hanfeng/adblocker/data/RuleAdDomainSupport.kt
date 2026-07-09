@@ -154,7 +154,9 @@ object RuleAdDomainSupport {
             "moloco", "bidmachine", "adtiming", "adjoe", "startapp", "criteo", "mytarget",
             "maio", "nend", "tapdaq", "yeahmobi", "adtelligent", "pubnative", "hyprmx",
             "bidswitch", "loopme", "verve", "vervegroup", "smadex", "sonobi", "gumgum",
-            "sharethrough", "triplelift", "yieldmo", "indexexchange", "rubicon", "magnite"
+            "sharethrough", "triplelift", "yieldmo", "indexexchange", "rubicon", "magnite",
+            "doubleclick", "googlesyndication", "googleadservices", "imasdk", "mopub", "snapads",
+            "rayjump", "singular", "appsflyer", "adjust", "kochava", "branchmetrics"
         )
         return sdkVendorSignals.any { keywordMatches(lower, normalizedTokens, it) }
     }

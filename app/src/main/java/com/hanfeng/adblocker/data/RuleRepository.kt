@@ -46,7 +46,6 @@ object RuleRepository {
     private const val SUSPICIOUS_SAMPLE_DECODE_MAX_LENGTH = 2048
     private const val SUSPICIOUS_SAMPLE_MAX_DECODE_ROUNDS = 2
     private const val RULES_FILE_NAME = "rules.json"
-    private const val BUILTIN_AD_SEED_SOURCE_ID = "builtin-ad-seed"
     private const val IMPORT_PARSE_BATCH_SIZE = 4_000
     private const val LARGE_RULE_CACHE_THRESHOLD = 20_000
     private const val MAX_STREAM_IMPORT_NEW_RULES = 300_000
@@ -1663,7 +1662,9 @@ object RuleRepository {
             blockIpv4 = parsedRule.blockIpv4,
             ctags = parsedRule.ctags,
             generichideException = parsedRule.generichideException,
-            remoteSourceId = remoteSourceId
+            remoteSourceId = remoteSourceId,
+            jsonPrunePaths = parsedRule.jsonPrunePaths,
+            hlsRules = parsedRule.hlsRules
         )
     }
 
@@ -1847,7 +1848,9 @@ object RuleRepository {
             sourcePorts = parsedRule.sourcePorts,
             denyallow = parsedRule.denyallow,
             remoteSourceId = remoteSourceId,
-            cosmeticException = parsedRule.isException
+            cosmeticException = parsedRule.isException,
+            jsonPrunePaths = parsedRule.jsonPrunePaths,
+            hlsRules = parsedRule.hlsRules
         )
     }
 
@@ -2487,6 +2490,8 @@ object RuleRepository {
             appName = appName,
             requestDomain = requestDomain
         )
+        val jsonPrunePaths = actionableRules.flatMap { it.jsonPrunePaths }.toSet()
+        val hlsRules = actionableRules.flatMap { it.hlsRules }.toSet()
         return RequestRewriteDirectives(
             removeParams = removeParams,
             removeParamRegexes = removeParamRegexes,
@@ -2501,7 +2506,9 @@ object RuleRepository {
             cookieSet = cookieSet,
             block = importantActionableRules.isNotEmpty(),
             emptyResponse = importantActionableRules.isNotEmpty() && importantActionableRules.any { it.emptyResponse },
-            matchedRuleSummaries = matchedRuleSummaries
+            matchedRuleSummaries = matchedRuleSummaries,
+            jsonPrunePaths = jsonPrunePaths,
+            hlsRules = hlsRules
         )
     }
 
@@ -3339,6 +3346,8 @@ object RuleRepository {
         if (isSocialCoreDomain(normalized) && !explicitAdTraffic) return false
         if (explicitAdTraffic) return true
         if (shouldForcePushRecommendInspection(normalized, appName, normalizedVendor)) return true
+        val gameApp = isGameAppHint(appName)
+        if (gameApp) return false
         return suspiciousDomainConfidenceScore(
             domain = normalized,
             vendor = normalizedVendor,
@@ -3390,6 +3399,25 @@ object RuleRepository {
         if (text.isBlank()) return false
         val normalized = text.replace(alphanumericCnRegex, "")
         return VendorConfigData.novelAppIdentifiers.any { identifierMatches(text, normalized, it) }
+    }
+
+    fun isGameAppHint(value: String?): Boolean {
+        val text = value?.trim()?.lowercase().orEmpty()
+        if (text.isBlank()) return false
+        if (isAggressiveAdAppHint(text)) return false
+        val normalized = text.replace(alphanumericCnRegex, "")
+        val gameIdentifiers = listOf(
+            "游戏", "game", "gaming", "play", "puzzle", "rpg", "mmorpg", "fps", "moba",
+            "arcade", "simulator", "simulation", "strategy", "action", "adventure",
+            "roguelike", "roguelite", "survival", "sandbox", "platformer",
+            "minecraft", "roblox", "candycrush", "subwaysurfers", "templerun",
+            "amongus", "geometrydash", "terraria", "stardew",
+            "com.netease", "com.tencent.tmgp", "com.miHoYo",
+            "com.epicgames", "com.supercell", "com.king", "com.rovio",
+            "com.ea.game", "com.ubisoft", "com.sega", "com.capcom",
+            "com.konami", "com.squareenix", "com.bandainamcoent"
+        )
+        return gameIdentifiers.any { identifierMatches(text, normalized, it) }
     }
 
     fun isCommunityAppHint(value: String?): Boolean {
@@ -4113,7 +4141,9 @@ object RuleRepository {
                 blockIpv4 = modifierInfo.blockIpv4,
                 ctags = modifierInfo.ctags,
                 generichideException = modifierInfo.generichideException,
-                vendorHints = lineContext.vendorHints
+                vendorHints = lineContext.vendorHints,
+                jsonPrunePaths = modifierInfo.jsonPrunePaths,
+                hlsRules = modifierInfo.hlsRules
             )
         }
     }
@@ -5489,7 +5519,9 @@ object RuleRepository {
         sourcePorts: Set<Int> = emptySet(),
         denyallow: Set<String> = emptySet(),
         remoteSourceId: String? = null,
-        cosmeticException: Boolean = false
+        cosmeticException: Boolean = false,
+        jsonPrunePaths: Set<String> = emptySet(),
+        hlsRules: Set<String> = emptySet()
     ): String {
         val dnsKey = normalizeDnsTypes(dnsTypes)?.joinToString("|") ?: "*"
         val excludedDnsKey = normalizeDnsTypes(excludedDnsTypes)?.joinToString("|") ?: "-"
@@ -5533,7 +5565,9 @@ object RuleRepository {
             "dports:$destinationPortKey",
             "sports:$sourcePortKey",
             "deny:$denyallowKey",
-            "remote:${remoteSourceId.orEmpty()}"
+            "remote:${remoteSourceId.orEmpty()}",
+            "jsonprune:${jsonPrunePaths.toSortedSet().joinToString("|")}",
+            "hls:${hlsRules.toSortedSet().joinToString("|")}"
         ).joinToString("#")
     }
 
@@ -5893,39 +5927,9 @@ object RuleRepository {
                 LogRepository.append(context, "规则存储已迁移到文件：${file.name}")
             }
         } else {
-            val seedRules = buildBuiltInAdSeedRules(context)
-            writeRulesFile(context, seedRules)
-            LogRepository.append(context, "Initialized built-in ad seed rules: count=${seedRules.size}")
-            return gson.toJson(seedRules)
+            return legacyJson
         }
         return legacyJson
-    }
-
-    private fun buildBuiltInAdSeedRules(context: Context): List<BlockRule> {
-        val domains = linkedSetOf<String>()
-        runCatching {
-            context.resources.openRawResource(R.raw.hanfeng_builtin_rules).bufferedReader(Charsets.UTF_8).useLines { lines ->
-                lines.forEach { rawLine ->
-                    RuleParsingSupport.expandPossibleRuleFragments(rawLine).forEach { fragment ->
-                        val trimmed = fragment.trim()
-                        if (trimmed.isBlank() || trimmed.startsWith("#") || trimmed.startsWith("!")) return@forEach
-                        extractSimpleImportDomain(trimmed)?.let(domains::add)
-                    }
-                }
-            }
-        }.onFailure { error ->
-            LogRepository.append(context, "Load built-in rule resource failed: ${error.message ?: error.javaClass.simpleName}")
-        }
-        geositeAdSeedDomains.mapNotNullTo(domains) { sanitizeDomain(it) }
-        return domains.map { domain ->
-            BlockRule(
-                id = "builtin-ad-seed-$domain",
-                domain = domain,
-                vendor = GENERIC_AD_VENDOR,
-                source = RuleSource.IMPORTED,
-                remoteSourceId = BUILTIN_AD_SEED_SOURCE_ID
-            )
-        }
     }
 
     private fun writeRulesJson(context: Context, json: String, ruleCount: Int) {
@@ -6731,7 +6735,9 @@ object RuleRepository {
             sourcePorts = rule.sourcePorts,
             denyallow = rule.denyallow,
             remoteSourceId = rule.remoteSourceId,
-            cosmeticException = rule.cosmeticException
+            cosmeticException = rule.cosmeticException,
+            jsonPrunePaths = rule.jsonPrunePaths,
+            hlsRules = rule.hlsRules
         )
     }
 
@@ -6831,7 +6837,9 @@ object RuleRepository {
         val cookieSet: Set<String> = emptySet(),
         val block: Boolean = false,
         val emptyResponse: Boolean = false,
-        val matchedRuleSummaries: List<String> = emptyList()
+        val matchedRuleSummaries: List<String> = emptyList(),
+        val jsonPrunePaths: Set<String> = emptySet(),
+        val hlsRules: Set<String> = emptySet()
     )
 
     data class RemoteRuleRemovalCandidate(
@@ -7177,7 +7185,9 @@ object RuleRepository {
             blockIpv4 = existing.blockIpv4 || incoming.blockIpv4,
             ctags = (existing.ctags + incoming.ctags).toSet(),
             generichideException = existing.generichideException || incoming.generichideException,
-            important = existing.important || incoming.important
+            important = existing.important || incoming.important,
+            jsonPrunePaths = (existing.jsonPrunePaths + incoming.jsonPrunePaths).toSet(),
+            hlsRules = (existing.hlsRules + incoming.hlsRules).toSet()
         )
     }
 
@@ -7342,7 +7352,9 @@ object RuleRepository {
         val blockIpv4: Boolean = false,
         val ctags: Set<String> = emptySet(),
         val generichideException: Boolean = false,
-        val isUnsupported: Boolean = false
+        val isUnsupported: Boolean = false,
+        val jsonPrunePaths: Set<String> = emptySet(),
+        val hlsRules: Set<String> = emptySet()
     )
 
 }

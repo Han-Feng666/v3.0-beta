@@ -22,6 +22,7 @@ import com.HanFeng.databinding.ItemDecisionDomainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.HanFeng.core.network.NetworkKernel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -73,6 +74,7 @@ class DecisionDomainsActivity : BaseActivity() {
 
     private fun toggleDecision(entry: LogRepository.DomainDecisionEntry) {
         LogRepository.toggleDomainDecision(applicationContext, entry.domain, entry.type)
+        NetworkKernel.reloadIfRunning(applicationContext)
         val newAction = if (entry.type == LogRepository.DomainDecisionType.BLOCKED) "放行" else "拦截"
         android.widget.Toast.makeText(applicationContext, "已将该域名切换为 $newAction", android.widget.Toast.LENGTH_SHORT).show()
         loadEntries()

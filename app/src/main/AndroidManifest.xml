@@ -47,6 +47,18 @@
             android:exported="false" />
 
         <activity
+            android:name="com.HanFeng.ui.RootScriptActivity"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.RootTerminalActivity"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.RootHideActivity"
+            android:exported="false" />
+
+        <activity
             android:name="com.HanFeng.ui.ShizukuEnhanceAppsActivity"
             android:exported="false" />
 

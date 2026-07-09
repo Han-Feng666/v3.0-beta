@@ -701,7 +701,35 @@ object HttpMitmFilter {
     private val htmlNovelMarkerTokens = listOf(
         "welfare-page", "welfare_page", "task-center", "task_center", "coin-reward", "coin_reward",
         "reading-bonus", "reading_bonus", "reward-video", "watch-ad", "watch_ad", "unlock-by-ad",
-        "unlock_chapter", "offerwall", "benefit-page", "benefit_page"
+        "unlock_chapter", "offerwall", "benefit-page", "benefit_page",
+        "reader-bottom-ad", "reader_bottom_ad", "reader-bottom-banner", "reader_bottom_banner",
+        "page-turn-ad", "page_turn_ad", "turn-page-ad", "turn_page_ad", "flip-page-ad", "flip_page_ad",
+        "chapter-tail-ad", "chapter_tail_ad", "chapter-end-ad", "chapter_end_ad"
+    )
+    private val readerBottomAdTokens = listOf(
+        "\"bottom_ad\"", "\"bottom_banner\"", "\"bottom_float_ad\"",
+        "\"reader_bottom_ad\"", "\"reader_bottom_banner\"", "\"reader_banner\"",
+        "\"reader_footer_ad\"", "\"page_footer_ad\"", "\"chapter_footer_ad\"",
+        "\"reader_float_ad\"", "\"floating_banner\"", "\"float_layer_ad\"",
+        "\"suspend_ad\"", "\"reader_bottom_card\"", "\"bottom_ad_info\"",
+        "\"bottom_ad_list\"", "\"bottom_ads\"", "\"reader_banner_list\""
+    )
+    private val readerPageTurnAdTokens = listOf(
+        "\"page_turn_ad\"", "\"turn_page_ad\"", "\"flip_page_ad\"",
+        "\"page_insert_ad\"", "\"reading_insert_ad\"", "\"reading_page_ad\"",
+        "\"reading_interstitial\"", "\"reader_insert_card\"", "\"page_ad_card\"",
+        "\"turn_page_card\"", "\"page_swipe_ad\"", "\"swipe_page_ad\"",
+        "\"next_page_ad\"", "\"chapter_next_ad\"", "\"chapter_page_ad\"",
+        "\"chapter_end_ad\"", "\"page_tail_popup\"", "\"chapter_tail_popup\"",
+        "\"reader_tail_popup\"", "\"page_end_card\"", "\"chapter_end_card\"",
+        "\"reader_next_popup\"", "\"chapter_next_popup\"", "\"page_flip_reward\""
+    )
+    private val readerAdMaterialTokens = listOf(
+        "\"material_url", "\"material_urls", "\"image_url", "\"image_urls", "\"img_url",
+        "\"video_url", "\"video_urls", "\"landing_url", "\"landing_urls", "\"click_url",
+        "\"show_url", "\"impression_url", "\"monitor_url", "\"track_url",
+        "\"creative_id", "\"creative_data", "\"render_data", "\"template_id",
+        "\"slot_id", "\"placement_id", "\"ad_material", "\"ad_info", "\"ad_data"
     )
     private val readerVisibleAdTextTokens = listOf(
         "穿山甲广告", "优量汇广告", "广告是为了更好地支持作者创作", "看视频免广告",
@@ -711,8 +739,88 @@ object HttpMitmFilter {
     private val rewardUnlockTokens = listOf(
         "\"reward_verify\"", "\"rewardverify\"", "\"reward_unlock\"", "\"rewardunlock\"",
         "\"watch_ad_unlock\"", "\"watchadunlock\"", "\"unlock_by_ad\"", "\"unlockbyad\"",
-        "\"chapter_unlock\"", "\"chapterunlock\""
+        "\"chapter_unlock\"", "\"chapterunlock\"",
+        "\"is_rewarded\"", "\"reward_amount\"", "\"reward_name\"", "\"reward_id\"",
+        "\"onRewarded\"", "\"on_rewarded\"", "\"onUserEarnedReward\"",
+        "\"RewardedVideoAd\"", "\"reward_earned\"", "\"reward_granted\"",
+        "\"reward_ad_completed\"", "\"video_ad_finished\"", "\"ad_completed\"",
+        "\"handleRewardedVideo\"", "\"s2s_reward\"", "\"server_reward\"",
+        "\"reward_complete\"", "\"rewardcomplete\"", "\"reward_success\"", "\"rewardsuccess\"",
+        "\"reward_finish\"", "\"rewardfinish\"", "\"grant_reward\"", "\"grantreward\"",
+        "\"claim_reward\"", "\"claimreward\"", "\"incentive_complete\"", "\"inspire_complete\""
     )
+    private val vastAdBodyTokens = listOf(
+        "<vast", "vast version=", "\"vast\"", "<ad id=", "<inline>",
+        "<wrapper>", "<creatives>", "<linear", "skipoffset",
+        "<trackingevents>", "<impression>", "<videoclicks>",
+        "<adtitle>", "<adsystem>", "\"ad_type\":\"video\"",
+        "\"adtype\":\"video\"", "\"ad_format\":\"rewarded\"",
+        "\"adformat\":\"rewarded\"", "\"ad_type\": \"rewarded\"",
+        "#extm3u", "#ext-x-targetduration", "#extinf:",
+        "#ext-x-stream-inf", "#ext-x-media", "<vpaid", "vpaid.js",
+        "omid.js", "mraid.js", "verificationparameters", "adverifications",
+        "<mediafiles>", "<mediafile", "<companionads>", "<companion ",
+        "<error><![cdata[", "adparameters", "vastadtaguri", "vast_ad_tag",
+        "#ext-x-discontinuity", "#ext-x-map", "#ext-x-key", "mpd xmlns=", "<mpd",
+        "<adaptationset", "<representation", "dash+xml"
+    )
+    private val gameRewardAdBodyTokens = listOf(
+        "\"onrewarded\"", "\"on_rewarded\"", "\"rewardtype\"",
+        "\"reward_amount\"", "\"reward_value\"", "\"reward_id\"",
+        "\"earnreward\"", "\"grantreward\"", "\"adreward\"",
+        "\"rewardgranted\"", "\"rewardearned\"", "\"rewardcollected\"",
+        "\"collectreward\"", "\"claimreward\"", "\"getreward\"",
+        "\"rewardresult\"", "\"rewardstatus\"", "\"rewarddata\"",
+        "\"isrewarded\"", "\"is_rewarded\"", "\"rewarded:true\"",
+        "\"rewarded\":true", "\"rewarded\": true",
+        "\"completed\":true", "\"completed\": true", "\"complete\":true", "\"complete\": true",
+        "\"finished\":true", "\"finished\": true", "\"success\":true", "\"success\": true",
+        "\"isended\":true", "\"isended\": true", "\"is_ended\":true", "\"is_ended\": true"
+    )
+    private val rewardCompletionBodyTokens = listOf(
+        "\"code\":0", "\"errcode\":0", "\"status\":0", "\"success\":true", "\"success\": true",
+        "\"completed\":true", "\"completed\": true", "\"complete\":true", "\"complete\": true",
+        "\"finished\":true", "\"finished\": true", "\"isended\":true", "\"isended\": true",
+        "\"is_ended\":true", "\"is_ended\": true", "\"rewarded\":true", "\"rewarded\": true",
+        "\"reward_granted\":true", "\"reward_granted\": true", "\"rewardearned\":true"
+    )
+    private val sdkJsonTemplateFingerprints = listOf(
+        SdkJsonFingerprint("GDT", listOf("\"ret\"", "\"data\"", "\"placement_id\"", "\"traceid\""), minMatch = 3),
+        SdkJsonFingerprint("Pangle", listOf("\"request_id\"", "\"creative\"", "\"ad_domain\"", "\"package_name\"", "\"icon\""), minMatch = 3),
+        SdkJsonFingerprint("UnityAds", listOf("\"adUnitId\"", "\"isRewarded\"", "\"campaignId\"", "\"bidToken\"", "\"adNetwork\""), minMatch = 3),
+        SdkJsonFingerprint("AppLovin", listOf("\"zone_id\"", "\"impression_id\"", "\"revenue\"", "\"network_name\"", "\"creative_id\""), minMatch = 3),
+        SdkJsonFingerprint("IronSource", listOf("\"instanceId\"", "\"placementName\"", "\"rewardName\"", "\"rewardAmount\"", "\"bidderToken\""), minMatch = 3),
+        SdkJsonFingerprint("Mintegral", listOf("\"unit_id\"", "\"bid_token\"", "\"campaign_id\"", "\"creative_id\"", "\"ad_num\""), minMatch = 3),
+        SdkJsonFingerprint("Vungle", listOf("\"placement\"", "\"bid_token\"", "\"campaign_id\"", "\"ad_token\"", "\"template_id\""), minMatch = 3),
+        SdkJsonFingerprint("AdColony", listOf("\"zone_id\"", "\"campaign_id\"", "\"creative_id\"", "\"ad_network\"", "\"reward_amount\""), minMatch = 3),
+        SdkJsonFingerprint("Chartboost", listOf("\"ad_id\"", "\"bid_token\"", "\"campaign_id\"", "\"creative_id\"", "\"reward\""), minMatch = 3),
+        SdkJsonFingerprint("BidMachine", listOf("\"bid_id\"", "\"seatbid\"", "\"native\"", "\"banner\"", "\"video\""), minMatch = 3),
+        SdkJsonFingerprint("MetaAN", listOf("\"placement_id\"", "\"bid_token\"", "\"ad_formats\"", "\"audience_network\"", "\"native_ad\""), minMatch = 3),
+        SdkJsonFingerprint("AdMob", listOf("\"adUnitId\"", "\"mediation\"", "\"adNetworkId\"", "\"bidResponse\"", "\"adFormat\""), minMatch = 3)
+    )
+
+    private data class SdkJsonFingerprint(
+        val sdkName: String,
+        val requiredFields: List<String>,
+        val minMatch: Int
+    )
+
+    private fun detectSdkJsonTemplateFingerprint(normalizedBody: String): String? {
+        if (normalizedBody.length < 16) return null
+        for (fingerprint in sdkJsonTemplateFingerprints) {
+            var matchCount = 0
+            for (field in fingerprint.requiredFields) {
+                if (field in normalizedBody) {
+                    matchCount++
+                    if (matchCount >= fingerprint.minMatch) {
+                        return fingerprint.sdkName
+                    }
+                }
+            }
+        }
+        return null
+    }
+
     private val bodyStrongMarkers = strongResponseAdKeywords.distinct()
     private val bodyWeakMarkers = responseAdKeywords.distinct()
     // HTML 广告标记（增加更多）
@@ -785,6 +893,15 @@ object HttpMitmFilter {
         "listen/reward", "audio/reward", "listen/unlock", "audio/unlock",
         "adserver", "ad/slot", "slot/ad", "sdk/ad", "adn/config", "network/config"
     )
+    private val adMaterialPathTokens = listOf(
+        "/ad/", "/ads/", "/adx/", "/vast", "/vpaid", "/omid", "/mraid",
+        "/reward/", "/rewarded/", "/incentive/", "/inspire/", "/offerwall/",
+        "/splash/", "/startup/", "/open_screen/", "/interstitial/", "/fullscreen/",
+        "/material/", "/creative/", "/playable/", "/endcard/", "/companion/",
+        "/video_ad", "/videoad", "/nativead", "/feedad", "/bannerad",
+        "adtype=", "ad_type=", "adformat=", "ad_format=", "placement_id=", "slot_id=",
+        "rewarded", "reward_video", "rewardvideo", "incentive_video", "inspire_video"
+    )
 
     private val TRANSPARENT_1X1_GIF = byteArrayOf(
         0x47.toByte(), 0x49.toByte(), 0x46.toByte(), 0x38.toByte(), 0x39.toByte(), 0x61.toByte(),
@@ -798,6 +915,131 @@ object HttpMitmFilter {
         0x00.toByte(), 0x02.toByte(), 0x02.toByte(), 0x4C.toByte(), 0x01.toByte(), 0x00.toByte(),
         0x3B.toByte()
     )
+
+    private fun tryReplaceBinaryAdContent(
+        session: TlsMitmSessionManager.TlsMitmSession,
+        chunk: ByteArray,
+        requestInspection: RequestInspection?
+    ): FilterResult? {
+        val context = TlsMitmSessionManager.getContextOrNull() ?: return null
+        if (!FeatureSettingsRepository.isAdFreeRewardEnabled(context)) return null
+        val host = normalizeAuthority(requestInspection?.host ?: session.host)
+        if (RuleRepository.isWhitelistedDomain(host)) return null
+        if (RuleRepository.isSensitiveAuthDomain(host)) return null
+        val vendor = RuleRepository.classifyVendorFromHints(context, host, session.appName)
+        val lowerPath = requestInspection?.path?.lowercase().orEmpty()
+        val adMaterialPathHit = adMaterialPathTokens.any(lowerPath::contains)
+        if (!RuleRepository.looksLikeAdSdkInfraDomain(host, vendor) &&
+            !RuleRepository.looksLikeAdDomain(host) &&
+            !RuleRepository.shouldTreatAsGeneralAdTraffic(host, vendor, session.appName) &&
+            !adMaterialPathHit) return null
+        val headerEnd = findHttpHeaderEnd(chunk)
+        if (headerEnd <= 0) return null
+        val headerText = String(chunk, 0, headerEnd, StandardCharsets.ISO_8859_1)
+        val contentTypeLine = headerText.lines().firstOrNull {
+            it.startsWith("Content-Type:", ignoreCase = true)
+        } ?: return null
+        val contentType = contentTypeLine.substringAfter(':').trim().lowercase()
+        val replacement = when {
+            contentType.startsWith("image/") ->
+                FilterResult.Replaced(
+                    buildSyntheticResponse("HTTP/1.1 200 OK", contentType, TRANSPARENT_1X1_GIF),
+                    "neutralized-binary-image-reward",
+                    chunk.size
+                )
+            contentType.startsWith("video/") || contentType.contains("mpegurl") ||
+                contentType.contains("dash") || contentType.contains("mp4") ->
+                FilterResult.Replaced(
+                    buildSyntheticResponse("HTTP/1.1 200 OK", contentType, ByteArray(0)),
+                    "neutralized-binary-video-reward",
+                    chunk.size
+                )
+            contentType.startsWith("audio/") ->
+                FilterResult.Replaced(
+                    buildSyntheticResponse("HTTP/1.1 200 OK", contentType, ByteArray(0)),
+                    "neutralized-binary-audio-reward",
+                    chunk.size
+                )
+            else -> null
+        }
+        if (replacement != null) {
+            return replacement
+        }
+        return null
+    }
+
+    private fun tryBlockAdBinaryByMagic(
+        session: TlsMitmSessionManager.TlsMitmSession,
+        chunk: ByteArray,
+        requestInspection: RequestInspection?
+    ): FilterResult? {
+        val context = TlsMitmSessionManager.getContextOrNull() ?: return null
+        if (FeatureSettingsRepository.isAdFreeRewardEnabled(context)) return null
+        val host = normalizeAuthority(requestInspection?.host ?: session.host)
+        if (RuleRepository.isWhitelistedDomain(host)) return null
+        if (RuleRepository.isSensitiveAuthDomain(host)) return null
+        if (RuleRepository.isGameCoreDomain(host) || RuleRepository.isSocialCoreDomain(host)) return null
+        val vendor = RuleRepository.classifyVendorFromHints(context, host, session.appName)
+        val lowerPath = requestInspection?.path?.lowercase().orEmpty()
+        val isAdDomain = RuleRepository.looksLikeAdSdkInfraDomain(host, vendor) ||
+            RuleRepository.looksLikeAdDomain(host) ||
+            RuleRepository.shouldTreatAsGeneralAdTraffic(host, vendor, session.appName)
+        if (!isAdDomain) return null
+        val headerEnd = findHttpHeaderEnd(chunk)
+        val bodyOffset = if (headerEnd > 0) headerEnd + 4 else 0
+        if (bodyOffset >= chunk.size) return null
+        val magicDetected = detectAdBinaryMagic(chunk, bodyOffset)
+        if (!magicDetected) return null
+        RuleRepository.reportUnknownVendorIfNeeded(
+            context = context,
+            vendor = vendor,
+            domain = host,
+            appName = session.appName,
+            signal = RuleRepository.SuspiciousSignal.HTTP_FLOW,
+            confidenceBoost = 1,
+            matchedPathHint = "binary-magic-ad",
+            refererDomain = lowerPath.ifBlank { null }
+        )
+        return FilterResult.Replaced(
+            buildEmptyResponse(),
+            "blocked-ad-binary-magic",
+            chunk.size
+        )
+    }
+
+    private val imageMagicBytes = listOf(
+        byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte()),
+        byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47),
+        byteArrayOf(0x47, 0x49, 0x46, 0x38),
+        byteArrayOf(0x42, 0x4D),
+        byteArrayOf(0x52, 0x49, 0x46, 0x46)
+    )
+
+    private val videoMagicBytes = listOf(
+        byteArrayOf(0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70),
+        byteArrayOf(0x46, 0x4C, 0x56, 0x01)
+    )
+
+    private fun detectAdBinaryMagic(chunk: ByteArray, offset: Int): Boolean {
+        if (chunk.size - offset < 2) return false
+        for (magic in imageMagicBytes) {
+            if (chunk.size - offset < magic.size) continue
+            var match = true
+            for (i in magic.indices) {
+                if (chunk[offset + i] != magic[i]) { match = false; break }
+            }
+            if (match) return true
+        }
+        for (magic in videoMagicBytes) {
+            if (chunk.size - offset < magic.size) continue
+            var match = true
+            for (i in magic.indices) {
+                if (chunk[offset + i] != magic[i]) { match = false; break }
+            }
+            if (match) return true
+        }
+        return false
+    }
 
     fun inspectRequest(session: TlsMitmSessionManager.TlsMitmSession, chunk: ByteArray): RequestInspection? {
         val text = decodeAscii(chunk) ?: return null
@@ -1077,7 +1319,14 @@ object HttpMitmFilter {
         chunk: ByteArray,
         requestInspection: RequestInspection?
     ): FilterResult {
-        val text = decodeAscii(chunk) ?: return FilterResult.PassThrough(chunk, "binary-response")
+        val text = decodeAscii(chunk)
+        if (text == null) {
+            val binaryReplacement = tryReplaceBinaryAdContent(session, chunk, requestInspection)
+            if (binaryReplacement != null) return binaryReplacement
+            val magicBlock = tryBlockAdBinaryByMagic(session, chunk, requestInspection)
+            if (magicBlock != null) return magicBlock
+            return FilterResult.PassThrough(chunk, "binary-response")
+        }
         if (!text.startsWith("HTTP/1.")) return FilterResult.PassThrough(chunk, "non-http1-response")
         val headerEnd = text.indexOf("\r\n\r\n")
         if (headerEnd <= 0) return FilterResult.PassThrough(chunk, "partial-response-headers")
@@ -1205,7 +1454,24 @@ object HttpMitmFilter {
             val response = buildSyntheticResponse(responseHeaders.statusLine, contentType, replacementBodyBytes, directives.cspValue)
             return FilterResult.Replaced(response, "replace-rule-applied", chunk.size, directives.matchedRuleSummaries)
         }
-        val rewrittenBody = replacedBody ?: scrubbedBody
+        var rewrittenBody = replacedBody ?: scrubbedBody
+        val lowerType = contentType.lowercase()
+        if (directives.jsonPrunePaths.isNotEmpty() && lowerType.contains("json")) {
+            val pruned = applyJsonPrune(rewrittenBody, directives.jsonPrunePaths)
+            if (pruned != null && pruned != rewrittenBody) {
+                rewrittenBody = pruned
+                val response = buildSyntheticResponse(responseHeaders.statusLine, contentType, pruned.toByteArray(StandardCharsets.UTF_8), directives.cspValue)
+                return FilterResult.Replaced(response, "json-prune-applied", chunk.size, directives.matchedRuleSummaries)
+            }
+        }
+        if (directives.hlsRules.isNotEmpty() && (lowerType.contains("mpegurl") || lowerType.contains("vnd.apple.mpegurl") || lowerType.contains("x-mpegurl") || rewrittenBody.contains("#EXTM3U"))) {
+            val filtered = applyHlsFilter(rewrittenBody, directives.hlsRules)
+            if (filtered != null && filtered != rewrittenBody) {
+                rewrittenBody = filtered
+                val response = buildSyntheticResponse(responseHeaders.statusLine, contentType, filtered.toByteArray(StandardCharsets.UTF_8), directives.cspValue)
+                return FilterResult.Replaced(response, "hls-filter-applied", chunk.size, directives.matchedRuleSummaries)
+            }
+        }
         if (neutralizeReason == null) {
             if (contentType.contains("text/html") &&
                 (cosmeticSelectors.isNotEmpty() || directives.jsInjectRules.isNotEmpty() || !directives.cspValue.isNullOrBlank() || scrubbedBody != body)) {
@@ -1216,7 +1482,14 @@ object HttpMitmFilter {
             }
             return FilterResult.PassThrough(chunk, "response-allowed")
         }
-        val replacementBodyBytes = buildReplacementBody(contentType, rewrittenBody, cosmeticSelectors, directives.cspValue, directives.jsInjectRules)
+        val replacementBodyBytes = buildNeutralizedReplacementBody(
+            contentType = contentType,
+            originalBody = rewrittenBody,
+            cosmeticSelectors = cosmeticSelectors,
+            reason = neutralizeReason,
+            cspValue = directives.cspValue,
+            jsInjectRules = directives.jsInjectRules
+        )
         val response = buildSyntheticResponse(responseHeaders.statusLine, contentType, replacementBodyBytes, directives.cspValue)
         return FilterResult.Replaced(response, neutralizeReason, chunk.size, directives.matchedRuleSummaries)
     }
@@ -1348,13 +1621,15 @@ object HttpMitmFilter {
         } else 0
         val jsonAdFieldMatched = jsonAdFieldHitCount > 0
         val jsonAdArrayMatched = contentType.contains("json") && normalizedBody.trim().startsWith("[") && jsonAdFieldHitCount >= 2
-        if (bodySignals.reasons.isEmpty() && !jsonAdFieldMatched && !jsonAdArrayMatched) return null
+        val sdkFingerprintMatch = if (contentType.contains("json") && !jsonAdFieldMatched) detectSdkJsonTemplateFingerprint(normalizedBody) else null
+        if (bodySignals.reasons.isEmpty() && !jsonAdFieldMatched && !jsonAdArrayMatched && sdkFingerprintMatch == null) return null
         var suspiciousScore = bodySignals.score + if (targetedContentType) 1 else 0
         if (isCommunityApp && inspectCommentAdBodySignals(lowerBody).hasAnyStrongCommentAdSignal) suspiciousScore += 2
         if (isKnownAdVendor(vendor)) suspiciousScore += 2
         if (aggressiveNovelTarget) suspiciousScore += 3
         if (jsonAdFieldMatched) suspiciousScore += 3
         if (jsonAdArrayMatched) suspiciousScore += 2
+        if (sdkFingerprintMatch != null) suspiciousScore += 3
         // 降低拦截阈值：小说 APP 1 分拦截，普通应用 2 分拦截
         val threshold = when {
             isNovelApp -> HTTP2_NOVEL_RESPONSE_BLOCK_SCORE
@@ -1377,6 +1652,9 @@ object HttpMitmFilter {
         }
         if (jsonAdArrayMatched) {
             reasons += "json-ad-array"
+        }
+        if (sdkFingerprintMatch != null) {
+            reasons += "sdk-template:$sdkFingerprintMatch"
         }
         RuleRepository.reportUnknownVendorIfNeeded(
             context = context,
@@ -1434,7 +1712,29 @@ object HttpMitmFilter {
         }
         val scrubbedBody = scrubHtmlAdArtifacts(lowerType, body)
         val replacedBody = applyReplaceRules(lowerType, scrubbedBody, directives.replaceRules)
-        val rewrittenBody = replacedBody ?: scrubbedBody
+        var rewrittenBody = replacedBody ?: scrubbedBody
+        var pruneHlsReason: String? = null
+        if (directives.jsonPrunePaths.isNotEmpty() && lowerType.contains("json")) {
+            val pruned = applyJsonPrune(rewrittenBody, directives.jsonPrunePaths)
+            if (pruned != null && pruned != rewrittenBody) {
+                rewrittenBody = pruned
+                pruneHlsReason = "json-prune-applied"
+            }
+        }
+        if (directives.hlsRules.isNotEmpty() && (lowerType.contains("mpegurl") || lowerType.contains("vnd.apple.mpegurl") || lowerType.contains("x-mpegurl") || rewrittenBody.contains("#EXTM3U"))) {
+            val filtered = applyHlsFilter(rewrittenBody, directives.hlsRules)
+            if (filtered != null && filtered != rewrittenBody) {
+                rewrittenBody = filtered
+                pruneHlsReason = if (pruneHlsReason != null) "json-prune-hls-applied" else "hls-filter-applied"
+            }
+        }
+        if (pruneHlsReason != null) {
+            return Http2BodyRewriteResult(
+                body = rewrittenBody.toByteArray(StandardCharsets.UTF_8),
+                contentType = lowerType,
+                reason = pruneHlsReason
+            )
+        }
         if (lowerType.contains("text/html") &&
             (directives.cosmeticSelectors.isNotEmpty() || directives.jsInjectRules.isNotEmpty() || !directives.cspValue.isNullOrBlank() || scrubbedBody != body)) {
             val injectedBody = buildInjectedHtmlBody(
@@ -1636,7 +1936,10 @@ object HttpMitmFilter {
     ): String? {
         if (contentType.isBlank()) return null
         val targetedContentType = containsAnyContentType(contentType, "text/html", "json", "javascript")
-        if (!targetedContentType) return null
+        val adRewardContentType = FeatureSettingsRepository.isAdFreeRewardEnabled(
+            TlsMitmSessionManager.getContextOrNull() ?: return null
+        ) && containsAnyContentType(contentType, "xml", "mpegurl", "vnd.apple.mpegurl", "dash+xml", "mpd")
+        if (!targetedContentType && !adRewardContentType) return null
         val host = normalizeAuthority(requestInspection?.host ?: session.host)
         val shouldInspect = shouldPreferDeepInspection(
             host = host,
@@ -1644,7 +1947,7 @@ object HttpMitmFilter {
             appName = session.appName,
             requestDomain = extractRequestDomain(requestInspection)
         )
-        return if (shouldInspect) "deep-inspection-target" else null
+        return if (shouldInspect || adRewardContentType) "deep-inspection-target" else null
     }
 
     private fun inspectHttp1BodySignals(
@@ -1659,7 +1962,9 @@ object HttpMitmFilter {
         val mitmAggressive = isMitmAggressiveMode()
         val htmlContent = contentType.contains("html")
         val scriptOrJsonContent = containsAnyContentType(contentType, "json", "javascript")
-        val targetedBodyContent = htmlContent || scriptOrJsonContent
+        val adRewardContent = FeatureSettingsRepository.isAdFreeRewardEnabled(environment.context) &&
+            containsAnyContentType(contentType, "xml", "mpegurl", "vnd.apple.mpegurl", "dash+xml", "mpd")
+        val targetedBodyContent = htmlContent || scriptOrJsonContent || adRewardContent
         if (htmlContent && cosmeticSelectors.isNotEmpty()) {
             return "neutralized-cosmetic-rule"
         }
@@ -1746,6 +2051,8 @@ object HttpMitmFilter {
             bodySignalScore = bodySignalScore,
             protectedNovelTarget = environment.protectedNovelTarget,
             aggressiveNovelTarget = environment.aggressiveNovelTarget,
+            isNovelApp = environment.isNovelApp,
+            isGameApp = environment.isGameApp,
             vendor = environment.vendor,
             context = environment.context
         )?.let { return it }
@@ -1993,6 +2300,7 @@ object HttpMitmFilter {
         val host = normalizeAuthority(requestInspection?.host ?: session.host)
         val isNovelApp = RuleRepository.isNovelAppHint(session.appName)
         val isCommunityApp = RuleRepository.isCommunityAppHint(session.appName)
+        val isGameApp = RuleRepository.isGameAppHint(session.appName)
         if (RuleRepository.isSocialCoreDomain(host) && !isCommunityApp) return null
         if (RuleRepository.isWhitelistedDomain(host)) return null
         if (RuleRepository.isSensitiveAuthDomain(host)) return null
@@ -2008,7 +2316,8 @@ object HttpMitmFilter {
             aggressiveNovelTarget = RuleRepository.shouldAggressivelyBlockForNovelApp(context, host, session.appName, vendor),
             protectedNovelTarget = RuleRepository.shouldAggressivelyBlockNovelProtectedUrl(context, host, requestInspection?.path, session.appName),
             isNovelApp = isNovelApp,
-            isCommunityApp = isCommunityApp
+            isCommunityApp = isCommunityApp,
+            isGameApp = isGameApp
         )
     }
 
@@ -2046,15 +2355,41 @@ object HttpMitmFilter {
         bodySignalScore: Int,
         protectedNovelTarget: Boolean,
         aggressiveNovelTarget: Boolean,
+        isNovelApp: Boolean,
+        isGameApp: Boolean,
         vendor: String,
         context: android.content.Context
     ): String? {
         val adFreeRewardEnabled = FeatureSettingsRepository.isAdFreeRewardEnabled(context)
-        if (adFreeRewardEnabled && novelSignals.rewardUnlockHits >= 1) {
-            return "neutralized-body-reward-unlock"
+        if (adFreeRewardEnabled) {
+            if (novelSignals.rewardUnlockHits >= 1 || novelSignals.rewardCompletionHits >= 1 || isGameApp ||
+                novelSignals.vastAdHit || novelSignals.gameRewardAdHit) {
+                return "neutralized-body-reward-unlock"
+            }
+        }
+        if (novelSignals.rewardCompletionHits >= 2 && (isGameApp || protectedNovelTarget || aggressiveNovelTarget || bodySignalScore >= 1)) {
+            return "neutralized-body-reward-completion"
         }
         if (novelSignals.rewardUnlockHits >= 2 && (protectedNovelTarget || aggressiveNovelTarget || bodySignalScore >= 1)) {
             return "neutralized-body-reward-unlock"
+        }
+        if (novelSignals.gameRewardAdHit && (bodySignalScore >= 1 || isGameApp || protectedNovelTarget || aggressiveNovelTarget)) {
+            return "neutralized-body-reward-unlock"
+        }
+        if (novelSignals.vastAdHit && (protectedNovelTarget || aggressiveNovelTarget || isGameApp || bodySignalScore >= 2)) {
+            return "neutralized-body-reward-unlock"
+        }
+        val novelReaderTarget = isNovelApp || protectedNovelTarget || aggressiveNovelTarget || isKnownAdVendor(vendor)
+        if (novelReaderTarget && novelSignals.readerBottomAdHits >= 1 &&
+            (novelSignals.readerAdMaterialHits >= 1 || novelSignals.readerAdReasonHit || bodySignalScore >= 1)) {
+            return "neutralized-body-reader-bottom-ad"
+        }
+        if (novelReaderTarget && novelSignals.readerPageTurnAdHits >= 1 &&
+            (novelSignals.readerAdMaterialHits >= 1 || novelSignals.readerAdReasonHit || bodySignalScore >= 1)) {
+            return "neutralized-body-reader-page-turn-ad"
+        }
+        if (novelReaderTarget && novelSignals.readerAdReasonHit && bodySignalScore >= 1) {
+            return "neutralized-body-reader-ad-extended"
         }
         if (novelSignals.jsonNovelFieldHits >= 2 && (protectedNovelTarget || aggressiveNovelTarget || isKnownAdVendor(vendor))) {
             return "neutralized-body-json-novel-fields"
@@ -2095,7 +2430,14 @@ object HttpMitmFilter {
             hasMediaFieldCluster = bodyReasons.contains("media-field-cluster"),
             hasNovelFieldCluster = bodyReasons.contains("novel-field-cluster"),
             hasNovelTaskReward = bodyReasons.contains("novel-task-reward"),
-            hasNovelCoinReward = bodyReasons.contains("novel-coin-reward")
+            hasNovelCoinReward = bodyReasons.contains("novel-coin-reward"),
+            rewardCompletionHits = rewardCompletionBodyTokens.count(lowerBody::contains),
+            readerBottomAdHits = readerBottomAdTokens.count(lowerBody::contains),
+            readerPageTurnAdHits = readerPageTurnAdTokens.count(lowerBody::contains),
+            readerAdMaterialHits = readerAdMaterialTokens.count(lowerBody::contains),
+            readerAdReasonHit = bodyReasons.any { it.startsWith("reader-") || it.startsWith("qimao-reader") },
+            vastAdHit = vastAdBodyTokens.any(lowerBody::contains),
+            gameRewardAdHit = gameRewardAdBodyTokens.any(lowerBody::contains)
         )
     }
 
@@ -2739,6 +3081,39 @@ object HttpMitmFilter {
         }.toByteArray(StandardCharsets.UTF_8)
     }
 
+    fun buildWebSocketCloseFrame(code: Int = 1008, reason: String = "Policy"): ByteArray {
+        val reasonBytes = reason.toByteArray(StandardCharsets.UTF_8)
+        val payload = ByteArray(2 + reasonBytes.size)
+        payload[0] = ((code shr 8) and 0xFF).toByte()
+        payload[1] = (code and 0xFF).toByte()
+        System.arraycopy(reasonBytes, 0, payload, 2, reasonBytes.size)
+        val masked = false
+        val firstByte = (0x80 or 0x8).toByte()
+        val frame = java.io.ByteArrayOutputStream(payload.size + 8)
+        frame.write(firstByte.toInt())
+        if (payload.size < 126) {
+            frame.write((if (masked) 0x80 else 0x00) or payload.size)
+        } else if (payload.size < 65536) {
+            frame.write((if (masked) 0x80 else 0x00) or 126)
+            frame.write((payload.size shr 8) and 0xFF)
+            frame.write(payload.size and 0xFF)
+        } else {
+            frame.write((if (masked) 0x80 else 0x00) or 127)
+            for (i in 7 downTo 0) frame.write(((payload.size.toLong() shr (i * 8)) and 0xFF).toInt())
+        }
+        if (masked) {
+            val maskKey = byteArrayOf(0x12, 0x34, 0x56, 0x78)
+            frame.write(maskKey[0].toInt())
+            frame.write(maskKey[1].toInt())
+            frame.write(maskKey[2].toInt())
+            frame.write(maskKey[3].toInt())
+            for (i in payload.indices) frame.write((payload[i].toInt() xor maskKey[i % 4].toInt()))
+        } else {
+            frame.write(payload)
+        }
+        return frame.toByteArray()
+    }
+
     private fun buildSyntheticResponse(statusLine: String, contentType: String, body: String): String {
         val actualStatusLine = if (statusLine.startsWith("HTTP/1.")) {
             "${statusLine.substringBefore(' ')} 204 No Content"
@@ -2810,6 +3185,17 @@ object HttpMitmFilter {
 
     private fun decodeAscii(chunk: ByteArray): String? {
         return runCatching { String(chunk, StandardCharsets.ISO_8859_1) }.getOrNull()
+    }
+
+    private fun findHttpHeaderEnd(chunk: ByteArray): Int {
+        val separator = byteArrayOf(0x0D, 0x0A, 0x0D, 0x0A)
+        for (i in 0..(chunk.size - separator.size)) {
+            if (chunk[i] == separator[0] && chunk[i + 1] == separator[1] &&
+                chunk[i + 2] == separator[2] && chunk[i + 3] == separator[3]) {
+                return i
+            }
+        }
+        return -1
     }
 
     private fun normalizeBodyForAdInspection(lowerBody: String): String {
@@ -2999,6 +3385,8 @@ object HttpMitmFilter {
         return referer?.let(::extractRequestContextDomain)
     }
 
+    private val redirectSourceDomains = mutableMapOf<String, MutableSet<String>>()
+
     private fun reportSuspiciousRedirectDomain(
         host: String,
         location: String?,
@@ -3024,6 +3412,34 @@ object HttpMitmFilter {
             matchedPathHint = matchedPathHint,
             refererDomain = refererDomain
         )
+        val sourceHost = host.lowercase()
+        if (sourceHost.isNotBlank() && !RuleRepository.isWhitelistedDomain(sourceHost) &&
+            !RuleRepository.isSensitiveAuthDomain(sourceHost) && !RuleRepository.isGameCoreDomain(sourceHost)) {
+            synchronized(redirectSourceDomains) {
+                redirectSourceDomains.getOrPut(sourceHost) { mutableSetOf() }.add(redirectDomain.lowercase())
+                if (redirectSourceDomains.size > 512) {
+                    val oldest = redirectSourceDomains.entries.firstOrNull()?.key
+                    if (oldest != null) redirectSourceDomains.remove(oldest)
+                }
+            }
+            RuleRepository.reportUnknownVendorIfNeeded(
+                context = context,
+                vendor = vendor,
+                domain = sourceHost,
+                appName = appName,
+                signal = RuleRepository.SuspiciousSignal.HTTP_REDIRECT,
+                confidenceBoost = 1,
+                matchedPathHint = "redirect-source",
+                refererDomain = refererDomain
+            )
+        }
+    }
+
+    fun isKnownRedirectSourceDomain(domain: String): Boolean {
+        val key = domain.lowercase()
+        synchronized(redirectSourceDomains) {
+            return redirectSourceDomains.containsKey(key)
+        }
     }
 
     private fun extractRedirectDomain(location: String?): String? {
@@ -3038,6 +3454,31 @@ object HttpMitmFilter {
             else -> null
         }
         return host?.let(::normalizeAuthority)
+    }
+
+    private fun buildNeutralizedReplacementBody(
+        contentType: String,
+        originalBody: String,
+        cosmeticSelectors: List<String>,
+        reason: String,
+        cspValue: String? = null,
+        jsInjectRules: Set<String> = emptySet()
+    ): ByteArray {
+        val lowerType = contentType.lowercase()
+        if (reason.contains("reward", ignoreCase = true)) {
+            return when {
+                lowerType.contains("json") ->
+                    "{\"code\":0,\"errcode\":0,\"success\":true,\"completed\":true,\"rewarded\":true,\"is_ended\":true,\"reward_granted\":true}".toByteArray(StandardCharsets.UTF_8)
+                lowerType.contains("mpegurl") || lowerType.contains("vnd.apple.mpegurl") ->
+                    "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:0\n#EXT-X-ENDLIST\n".toByteArray(StandardCharsets.UTF_8)
+                lowerType.contains("dash+xml") || lowerType.contains("mpd") ->
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><MPD type=\"static\"></MPD>".toByteArray(StandardCharsets.UTF_8)
+                lowerType.contains("xml") ->
+                    "<VAST version=\"3.0\"></VAST>".toByteArray(StandardCharsets.UTF_8)
+                else -> buildReplacementBody(contentType, originalBody, cosmeticSelectors, cspValue, jsInjectRules)
+            }
+        }
+        return buildReplacementBody(contentType, originalBody, cosmeticSelectors, cspValue, jsInjectRules)
     }
 
     private fun buildReplacementBody(
@@ -3173,6 +3614,231 @@ object HttpMitmFilter {
             }
         }
         return updated
+    }
+
+    private fun applyJsonPrune(body: String, prunePaths: Set<String>): String? {
+        if (prunePaths.isEmpty() || body.isBlank()) return null
+        return runCatching {
+            val cleaned = body.trim()
+            if (!cleaned.startsWith("{") && !cleaned.startsWith("[")) return@runCatching null
+            var result = cleaned
+            for (path in prunePaths) {
+                val segments = path.removePrefix("\$.").removePrefix("\$")
+                    .split('.').map { it.trim() }.filter { it.isNotBlank() }
+                if (segments.isEmpty()) continue
+                if (segments.size == 1) {
+                    result = pruneSingleLevelKey(result, segments[0]) ?: return@runCatching null
+                } else {
+                    result = pruneNestedKey(result, segments) ?: return@runCatching null
+                }
+            }
+            if (result != cleaned) result else null
+        }.getOrNull()
+    }
+
+    private fun pruneSingleLevelKey(json: String, key: String): String? {
+        val escapedKey = Regex.escape(key)
+        val objValueRegex = Regex(""""$escapedKey"\s*:\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}""")
+        val arrValueRegex = Regex(""""$escapedKey"\s*:\s*\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]""")
+        val strValueRegex = Regex(""""$escapedKey"\s*:\s*"[^"]*""")
+        val numValueRegex = Regex(""""$escapedKey"\s*:\s*[\d.eE+-]+""")
+        val boolValueRegex = Regex(""""$escapedKey"\s*:\s*(?:true|false|null)""")
+        
+        var modified = json
+        val regexes = listOf(objValueRegex, arrValueRegex, strValueRegex, numValueRegex, boolValueRegex)
+        for (regex in regexes) {
+            val match = regex.find(modified) ?: continue
+            val matchStr = match.value
+            val endIdx = match.range.last + 1
+            val hasTrailingComma = endIdx < modified.length && modified[endIdx] == ','
+            val removalEnd = if (hasTrailingComma) endIdx + 1 else endIdx
+            val prefix = modified.substring(0, maxOf(0, match.range.first - 1))
+            val suffix = modified.substring(minOf(removalEnd + 1, modified.length))
+            val before = modified.substring(0, maxOf(0, match.range.first))
+            val after = modified.substring(removalEnd)
+            modified = before + after
+            modified = modified.replace(Regex(",\\s*(}|\\])"), "$1")
+            modified = modified.replace(Regex("\\{\\s*,"), "{")
+            modified = modified.replace(Regex(",\\s*,\\s*"), ", ")
+        }
+        return if (modified != json) modified else null
+    }
+
+    private fun pruneNestedKey(json: String, pathSegments: List<String>): String? {
+        if (pathSegments.size <= 1) return null
+        val sb = StringBuilder(json)
+        val targetKey = pathSegments.last()
+        val keyPrefixes = pathSegments.dropLast(1)
+        val keyLocations = findKeyPositions(sb.toString(), targetKey)
+        for (pos in keyLocations.reversed()) {
+            val parentPath = findParentKeyPath(sb.toString(), pos)
+            if (parentPath.size >= keyPrefixes.size &&
+                parentPath.takeLast(keyPrefixes.size) == keyPrefixes) {
+                val colonIdx = findColonIndex(sb.toString(), pos + targetKey.length + 2)
+                if (colonIdx > 0) {
+                    val valueEnd = skipJsonValue(sb.toString(), colonIdx + 1)
+                    if (valueEnd != null) {
+                        val start = pos
+                        val end = valueEnd
+                        val hasComma = end < sb.length && sb[end] == ','
+                        val removeEnd = if (hasComma) end + 1 else end
+                        sb.delete(start, removeEnd)
+                    }
+                }
+            }
+        }
+        return if (sb.toString() != json) sb.toString() else null
+    }
+
+    private fun findKeyPositions(json: String, key: String): List<Int> {
+        val results = mutableListOf<Int>()
+        var idx = 0
+        while (true) {
+            val pos = json.indexOf("\"$key\"", idx)
+            if (pos < 0) break
+            var j = pos + key.length + 2
+            while (j < json.length && json[j].isWhitespace()) j++
+            if (j < json.length && json[j] == ':') {
+                results.add(pos)
+            }
+            idx = pos + 1
+        }
+        return results
+    }
+
+    private fun findColonIndex(json: String, from: Int): Int {
+        var j = from
+        while (j < json.length && json[j].isWhitespace()) j++
+        return if (j < json.length && json[j] == ':') j else -1
+    }
+
+    private fun findParentKeyPath(json: String, targetKeyStart: Int): List<String> {
+        val path = mutableListOf<String>()
+        var depth = 0
+        var inStr = false
+        var esc = false
+        var keyBuf = StringBuilder()
+        var i = 0
+        while (i < targetKeyStart && i < json.length) {
+            val ch = json[i]
+            if (inStr) {
+                if (esc) { esc = false; i++; continue }
+                if (ch == '\\') { esc = true; i++; continue }
+                if (ch == '"') {
+                    inStr = false
+                    var k = i + 1
+                    while (k < json.length && json[k].isWhitespace()) k++
+                    if (k < json.length && json[k] == ':') {
+                        val key = keyBuf.toString()
+                        while (path.size > depth) path.removeLastOrNull()
+                        path.add(key)
+                    }
+                    keyBuf = StringBuilder()
+                } else {
+                    keyBuf.append(ch)
+                }
+                i++; continue
+            }
+            when (ch) {
+                '"' -> inStr = true
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    while (path.size > depth) path.removeLastOrNull()
+                }
+            }
+            i++
+        }
+        return path
+    }
+
+    private fun skipJsonValue(json: String, startIndex: Int): Int? {
+        var i = startIndex
+        var depth = 0
+        var inStr = false
+        var esc = false
+        while (i < json.length) {
+            val ch = json[i]
+            if (inStr) {
+                if (esc) { esc = false; i++; continue }
+                if (ch == '\\') { esc = true; i++; continue }
+                if (ch == '"') { inStr = false; i++; continue }
+                i++
+                continue
+            }
+            when (ch) {
+                '"' -> inStr = true
+                '{', '[' -> depth++
+                '}', ']' -> {
+                    if (depth == 0) return i + 1
+                    depth--
+                }
+                ',' -> if (depth == 0) return i
+                else -> {}
+            }
+            i++
+        }
+        return i
+    }
+
+    private fun applyHlsFilter(playlist: String, hlsRules: Set<String>): String? {
+        if (hlsRules.isEmpty() || playlist.isBlank()) return null
+        return runCatching {
+            val lines = playlist.lines().toMutableList()
+            var inSegment = false
+            val removalIndices = mutableSetOf<Int>()
+            for (rule in hlsRules) {
+                val cleaned = rule.trim().removeSurrounding("\"").removeSurrounding("'")
+                if (cleaned.isBlank()) continue
+                val isRegex = cleaned.startsWith("/") && cleaned.endsWith("/") && cleaned.length > 2
+                val pattern = if (isRegex) {
+                    runCatching { Regex(cleaned.substring(1, cleaned.length - 1)) }.getOrNull() ?: continue
+                } else {
+                    null
+                }
+                for ((index, line) in lines.withIndex()) {
+                    if (index in removalIndices) continue
+                    val trimmed = line.trim()
+                    if (isRegex) {
+                        if (pattern!!.containsMatchIn(trimmed)) {
+                            if (trimmed.startsWith("#EXTINF") || trimmed.startsWith("#EXT-X-")) {
+                                inSegment = true
+                                removalIndices += index
+                            } else {
+                                removalIndices += index
+                            }
+                        }
+                    } else {
+                        if (trimmed.contains(cleaned, ignoreCase = true)) {
+                            if (trimmed.startsWith("#EXTINF") || trimmed.startsWith("#EXT-X-")) {
+                                inSegment = true
+                                removalIndices += index
+                            } else {
+                                removalIndices += index
+                            }
+                        }
+                    }
+                }
+                if (inSegment) {
+                    for ((index, line) in lines.withIndex()) {
+                        if (index in removalIndices) continue
+                        val trimmed = line.trim()
+                        if (!trimmed.startsWith("#") && !trimmed.startsWith("http") && trimmed.isNotBlank()) {
+                            var prevIndex = index - 1
+                            while (prevIndex >= 0 && removalIndices.contains(prevIndex)) prevIndex--
+                            if (prevIndex >= 0 && removalIndices.contains(prevIndex)) {
+                                removalIndices += index
+                            }
+                        }
+                    }
+                    inSegment = false
+                }
+            }
+            if (removalIndices.isEmpty()) return null
+            val result = lines.filterIndexed { index, _ -> index !in removalIndices }
+            if (result.size == lines.size) return null
+            result.joinToString("\n")
+        }.getOrNull()
     }
 
     private fun buildReplaceRegexOptions(flags: String): Set<RegexOption> {
@@ -6050,7 +6716,8 @@ object HttpMitmFilter {
         val aggressiveNovelTarget: Boolean,
         val protectedNovelTarget: Boolean,
         val isNovelApp: Boolean,
-        val isCommunityApp: Boolean
+        val isCommunityApp: Boolean,
+        val isGameApp: Boolean
     )
 
     private data class CommentAdBodySignals(
@@ -6075,7 +6742,14 @@ object HttpMitmFilter {
         val hasMediaFieldCluster: Boolean,
         val hasNovelFieldCluster: Boolean,
         val hasNovelTaskReward: Boolean,
-        val hasNovelCoinReward: Boolean
+        val hasNovelCoinReward: Boolean,
+        val rewardCompletionHits: Int,
+        val readerBottomAdHits: Int,
+        val readerPageTurnAdHits: Int,
+        val readerAdMaterialHits: Int,
+        val readerAdReasonHit: Boolean,
+        val vastAdHit: Boolean,
+        val gameRewardAdHit: Boolean
     )
 
     private data class ClusterBodySignals(
@@ -6098,7 +6772,7 @@ object HttpMitmFilter {
         }
         val contentType = headers["content-type"].orEmpty().lowercase()
         val accept = headers["accept"].orEmpty().lowercase()
-        if (dohContentTypeKeywords.any { keyword -> contentType.contains(keyword) || accept.contains(keyword) }) {
+        if (dohContentTypeKeywords.any { keyword -> contentType.contains(keyword as CharSequence) || accept.contains(keyword as CharSequence) }) {
             return true
         }
         return lowerHost.contains("httpdns") || lowerHost.contains("dns-query") || lowerHost.contains("resolver")

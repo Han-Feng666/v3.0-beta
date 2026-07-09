@@ -441,6 +441,26 @@ object CertificateAuthorityManager {
         val newlyGenerated: Boolean
     )
 
+    fun getPublicCertificateBytes(context: Context): ByteArray? {
+        return runCatching {
+            val certDir = File(context.filesDir, CERT_DIR)
+            val publicCertFile = File(certDir, CERT_PUBLIC_FILE_NAME)
+            if (!isValidCertificateFile(publicCertFile)) return null
+            publicCertFile.readBytes()
+        }.getOrNull()
+    }
+
+    fun getPublicCertificateX509(context: Context): X509Certificate? {
+        return runCatching {
+            val certDir = File(context.filesDir, CERT_DIR)
+            val publicCertFile = File(certDir, CERT_PUBLIC_FILE_NAME)
+            if (!isValidCertificateFile(publicCertFile)) return null
+            FileInputStream(publicCertFile).use { input ->
+                CertificateFactory.getInstance("X.509").generateCertificate(input) as X509Certificate
+            }
+        }.getOrNull()
+    }
+
     data class GeneratedLeafCertificate(
         val host: String,
         val filePath: String

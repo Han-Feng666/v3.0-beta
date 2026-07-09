@@ -62,6 +62,8 @@ object RuleModifierSupport {
         val excludedFromDomains: Set<String> = emptySet(),
         val cname: Boolean = false,
         val emptyResponse: Boolean = false,
+        val jsonPrunePaths: Set<String> = emptySet(),
+        val hlsRules: Set<String> = emptySet(),
         val unsupportedModifiers: List<String> = emptyList(),
         val invalid: Boolean = false
     )
@@ -149,6 +151,8 @@ object RuleModifierSupport {
         var dnsrewrite: String? = null
         var cname = false
         var emptyResponse = false
+        val jsonPrunePaths = mutableSetOf<String>()
+        val hlsRules = mutableSetOf<String>()
 
         modifierPart.split(',')
             .map { it.trim() }
@@ -390,6 +394,18 @@ object RuleModifierSupport {
                     "cname" -> cname = true
                     "empty" -> emptyResponse = true
                     "mp4" -> Unit
+                    "jsonprune" -> {
+                        if (value.isBlank()) return ModifierInfo(invalid = true)
+                        val paths = value.split('|').map { it.trim() }.filter { it.isNotBlank() && isValidJsonPrunePath(it) }
+                        if (paths.isEmpty()) return ModifierInfo(invalid = true)
+                        jsonPrunePaths += paths
+                    }
+                    "hls" -> {
+                        if (value.isBlank()) return ModifierInfo(invalid = true)
+                        val rules = value.split('|').map { it.trim() }.filter { it.isNotBlank() }
+                        if (rules.isEmpty()) return ModifierInfo(invalid = true)
+                        hlsRules += rules
+                    }
                 }
             }
 
@@ -453,7 +469,9 @@ object RuleModifierSupport {
             fromDomains = fromDomains.toSet(),
             excludedFromDomains = excludedFromDomains.toSet(),
             cname = cname,
-            emptyResponse = emptyResponse
+            emptyResponse = emptyResponse,
+            jsonPrunePaths = jsonPrunePaths.toSet(),
+            hlsRules = hlsRules.toSet()
         )
     }
 
@@ -510,6 +528,14 @@ object RuleModifierSupport {
             parts.size >= 2 -> parts
             else -> null
         }
+    }
+
+    private fun isValidJsonPrunePath(path: String): Boolean {
+        val cleaned = path.trim().removeSurrounding("\"").removeSurrounding("'")
+        if (cleaned.isBlank() || cleaned.length > 500) return false
+        if (!cleaned.startsWith("\$.") && !cleaned.startsWith("\$[")) return false
+        val dangerousPatterns = listOf("..", "()", "__proto__", "constructor", "prototype")
+        return dangerousPatterns.none { cleaned.contains(it, ignoreCase = true) }
     }
 
     private fun buildRegexOptions(flags: String): Set<RegexOption> {

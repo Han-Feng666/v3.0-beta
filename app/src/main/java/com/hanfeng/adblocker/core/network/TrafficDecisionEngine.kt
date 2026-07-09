@@ -3,8 +3,15 @@ package com.HanFeng.core.network
 import android.system.OsConstants
 import com.HanFeng.data.RuleRepository
 import com.HanFeng.model.PacketInfo
+import java.net.InetAddress
 
 object TrafficDecisionEngine {
+    private val quicBlockedCidrs = mutableSetOf<String>()
+    private val quicCidrHitCounts = mutableMapOf<String, Int>()
+    private const val CIDR_HIT_THRESHOLD = 3
+    private const val CIDR_EXPIRE_MILLIS = 3600_000L
+    private var cidrLastPrune = 0L
+
     data class QuicBlockInput(
         val packet: PacketInfo,
         val payloadLooksLikeQuic: Boolean,
@@ -73,6 +80,10 @@ object TrafficDecisionEngine {
         if (!input.payloadLooksLikeQuic) return QuicDecision(blocked = false, reason = null)
         if (input.localProxyTarget) {
             return QuicDecision(blocked = true, reason = "local-proxy-force-tcp")
+        }
+        val destIpStr = runCatching { InetAddress.getByAddress(input.packet.destinationAddress)?.hostAddress }.getOrNull().orEmpty()
+        if (destIpStr.isNotBlank() && isInQuicBlockedCidr(destIpStr)) {
+            return QuicDecision(blocked = true, reason = "quic-cidr-ad-range")
         }
         val domain = input.domain?.trim().orEmpty()
         val appName = input.appName.orEmpty()
@@ -205,5 +216,48 @@ object TrafficDecisionEngine {
     fun isLocalLoopOrProxyEndpoint(host: String, port: Int, configHost: String, configPort: Int?): Boolean {
         if (host == "127.0.0.1" || host == "::1") return true
         return isLocalProxyEndpoint(host, port, configHost, configPort)
+    }
+
+    fun isInQuicBlockedCidr(destinationIp: String): Boolean {
+        if (destinationIp.isBlank()) return false
+        val cidr = extractCidr24(destinationIp) ?: return false
+        pruneCidrsIfNeeded()
+        synchronized(quicBlockedCidrs) { return quicBlockedCidrs.contains(cidr) }
+    }
+
+    fun recordQuicAdIpHit(destinationIp: String) {
+        val cidr = extractCidr24(destinationIp) ?: return
+        synchronized(quicCidrHitCounts) {
+            val count = (quicCidrHitCounts[cidr] ?: 0) + 1
+            quicCidrHitCounts[cidr] = count
+            if (count >= CIDR_HIT_THRESHOLD) {
+                synchronized(quicBlockedCidrs) { quicBlockedCidrs.add(cidr) }
+                quicCidrHitCounts.remove(cidr)
+            }
+        }
+    }
+
+    private fun extractCidr24(ip: String): String? {
+        val cleaned = ip.trim()
+        if (cleaned.isEmpty()) return null
+        val parts = cleaned.split('.')
+        if (parts.size != 4) return null
+        for (part in parts) {
+            val num = part.toIntOrNull() ?: return null
+            if (num < 0 || num > 255) return null
+        }
+        return "${parts[0]}.${parts[1]}.${parts[2]}.0/24"
+    }
+
+    private fun pruneCidrsIfNeeded() {
+        val now = System.currentTimeMillis()
+        if (now - cidrLastPrune < 600_000L) return
+        cidrLastPrune = now
+    }
+
+    fun resetQuicCidrState() {
+        synchronized(quicBlockedCidrs) { quicBlockedCidrs.clear() }
+        synchronized(quicCidrHitCounts) { quicCidrHitCounts.clear() }
+        cidrLastPrune = 0L
     }
 }

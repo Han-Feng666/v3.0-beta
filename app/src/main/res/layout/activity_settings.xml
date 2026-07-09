@@ -343,7 +343,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:layout_marginBottom="12dp"
-                android:text="Shizuku 增强（需授权）"
+                android:text="Shizuku 增强"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="17sp"
                 android:textStyle="bold" />
@@ -368,6 +368,51 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="12dp"
                 android:text="后台限制管理 - 省电省流量" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:layout_marginBottom="12dp"
+                android:text="Root区（试验）"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/btnRootScript"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="Root 脚本执行 - 以 Root 运行 .sh 脚本 (交互终端)" />
+
+            <Button
+                android:id="@+id/btnRootHide"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="Root 隐藏 - 对指定应用隐藏 Root/模块 (内核级)" />
+
+            <Button
+                android:id="@+id/btnInstallSystemCert"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="安装证书到系统 (Root)" />
+
+            <Button
+                android:id="@+id/btnModifyDeviceId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="修改 Android ID (Root)" />
+
+            <Button
+                android:id="@+id/btnModifySerial"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="修改主板序列号 (Root)" />
 
         </LinearLayout>
     </ScrollView>

@@ -52,7 +52,9 @@ data class BlockRule(
     val blockIpv4: Boolean = false,
     val ctags: Set<String> = emptySet(),
     val generichideException: Boolean = false,
-    val remoteSourceId: String? = null
+    val remoteSourceId: String? = null,
+    val jsonPrunePaths: Set<String> = emptySet(),
+    val hlsRules: Set<String> = emptySet()
 )
 
 enum class RuleSource(val label: String) {
@@ -152,7 +154,8 @@ data class InstalledApp(
     val icon: Drawable,
     val whitelisted: Boolean,
     val coexistSelected: Boolean = false,
-    val coexistRecommended: Boolean = false
+    val coexistRecommended: Boolean = false,
+    val rootHideSelected: Boolean = false
 )
 
 data class LocalProxyCoexistConfig(

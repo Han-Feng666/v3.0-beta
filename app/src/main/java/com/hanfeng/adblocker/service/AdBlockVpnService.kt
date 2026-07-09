@@ -563,6 +563,17 @@ class AdBlockVpnService : VpnService() {
                     LogRepository.append(this@AdBlockVpnService, "Rules cache warm failed after VPN start: ${it.message ?: it.javaClass.simpleName}")
                 }
         }
+        scope.launch {
+            runCatching { prewarmDnsAdSinkhole() }
+                .onSuccess { count ->
+                    if (count > 0) {
+                        LogRepository.append(this@AdBlockVpnService, "DNS ad sinkhole prewarmed: $count domains cached as 0.0.0.0")
+                    }
+                }
+                .onFailure {
+                    LogRepository.append(this@AdBlockVpnService, "DNS ad sinkhole prewarm failed: ${it.message ?: it.javaClass.simpleName}")
+                }
+        }
         LogRepository.append(
             this,
             "Shizuku warm skipped on VPN start connectionOwnerReady=$shizukuConnectionOwnerReady adControlReady=$shizukuAdControlReady"
@@ -617,6 +628,8 @@ class AdBlockVpnService : VpnService() {
             refreshForegroundNotification()
             HttpsMitmController.onVpnStarted(this@AdBlockVpnService)
             probeLocalProxyCoexistAsync()
+            synchronized(dnsResponseCache) { dnsResponseCache.clear() }
+            runCatching { prewarmDnsAdSinkhole() }
             LogRepository.append(this@AdBlockVpnService, "VPN seamlessly reloaded")
         }
         return true
@@ -1558,7 +1571,11 @@ class AdBlockVpnService : VpnService() {
         "ad_reward", "adreward", "verify_reward", "verifyreward",
         "callback_reward", "callbackreward", "watch_ad_unlock", "watchadunlock",
         "chapter_unlock", "chapterunlock", "reward_complete", "rewardcomplete",
-        "reward_finish", "rewardfinish", "reward_success", "rewardsuccess"
+        "reward_finish", "rewardfinish", "reward_success", "rewardsuccess",
+        "reward_grant", "rewardgrant", "grant_reward", "grantreward",
+        "reward_claim", "rewardclaim", "claim_reward", "claimreward",
+        "rewarded_complete", "rewardedcomplete", "rewarded_finish", "rewardedfinish",
+        "incentive_complete", "incentivecomplete", "inspire_complete", "inspirecomplete"
     )
 
     private val adFreeRewardVendorTokens = listOf(
@@ -1567,7 +1584,11 @@ class AdBlockVpnService : VpnService() {
         "tanx", "kuaishou",
         "sigmob", "mintegral", "vungle", "unity3d",
         "ironsrc", "applovin", "chartboost", "inmobi",
-        "admob", "doubleclick", "googleadservices"
+        "admob", "doubleclick", "googleadservices",
+        "topon", "tradplus", "adscope", "beizi",
+        "youmi", "adcolony", "ogury", "smaato", "tapjoy",
+        "mopub", "fyber", "inneractive", "moloco", "bidmachine",
+        "startapp", "pubnative", "rayjump", "appsflyer", "adjust", "singular"
     )
 
     private fun looksLikeAdFreeRewardDomain(domain: String): Boolean {
@@ -1577,8 +1598,31 @@ class AdBlockVpnService : VpnService() {
         if (hasRewardToken) return true
         val vendorMatch = adFreeRewardVendorTokens.any { lower.contains(it) }
         if (!vendorMatch) return false
-        val rewardKeywords = listOf("reward", "verify", "callback", "unlock", "confirm")
-        return rewardKeywords.any { lower.contains(it) }
+        val rewardKeywords = listOf(
+            "reward", "verify", "callback", "unlock", "confirm",
+            "complete", "completed", "finish", "finished", "grant", "claim",
+            "incentive", "inspire", "earned", "bonus"
+        )
+        val hitCount = rewardKeywords.count { lower.contains(it) }
+        return hitCount >= 2
+    }
+
+    private fun resolveAdFreeRewardProtection(
+        domain: String,
+        vendor: String,
+        appName: String,
+        protectedQuestion: Boolean
+    ): Boolean {
+        if (protectedQuestion) return false
+        if (!FeatureSettingsRepository.isAdFreeRewardEnabled(this)) return false
+        if (!looksLikeAdFreeRewardDomain(domain)) return false
+        StatsRepository.recordRequest(this, vendor, appName)
+        logDecisionOnce(
+            key = "dns-adfree-pass:${domain}:${appName}",
+            message = "Ad-free reward DNS pass domain=$domain app=$appName vendor=$vendor",
+            minIntervalMillis = 30_000L
+        )
+        return true
     }
 
     private fun resolveUpstreamIp(domain: String): String? {
@@ -1617,10 +1661,7 @@ class AdBlockVpnService : VpnService() {
                 RuleRepository.isSensitiveAuthDomain(question.domain)
         }
 
-        val adFreeRewardProtection = !protectedQuestion &&
-            FeatureSettingsRepository.isAdFreeRewardEnabled(this) &&
-            looksLikeAdFreeRewardDomain(question.domain)
-
+        val adFreeRewardProtection = resolveAdFreeRewardProtection(question.domain, vendor, appName, protectedQuestion)
         if (domainContext.matchedRule != null && !protectedQuestion && !adFreeRewardProtection) {
             val rewriteTarget = domainContext.matchedRule.dnsrewrite
             if (!rewriteTarget.isNullOrBlank()) {
@@ -1690,7 +1731,19 @@ class AdBlockVpnService : VpnService() {
         } else if (aliasTargets.isNotEmpty() && !protectedQuestion) {
             rememberAdIpTargetsForAliases(question, aliasTargets, upstreamResponse, appName)
         }
-        
+
+        if (FeatureSettingsRepository.isAdFreeRewardEnabled(this) && addresses.isNotEmpty() && !protectedQuestion) {
+            val effectiveVendor = vendor.ifBlank {
+                RuleRepository.classifyVendorFromHints(this, question.domain, appName)
+            }
+            if (RuleRepository.looksLikeAdSdkInfraDomain(question.domain, effectiveVendor) ||
+                RuleRepository.looksLikeAdDomain(question.domain) ||
+                RuleRepository.shouldTreatAsGeneralAdTraffic(question.domain, effectiveVendor, appName) ||
+                looksLikeAdFreeRewardDomain(question.domain)) {
+                rememberHttpsDecryptTargets(question, upstreamResponse, appName, effectiveVendor)
+            }
+        }
+
         // 放行：记录统计和日志
         StatsRepository.recordRequest(this, vendor, appName)
         logDecisionOnce(
@@ -1728,10 +1781,7 @@ class AdBlockVpnService : VpnService() {
                 RuleRepository.isSensitiveAuthDomain(question.domain)
         }
 
-        val adFreeRewardProtection = !protectedQuestion &&
-            FeatureSettingsRepository.isAdFreeRewardEnabled(this) &&
-            looksLikeAdFreeRewardDomain(question.domain)
-
+        val adFreeRewardProtection = resolveAdFreeRewardProtection(question.domain, vendor, appName, protectedQuestion)
         if (domainContext.matchedRule != null && !protectedQuestion && !adFreeRewardProtection) {
             val rewriteTarget = domainContext.matchedRule.dnsrewrite
             val rewrittenResponse = if (!rewriteTarget.isNullOrBlank()) {
@@ -1869,6 +1919,18 @@ class AdBlockVpnService : VpnService() {
             rememberAdIpTargetsForAliases(question, aliasTargets, upstreamResponse, appName)
         }
 
+        if (FeatureSettingsRepository.isAdFreeRewardEnabled(this) && addresses.isNotEmpty() && !protectedQuestion) {
+            val effectiveVendor = vendor.ifBlank {
+                RuleRepository.classifyVendorFromHints(this, question.domain, appName)
+            }
+            if (RuleRepository.looksLikeAdSdkInfraDomain(question.domain, effectiveVendor) ||
+                RuleRepository.looksLikeAdDomain(question.domain) ||
+                RuleRepository.shouldTreatAsGeneralAdTraffic(question.domain, effectiveVendor, appName) ||
+                looksLikeAdFreeRewardDomain(question.domain)) {
+                rememberHttpsDecryptTargets(question, upstreamResponse, appName, effectiveVendor)
+            }
+        }
+
         StatsRepository.recordRequest(this, vendor, appName)
         logDecisionOnce(
             key = "dns-pass-async:${question.domain}:${question.qType}:${appName}",
@@ -1905,6 +1967,7 @@ class AdBlockVpnService : VpnService() {
     ): String? {
         if (aliasTargets.isEmpty()) return null
         val cnameIndex = RuleRepository.getCnameRuleIndex(this)
+        val originalDomain = question.domain
         for (aliasTarget in aliasTargets) {
             if (isProtectedTrafficDomain(aliasTarget)) continue
             val cnameHit = cnameIndex[aliasTarget.lowercase()] ?: cnameIndex.entries.firstOrNull { (domain, _) ->
@@ -1918,8 +1981,14 @@ class AdBlockVpnService : VpnService() {
                     appName = appName,
                     signal = RuleRepository.SuspiciousSignal.DNS_ALIAS,
                     confidenceBoost = 2,
-                    refererDomain = question.domain
+                    refererDomain = originalDomain
                 )
+                return aliasTarget
+            }
+        }
+        for (aliasTarget in aliasTargets) {
+            if (isProtectedTrafficDomain(aliasTarget)) continue
+            if (looksLikeCnameToAdSdkDomain(aliasTarget, originalDomain, appName)) {
                 return aliasTarget
             }
         }
@@ -1954,6 +2023,67 @@ class AdBlockVpnService : VpnService() {
             }
         }
         return null
+    }
+
+    private fun looksLikeCnameToAdSdkDomain(
+        cnameTarget: String,
+        originalDomain: String,
+        appName: String
+    ): Boolean {
+        val lower = cnameTarget.trim().lowercase()
+        if (lower.isBlank()) return false
+        val vendor = RuleRepository.classifyVendorFromHints(this, lower, appName)
+        if (RuleRepository.looksLikeAdSdkInfraDomain(lower, vendor)) {
+            RuleRepository.reportUnknownVendorIfNeeded(
+                context = this,
+                vendor = vendor,
+                domain = lower,
+                appName = appName,
+                signal = RuleRepository.SuspiciousSignal.DNS_ALIAS,
+                confidenceBoost = 2,
+                refererDomain = originalDomain
+            )
+            logDecisionOnce(
+                key = "dns-cname-ad-auto:${originalDomain}:${lower}",
+                message = "Auto-detected ad via CNAME original=$originalDomain cname=$lower app=$appName vendor=$vendor",
+                minIntervalMillis = 60_000L
+            )
+            return true
+        }
+        val adCnameTokens = listOf(
+            "ad.", "ads.", "ad-", "ads-", "-ad.", "-ads.", "_ad.", "_ads.",
+            "adcdn", "adsdk", "adserver", "adtracker", "adtracking",
+            "ad-delivery", "ad-deliver", "addelivery",
+            "adx.", "-adx.", "ssp.", "-ssp.", "dsp.", "-dsp.",
+            "adsystem", "adnetwork", "ad-platform", "adplatform",
+            "adserving", "ad-bid", "adbid", "adexchange", "ad-exchange",
+            "monetization", "monetize", "adtech",
+            "pangle", "pangolin", "gdt.", "gdt-", "csj.", "csj-",
+            "bytedance", "bytecdn", "snssdk", "toutiao",
+            "doubleclick", "googlesyndication", "googleadservices", "imasdk",
+            "mopub", "snapads", "rayjump", "appsflyer", "adjust", "singular",
+            "vpaid", "omid", "mraid", "vast", "rewarded", "incentive", "inspire",
+            "video-ad", "video_ad", "videoad", "playable", "endcard", "companionad"
+        )
+        if (adCnameTokens.any { lower.contains(it) }) {
+            val originalVendor = RuleRepository.classifyVendorFromHints(this, originalDomain, appName)
+            RuleRepository.reportUnknownVendorIfNeeded(
+                context = this,
+                vendor = originalVendor,
+                domain = originalDomain,
+                appName = appName,
+                signal = RuleRepository.SuspiciousSignal.DNS_ALIAS,
+                confidenceBoost = 1,
+                refererDomain = lower
+            )
+            logDecisionOnce(
+                key = "dns-cname-ad-token:${originalDomain}:${lower}",
+                message = "Auto-detected ad via CNAME tokens original=$originalDomain cname=$lower app=$appName",
+                minIntervalMillis = 60_000L
+            )
+            return true
+        }
+        return false
     }
 
     private fun handleLocalProxyPacket(
@@ -2066,7 +2196,33 @@ class AdBlockVpnService : VpnService() {
             return true
         }
         val domain = httpsTarget?.domain ?: route?.domain
+        if (domain == null && TrafficDecisionEngine.isInQuicBlockedCidr(destinationIp)) {
+            val cidrAppName = resolveAppName(destinationIp, info)
+            StatsRepository.recordBlockedHttp(this, "CIDR-AD", cidrAppName, 64 * 1024, source = StatsRepository.BlockSource.QUIC_BLOCK)
+            logDecisionOnce(
+                key = "quic-cidr-block:$destinationIp:${info.sourcePort}",
+                message = "Blocked QUIC/HTTP3 via CIDR block list ip=$destinationIp app=$cidrAppName via=quic-cidr-ad-range",
+                minIntervalMillis = 30_000L
+            )
+            return true
+        }
         if (domain == null && isMitmFullCaptureRoutingActive()) {
+            val adIpTarget = synchronized(adIpTargetCache) { adIpTargetCache[destinationIp] }
+            if (adIpTarget != null) {
+                val adDomain = adIpTarget.domain
+                val adAppName = adIpTarget.appName
+                val adVendor = adIpTarget.vendor
+                if (looksLikeAdIpTargetForQuicBlock(adDomain, adAppName, adVendor)) {
+                    TrafficDecisionEngine.recordQuicAdIpHit(destinationIp)
+                    StatsRepository.recordBlockedHttp(this, adVendor, adAppName, 64 * 1024, source = StatsRepository.BlockSource.QUIC_BLOCK)
+                    logDecisionOnce(
+                        key = "quic-block-ad-ip-tracked:$destinationIp:${info.sourcePort}",
+                        message = "Blocked QUIC/HTTP3 for known ad-target IP ip=$destinationIp domain=$adDomain app=$adAppName vendor=$adVendor via=ad-ip-tracked",
+                        minIntervalMillis = 30_000L
+                    )
+                    return true
+                }
+            }
             val appName = resolveAppName(destinationIp, info)
             val decision = TrafficDecisionEngine.shouldBlockQuicFlow(
                 TrafficDecisionEngine.QuicBlockInput(
@@ -7530,7 +7686,39 @@ class AdBlockVpnService : VpnService() {
             shouldTrackAdIpTarget(aliasTarget, appName, aliasContext.vendor, question.qType, aliasContext.matchedRule)
         }.map { it.lowercase() }.distinct()
         if (matchedAliases.isEmpty()) return
-        val matchedAliasContexts = matchedAliases.associateWith { matchedAlias ->
+        val trackedAliases = mutableSetOf<String>()
+        trackedAliases.addAll(matchedAliases)
+        val originalDomain = question.domain.lowercase()
+        if (matchedAliases.isNotEmpty() && matchedAliases.none { it.equals(originalDomain, ignoreCase = true) }) {
+            val originalContext = resolveAliasDecisionContext(aliasContexts, originalDomain, appName, question.qType)
+            val isAdIntermediate = aliasTargets.any { alias ->
+                val ctx = resolveAliasDecisionContext(aliasContexts, alias, appName, question.qType)
+                RuleRepository.looksLikeAdDomain(alias)
+            }
+            if (isAdIntermediate && !RuleRepository.isWhitelistedDomain(originalDomain) &&
+                !RuleRepository.isSensitiveAuthDomain(originalDomain) && !RuleRepository.isGameCoreDomain(originalDomain)) {
+                trackedAliases.add(originalDomain)
+                RuleRepository.reportUnknownVendorIfNeeded(
+                    context = this@AdBlockVpnService,
+                    vendor = originalContext.vendor,
+                    domain = originalDomain,
+                    appName = appName,
+                    signal = RuleRepository.SuspiciousSignal.DNS_ALIAS,
+                    confidenceBoost = 1,
+                    matchedPathHint = null
+                )
+            }
+            aliasTargets.filter { it !in trackedAliases }.forEach { intermediate ->
+                if (!RuleRepository.isWhitelistedDomain(intermediate) &&
+                    !RuleRepository.isSensitiveAuthDomain(intermediate)) {
+                    val ctx = resolveAliasDecisionContext(aliasContexts, intermediate, appName, question.qType)
+                    if (matchedAliases.any { ad -> intermediate.endsWith(ad) || ad.endsWith(intermediate) }) {
+                        trackedAliases.add(intermediate)
+                    }
+                }
+            }
+        }
+        val matchedAliasContexts = trackedAliases.associateWith { matchedAlias ->
             resolveAliasDecisionContext(aliasContexts, matchedAlias, appName, question.qType)
         }
         val addresses = DnsMessageParser.extractAnswerAddresses(response, question)
@@ -7540,11 +7728,11 @@ class AdBlockVpnService : VpnService() {
         synchronized(adIpTargetCache) {
             pruneAdIpTargetsLocked()
             val cacheEntries = mutableListOf<Pair<String, AdIpTarget>>()
-            matchedAliases.forEach { matchedAlias ->
-                val vendor = matchedAliasContexts.getValue(matchedAlias).vendor
+            trackedAliases.forEach { tracked ->
+                val vendor = matchedAliasContexts.getValue(tracked).vendor
                 addresses.forEach { address ->
                     cacheEntries += formatAddress(address) to AdIpTarget(
-                        domain = matchedAlias,
+                        domain = tracked,
                         vendor = vendor,
                         appName = appName,
                         source = "alias",
@@ -8024,6 +8212,83 @@ class AdBlockVpnService : VpnService() {
         )
     }
 
+    private object DnsWarmupTargets {
+        val highPriorityAdDomains = listOf(
+            "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+            "pangolin-sdk-toutiao.com", "pangle.io", "gdt.qq.com", "gdtimg.com",
+            "applovin.com", "unityads.unity3d.com", "ironsrc.com",
+            "vungle.com", "chartboost.com", "tapjoy.com", "inmobi.com",
+            "mintegral.com", "mobvista.com", "adcolony.com", "fyber.com",
+            "bidmachine.io", "pubnative.net", "startappservice.com",
+            "molocosdk.com", "rayjump.com", "appsflyer.com", "adjust.com",
+            "singular.net", "snapads.com", "mopub.com",
+            "adnxs.com", "rubiconproject.com", "openx.net", "criteo.com",
+            "moatads.com", "adsafeprotected.com", "demdex.net"
+        )
+        val mediumPriorityAdDomains = listOf(
+            "amazon-adsystem.com", "adservice.google.com", "imasdk.googleapis.com",
+            "supersonicads.com", "liftoff.io", "inner-active.mobi",
+            "advertising.adobe.com", "adobedtm.com", "everesttech.net",
+            "exelator.com", "bluekai.com", "rlcdn.com", "adsrvr.org",
+            "wzrkt.com", "cdn-adn.rayjump.com", "sdk-api-v1.singular.net",
+            "api.bidmachine.io", "events.bidmachine.io", "pubnative.net"
+        )
+    }
+
+    private fun prewarmDnsAdSinkhole(): Int {
+        val domains = DnsWarmupTargets.highPriorityAdDomains + DnsWarmupTargets.mediumPriorityAdDomains
+        if (domains.isEmpty()) return 0
+        var cached = 0
+        val now = System.currentTimeMillis()
+        val ttlMillis = 600_000L
+        val dnsQuestionId = 0
+        for (domain in domains) {
+            val sanitized = domain.lowercase().trim()
+            if (sanitized.isEmpty() || !sanitized.contains('.')) continue
+            if (RuleRepository.isDomainExcepted(this, sanitized)) continue
+            val question = com.HanFeng.model.DnsQuestion(id = dnsQuestionId, domain = sanitized.lowercase(), qType = 1, timestamp = now)
+            val cacheKey = DnsMessageParser.buildCacheKey(question)
+            var alreadyCached = false
+            synchronized(dnsResponseCache) { alreadyCached = dnsResponseCache.containsKey(cacheKey) }
+            if (alreadyCached) continue
+            val queryPayload = buildMinimalDnsQuery(sanitized, 1)
+            val sinkhole = DnsMessageParser.buildSinkholeResponse(queryPayload, question)
+                ?: continue
+            val cacheEntry = com.HanFeng.core.network.DnsRuntimeSupport.CachedDnsResponse(
+                payload = sinkhole,
+                expiresAt = now + ttlMillis
+            )
+            synchronized(dnsResponseCache) {
+                if (dnsResponseCache.size >= 256) return cached
+                dnsResponseCache[cacheKey] = cacheEntry
+            }
+            cached++
+        }
+        return cached
+    }
+
+    private fun buildMinimalDnsQuery(domain: String, qType: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream(64)
+        out.write(byteArrayOf(0x00, 0x00))
+        out.write(byteArrayOf(0x01, 0x00))
+        out.write(byteArrayOf(0x00, 0x01))
+        out.write(byteArrayOf(0x00, 0x00))
+        out.write(byteArrayOf(0x00, 0x00))
+        out.write(byteArrayOf(0x00, 0x00))
+        val labels = domain.split('.')
+        for (label in labels) {
+            if (label.isEmpty()) continue
+            val bytes = label.toByteArray(Charsets.UTF_8)
+            out.write(bytes.size)
+            out.write(bytes)
+        }
+        out.write(0x00)
+        out.write((qType shr 8) and 0xFF)
+        out.write(qType and 0xFF)
+        out.write(byteArrayOf(0x00, 0x01))
+        return out.toByteArray()
+    }
+
     private fun logDecisionOnce(key: String, message: String, minIntervalMillis: Long) {
         val now = System.currentTimeMillis()
         val shouldLog = synchronized(decisionLogCache) {
@@ -8036,6 +8301,43 @@ class AdBlockVpnService : VpnService() {
         }
         if (!shouldLog) return
         LogRepository.append(this, message)
+    }
+
+    private fun looksLikeAdIpTargetForQuicBlock(domain: String, appName: String, vendor: String): Boolean {
+        val lowerDomain = domain.lowercase()
+        if (RuleRepository.isWhitelistedDomain(lowerDomain)) return false
+        if (RuleRepository.isSensitiveAuthDomain(lowerDomain)) return false
+        if (RuleRepository.isGameCoreDomain(lowerDomain) || RuleRepository.isSocialCoreDomain(lowerDomain)) return false
+        if (RuleRepository.shouldProtectMediaTraffic(lowerDomain) || RuleRepository.shouldProtectBusinessTraffic(lowerDomain)) return false
+        if (RuleRepository.isNovelAppHint(appName) || RuleRepository.isAggressiveAdAppHint(appName)) return true
+        if (looksLikeKnownAdVendor(vendor)) return true
+        if (looksLikeHighConfidenceAdSdkDomain(lowerDomain)) return true
+        return RuleRepository.looksLikeAdDomain(lowerDomain)
+    }
+
+    private fun looksLikeKnownAdVendor(vendor: String): Boolean {
+        val lower = vendor.lowercase()
+        val adVendorHints = listOf(
+            "adcolony", "admob", "applovin", "chartboost", "facebook", "google ad",
+            "google ads", "inmobi", "ironsource", "mintegral", "mopub", "pangle",
+            "pangolin", "tapjoy", "unity ads", "vungle", "广告联盟", "穿山甲"
+        )
+        return adVendorHints.any { lower.contains(it) }
+    }
+
+    private fun looksLikeHighConfidenceAdSdkDomain(domain: String): Boolean {
+        val lower = domain.lowercase()
+        val adSdkTokens = listOf(
+            "doubleclick", "googlesyndication", "googleadservices", "imasdk",
+            "mopub", "snapads", "rayjump", "appsflyer", "adjust", "singular",
+            "pangolin", "pangle", "byteimg", "bytecdn", "bidmachine", "fyber",
+            "inneractive", "pubnative", "moloco", "startapp", "applvn",
+            "ironsrc", "supersonicads", "vungle", "tapjoyads", "chartboost",
+            "adcolony", "inmobi", "mintegral", "mobvista", "unityads",
+            "amazon-adsystem", "adnxs", "rubiconproject", "openx", "criteo",
+            "adtraction", "adservice", "advertising", "adsafeprotected"
+        )
+        return adSdkTokens.any { lower.contains(it) }
     }
 
     private fun resolveDnsServers(): List<InetAddress> {
@@ -8466,6 +8768,7 @@ class AdBlockVpnService : VpnService() {
 
     private fun shouldTreatAsGeneralAdTraffic(domain: String, vendor: String, appName: String?): Boolean {
         if (RuleRepository.isDomainExcepted(this, domain)) return false
+        if (FeatureSettingsRepository.isAdFreeRewardEnabled(this) && looksLikeAdFreeRewardDomain(domain)) return false
         if (RuleRepository.shouldTreatAsGeneralAdTraffic(domain, vendor, appName)) return true
         if (!isGovernedPromoApp(appName)) return false
         val normalizedDomain = domain.trim().lowercase()
