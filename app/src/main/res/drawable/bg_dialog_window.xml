@@ -1,5 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="@color/hf_surface_strong" />
-    <corners android:radius="24dp" />
-</shape>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Drop shadow layer -->
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/hf_shadow" />
+            <corners android:radius="22dp" />
+            <padding
+                android:left="0dp"
+                android:top="2dp"
+                android:right="0dp"
+                android:bottom="0dp" />
+        </shape>
+    </item>
+    <!-- Solid dialog window -->
+    <item android:left="0dp" android:top="0dp" android:right="0dp" android:bottom="2dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/hf_surface_elevated" />
+            <corners android:radius="20dp" />
+            <stroke android:width="0.5dp" android:color="@color/hf_border_subtle" />
+        </shape>
+    </item>
+</layer-list>

@@ -52,7 +52,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:text="已选择 0 项，可选 0 项，当前可见 0 项"
+        android:text="已选择 0 项，可选 0 项，当前可见 0 项，推荐 0 项，小说专项 0 项"
         android:textColor="@color/hf_text_primary"
         android:textSize="14sp" />
 
