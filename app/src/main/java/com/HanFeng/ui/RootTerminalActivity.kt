@@ -42,7 +42,6 @@ class RootTerminalActivity : BaseActivity() {
 
     private companion object {
         private const val TMP_DIR = "/data/local/tmp"
-        private const val SCRIPT_TIMEOUT_MIN = 10L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -206,13 +205,13 @@ class RootTerminalActivity : BaseActivity() {
                         n = reader.read(buf)
                         if (n < 0) break
                         val raw = String(buf, 0, n)
+                        if (!readyReceived.get() && raw.contains("SHELL_READY")) {
+                            readyReceived.set(true)
+                        }
                         val cleaned = stripAnsi(raw)
                             .replace("SHELL_READY", "")
                             .replace("ROOTPROMPT", "")
                             .replace("\r", "")
-                        if (!readyReceived.get() && raw.contains("SHELL_READY")) {
-                            readyReceived.set(true)
-                        }
                         if (cleaned.isNotBlank()) {
                             runOnUiThread {
                                 appendOutput(cleaned)
@@ -224,7 +223,12 @@ class RootTerminalActivity : BaseActivity() {
             stdoutReader = readThread
             readThread.start()
 
-            Thread.sleep(1500)
+            val deadline = System.currentTimeMillis() + 5000
+            while (System.currentTimeMillis() < deadline) {
+                if (readyReceived.get()) break
+                Thread.sleep(100)
+            }
+
             if (readyReceived.get() && process.isAlive) {
                 isInteractive = true
                 runOnUiThread {
@@ -240,18 +244,20 @@ class RootTerminalActivity : BaseActivity() {
     }
 
     private fun runScriptInInteractiveShell(scriptPath: String) {
-        val realPath = resolveAccessiblePath(scriptPath)
-        if (realPath == null) {
+        val escapedPath = scriptPath.replace("'", "'\\''")
+
+        val remotePath = copyScriptToTmp(escapedPath)
+        if (remotePath == null) {
             runOnUiThread { appendOutput("[!] 无法读取脚本文件: $scriptPath\n") }
             return
         }
 
-        val displayName = realPath.substringAfterLast('/')
+        val displayName = scriptPath.substringAfterLast('/')
         runOnUiThread { appendOutput(">>> 执行脚本: $displayName\n\n") }
 
         val cmd = buildString {
             append("echo '--- 开始执行 ---'\n")
-            append("sh '").append(realPath).append("'\n")
+            append("sh '").append(remotePath).append("'\n")
             append("echo '--- 执行完毕，退出码: $? ---'\n")
         }
 
@@ -263,36 +269,18 @@ class RootTerminalActivity : BaseActivity() {
         }
     }
 
-    private fun resolveAccessiblePath(scriptPath: String): String? {
-        try {
-            if (File(scriptPath).canRead()) {
-                return scriptPath
-            }
-        } catch (_: Exception) {}
-
-        val remote = copyScriptToTmp(scriptPath)
-        return remote
-    }
-
     private fun copyScriptToTmp(escapedPath: String): String? {
         val fileName = "hf_shell_${System.currentTimeMillis()}.sh"
         val remote = "$TMP_DIR/$fileName"
 
-        val copyCmd = buildString {
-            append("TMP='$remote'\n")
-            append("if [ -f '$escapedPath' ]; then\n")
-            append("  if file '$escapedPath' 2>/dev/null | grep -qi ascii; then\n")
-            append("    sed 's/\\r\$//' '$escapedPath' > \"\$TMP\"\n")
-            append("  else\n")
-            append("    cp '$escapedPath' \"\$TMP\"\n")
-            append("  fi\n")
-            append("  chmod 755 \"\$TMP\"\n")
-            append("  test -f \"\$TMP\" && echo OK\n")
-            append("else\n")
-            append("  echo FAIL\n")
-            append("fi\n")
+        val remoteEscaped = remote.replace("'", "'\\''")
+
+        val checkResult = runShell("test -f '$escapedPath' && echo EXIST || echo NOTFOUND", 5)
+        if (!checkResult.contains("EXIST")) {
+            return null
         }
 
+        val copyCmd = "( sed 's/\\r\$//' '$escapedPath' 2>/dev/null || cat '$escapedPath' ) > '$remoteEscaped' && chmod 755 '$remoteEscaped' && test -s '$remoteEscaped' && echo OK"
         val result = runShell(copyCmd, 15)
         return if (result.contains("OK")) remote else null
     }
@@ -352,12 +340,8 @@ class RootTerminalActivity : BaseActivity() {
 
     private fun runShell(command: String, timeoutSeconds: Long): String {
         return try {
-            val process = ProcessBuilder("su", "-c", command)
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().use { it.readText() }
-            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) process.destroyForcibly()
-            output.trim()
+            val result = SuSession.getInstance().execute(command, timeoutSeconds)
+            result.output.trim()
         } catch (_: Exception) {
             ""
         }

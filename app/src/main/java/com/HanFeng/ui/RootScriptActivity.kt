@@ -17,6 +17,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.HanFeng.R
+import com.HanFeng.adblocker.shizuku.SuSession
 import java.io.File
 
 class RootScriptActivity : BaseActivity() {
@@ -155,34 +156,37 @@ class RootScriptActivity : BaseActivity() {
     }
 
     private fun listDirectory(path: String): Pair<String, List<FileEntry>>? {
-        try {
-            val rawPath = path.trim()
-            val cmd = if (rawPath == "/") "ls -1ap '$rawPath' 2>/dev/null"
-            else "ls -1ap '$rawPath/' 2>/dev/null"
-            val process = ProcessBuilder("su", "-c", cmd)
-                .redirectErrorStream(true)
-                .start()
-            if (!process.waitFor(8, java.util.concurrent.TimeUnit.SECONDS)) {
-                process.destroyForcibly()
-                return null
+        return try {
+            val safePath = path.trim().replace("'", "'\\''")
+            val cmd = if (safePath == "/") "ls -1ap '/'"
+            else "ls -1ap '$safePath/'"
+            val result = SuSession.getInstance().execute(cmd, 8)
+            if (result.exitCode != 0) {
+                val altCmd = "ls -1a '$safePath/' 2>/dev/null || ls -1 '$safePath/' 2>/dev/null"
+                val altResult = SuSession.getInstance().execute(altCmd, 5)
+                if (altResult.exitCode != 0) return null
+                return parseDirListing(path, altResult.output)
             }
-            val output = process.inputStream.bufferedReader().use { it.readText() }
-            val lines = output.lines().map { it.trim() }.filter { it.isNotEmpty() }
-            val entries = mutableListOf<FileEntry>()
-            if (rawPath != "/") entries.add(FileEntry("..", true))
-            for (line in lines) {
-                if (line == "./" || line == "../") continue
-                val isDir = line.endsWith("/")
-                val name = if (isDir) line.dropLast(1) else line
-                if (name.isBlank()) continue
-                if (!isDir && !name.endsWith(".sh") && !name.endsWith(".bash") && !name.endsWith(".ksh")) continue
-                entries.add(FileEntry(name, isDir))
-            }
-            entries.sortWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
-            return path to entries
+            parseDirListing(path, result.output)
         } catch (_: Exception) {
-            return null
+            null
         }
+    }
+
+    private fun parseDirListing(path: String, output: String): Pair<String, List<FileEntry>> {
+        val lines = output.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val entries = mutableListOf<FileEntry>()
+        if (path.trim() != "/") entries.add(FileEntry("..", true))
+        for (line in lines) {
+            if (line == "./" || line == "../") continue
+            val isDir = line.endsWith("/")
+            val name = if (isDir) line.dropLast(1) else line
+            if (name.isBlank()) continue
+            if (!isDir && !name.endsWith(".sh") && !name.endsWith(".bash") && !name.endsWith(".ksh")) continue
+            entries.add(FileEntry(name, isDir))
+        }
+        entries.sortWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+        return path to entries
     }
 
     private fun loadScriptFromPath() {
@@ -226,20 +230,24 @@ class RootScriptActivity : BaseActivity() {
 
     private fun readFileContent(path: String): String? {
         return try {
-            // 使用 base64 + 二进制读取避免 bufferedReader().readText() 破坏字节流（gzip 文件会被损坏）
-            val process = ProcessBuilder("su", "-c", "cat '$path' 2>/dev/null | head -c 65536 | base64")
-                .redirectErrorStream(true)
-                .start()
-            if (!process.waitFor(8, java.util.concurrent.TimeUnit.SECONDS)) {
-                process.destroyForcibly()
+            val safePath = path.replace("'", "'\\''")
+
+            try {
+                val file = File(path)
+                if (file.exists() && file.canRead()) {
+                    return file.readText().take(65536)
+                }
+            } catch (_: Exception) {}
+
+            val checkResult = SuSession.getInstance().execute("test -f '$safePath' && echo EXISTS || echo NOTFOUND", 5)
+            if (!checkResult.output.contains("EXISTS")) {
                 return null
             }
-            val b64Output = process.inputStream.bufferedReader().use { it.readText() }.trim()
-            if (b64Output.isBlank()) return null
-            val decoded = android.util.Base64.decode(b64Output, android.util.Base64.DEFAULT)
-            String(decoded).also { decodedStr ->
-                if (decodedStr.isBlank()) return null
-            }
+
+            val catResult = SuSession.getInstance().execute("cat '$safePath' 2>/dev/null | head -c 65536", 8)
+            val content = catResult.output
+            if (content.isBlank()) return null
+            content
         } catch (_: Exception) {
             null
         }
@@ -278,8 +286,14 @@ class RootScriptActivity : BaseActivity() {
         }
         val tmpFile = File(cacheDir, "terminal_script.sh")
         tmpFile.writeText(content)
+        tmpFile.setReadable(true, false)
+        tmpFile.setExecutable(true, false)
+        val externalTmp = File(externalCacheDir ?: cacheDir, "terminal_script.sh")
+        externalTmp.writeText(content)
+        externalTmp.setReadable(true, false)
+        externalTmp.setExecutable(true, false)
         startActivity(Intent(this, RootTerminalActivity::class.java).apply {
-            putExtra("script_path", tmpFile.absolutePath)
+            putExtra("script_path", externalTmp.absolutePath)
         })
     }
 
