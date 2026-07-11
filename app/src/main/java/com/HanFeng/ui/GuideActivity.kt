@@ -385,7 +385,21 @@ class GuideActivity : BaseActivity() {
             "8. 解冻全部：一键解冻所有已冻结应用。此操作会弹确认弹窗，确认后才执行。\n" +
             "9. 关键系统应用保护：android、SystemUI、Phone、设置、启动器、输入法等关键包名被内置保护列表硬屏蔽，按钮显示\"保护\"且不可点击，批量操作也会自动跳过。\n" +
             "10. freeze 和 suspend 区别：应用冻结只使用 disable（pm disable）正式冻结，效果和推广治理中的\"冻结\"一致；暂停（suspend）相关能力保留在推广治理内，本模块不启用 suspend 降级逻辑。\n" +
-            "11. 与推广治理的关系：推广治理聚焦系统推广项和广告 App 的智能治理，按预设目录发现并提示风险。应用冻结是通用冻结管理器，主要满足 \"把它当冰箱用\" 的需求，列表覆盖所有应用，不限于推广类。"
+            "11. 与推广治理的关系：推广治理聚焦系统推广项和广告 App 的智能治理，按预设目录发现并提示风险。应用冻结是通用冻结管理器，主要满足 \"把它当冰箱用\" 的需求，列表覆盖所有应用，不限于推广类。\n\n" +
+            "二十三、腾讯游戏防设备标记功能说明（需 Root）\n" +
+            "1. 入口：设置页进入腾讯游戏防设备标记。该功能依赖 Root（Magisk、KernelSU 或 APatch），无 Root 自动提示不可用。\n" +
+            "2. 实现原理：在 Root shell 启动一个 nohup 守护脚本，每 2 秒检测 target.txt 中所有腾讯游戏包名是否在运行（pidof），游戏运行时把 /mnt/vendor/persist/data 权限改为 000 阻止写入设备标记；游戏从任务栏划掉后台后自动清理 ano_tmp、cache、code_cache、mrpcs* 文件并还原 700 权限。\n" +
+            "3. 启动监听开关：打开后会写 watcher.sh 到 /data/adb/GameAntiMark/ 并 nohup 启动，PID 保存到 watcher.pid。开关状态会写入 SharedPreferences，但守护脚本本身是 Root 进程，不依赖寒枫 App 存活——即使寒枫被杀也继续运行。\n" +
+            "4. 状态面板字段：监听守护状态（运行中/未运行加 PID）、Root 方案与版本、SoC 是否 SM8850、游戏包名数量、当前运行中游戏数、已清理次数、/mnt/vendor/persist/data 权限、boot_completed、最近一次清理时间戳。\n" +
+            "5. 游戏包名列表按钮：可视化编辑 target.txt 对应的包名集合。内置 50 个腾讯游戏包名（PUBG、和平精英、王者荣耀、CF、火影、QQ飞车等），支持新增、删除、恢复默认、清空四种操作。包名格式校验：必须以字母开头的标准 Java 包名（点分隔、字母数字下划线）。\n" +
+            "6. 包名列表改动会自动重启 watcher（如果当前在运行），使新配置立即生效。\n" +
+            "7. 随机修改 AndroidID/SSAID 按钮：等价于原模块 action.sh 的音量+ 流程：随机生成新的 android_id 写入 settings secure，对每个用户（0、10、11、901、999）的每个游戏包名生成新的 16 位 hex SSAID，并 sed 替换 settings_ssaid.xml / fallback / bptmp 三份文件。完成后必须手动重启手机，否则系统不重新加载 SSAID。\n" +
+            "8. 骁龙 8 Elite 5（SM8850）特判：进入页面时自动检测 SoC，若匹配则自动设置 SM8850 标志位，并跳过 chmod 000 / chmod 700 步骤，仅执行文件清理，防止 TEE 损坏。\n" +
+            "9. 查看守护日志按钮：tail 200 行 watcher.log，包含 watcher started、permission set to 000、permission restored、CLEANED 等事件，便于排查守护是否真的在工作。\n" +
+            "10. 手动恢复权限按钮：把 /mnt/vendor/persist/data 权限立即设为 700。如果守护未正确还原权限（比如寒枫被杀导致无后续 sleep），可手动触发恢复。\n" +
+            "11. 真死指纹条件：只有当列表中所有游戏都还运行在后台（pidof 返回非空）就关机刷机清数据。正常使用场景下：必须划掉后台退出游戏（不要按 Home），下一轮扫描检测到没有 pidof 时会自动清理并还原权限，不会触发真死。\n" +
+            "12. 重启不会真死：守护脚本启动时会先显式 chmod 700 还原权限，重启后系统其它服务可正常写入 /mnt/vendor/persist/data。\n" +
+            "13. 与 Root 隐藏的关系：两者都在 /data/adb/ 下创建工作目录、都用 SuSession 执行 root 命令、都用 nohup sh 持久运行。但 Root 隐藏是 zygisk mount bind 隐藏路径 + prop 伪装，防的是 Root 检测；游戏防设备标记是 chmod + 文件清理，防的是设备识别追踪，互不冲突可同时启用。"
 
         fun createIntent(context: Context, title: String, content: String): Intent {
             return Intent(context, GuideActivity::class.java)

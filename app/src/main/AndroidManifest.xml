@@ -79,6 +79,14 @@
             android:exported="false" />
 
         <activity
+            android:name="com.HanFeng.ui.GameAntiMarkActivity"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.GamePackageListActivity"
+            android:exported="false" />
+
+        <activity
             android:name="com.HanFeng.ui.PromoComponentGovernActivity"
             android:exported="false" />
 

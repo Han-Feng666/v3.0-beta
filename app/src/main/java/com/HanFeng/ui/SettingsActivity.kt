@@ -62,6 +62,7 @@ class SettingsActivity : BaseActivity() {
     private lateinit var textShizukuStatus: TextView
     private lateinit var btnShizukuAdControl: Button
     private lateinit var btnAppFreeze: Button
+    private lateinit var btnGameAntiMark: Button
     private lateinit var btnCoexistSettings: Button
     private lateinit var btnTrafficCardSettings: Button
     private lateinit var btnJoinGroupSettings: Button
@@ -139,6 +140,7 @@ class SettingsActivity : BaseActivity() {
         textShizukuStatus = findViewById(R.id.textShizukuStatus)
         btnShizukuAdControl = findViewById(R.id.btnShizukuAdControl)
         btnAppFreeze = findViewById(R.id.btnAppFreeze)
+        btnGameAntiMark = findViewById(R.id.btnGameAntiMark)
         btnCoexistSettings = findViewById(R.id.btnCoexistSettings)
         btnTrafficCardSettings = findViewById(R.id.btnTrafficCardSettings)
         btnJoinGroupSettings = findViewById(R.id.btnJoinGroupSettings)
@@ -238,6 +240,12 @@ class SettingsActivity : BaseActivity() {
             launchActivitySafely(
                 AppFreezeActivity.createIntent(this),
                 failureMessage = "打开应用冻结失败"
+            )
+        }
+        btnGameAntiMark.setOnClickListener {
+            launchActivitySafely(
+                GameAntiMarkActivity.createIntent(this),
+                failureMessage = "打开腾讯游戏防标记失败"
             )
         }
 
@@ -626,11 +634,13 @@ class SettingsActivity : BaseActivity() {
         val shizukuReady = status?.let { it.installed && it.binderAlive && (it.permissionGranted || serviceHealthy) } == true
         btnShizukuAdControl.isEnabled = true
         btnAppFreeze.isEnabled = true
+        btnGameAntiMark.isEnabled = true
         btnCoexistSettings.isEnabled = true
         btnTrafficCardSettings.isEnabled = true
         btnJoinGroupSettings.isEnabled = true
         btnShizukuAdControl.alpha = if (shizukuReady) 1f else 0.72f
         btnAppFreeze.alpha = if (shizukuReady) 1f else 0.72f
+        btnGameAntiMark.alpha = 1f
         textShizukuStatus.text = buildShizukuStatusText(shizukuEnabled, shizukuReady, serviceHealthy, status)
     }
 

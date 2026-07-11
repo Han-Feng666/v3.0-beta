@@ -858,3 +858,12 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - 规则引擎应继续扩大可解析、可落地、可参与拦截的规则类型覆盖，优先把更多规则接入现有 DNS 与 MITM 链路。
   - 开启 MITM 模式后，可在网络稳定和性能可接受的范围内采用更积极的深度检查与阻断策略，减少因门槛过高导致的漏拦。
+
+[Root 守护脚本模式]
+- Date: 2026-07-11
+- Context: Agent 在执行"集成 KSU 模块为原生功能"时发现
+- Category: 代码模式
+- Instructions:
+  - 项目中需要长期轮询进程或文件状态的 Root 守护任务，遵循"JVM 仅作 launcher"模式：通过 `com.HanFeng.adblocker.shizuku.SuSession` 拼 watcher.sh 脚本写入 /data/adb/<namespace>/，再 `nohup sh` 启动后台进程，PID 写入 .pid 文件。
+  - 不要在 JVM 内 Thread { while(true) { suSession.execute(...) } }，因为寒枫被系统杀掉后守护必须继续运行；JVM 重新打开 SuSession 后通过 `kill -0 $(cat pid)` 判断守护是否仍在。
+  - 工作目录命名约定：/data/adb/<FeatureName>/watcher.sh、watcher.pid、watcher.log。脚本中的 `$` 必须用 Kotlin 字符串的 `\$` 转义，不要用 `$$`（shell 中是当前 PID 不是变量标识符）。

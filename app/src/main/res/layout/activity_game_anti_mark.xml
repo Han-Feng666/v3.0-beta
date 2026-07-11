@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:paddingLeft="16dp"
+    android:paddingTop="8dp"
+    android:paddingRight="16dp"
+    android:paddingBottom="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="腾讯游戏防设备标记"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnBack"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:background="@drawable/bg_button"
+            android:backgroundTint="@null"
+            android:minWidth="64dp"
+            android:text="返回"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary" />
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="10dp"
+        android:layout_weight="1"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tvGuide"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:lineSpacingExtra="2dp"
+                android:text="腾讯游戏防设备标记清理。游戏运行时设置 /mnt/vendor/persist/data 权限 000 阻止写入标记文件；游戏划掉后台后自动清理 ano_tmp、cache、code_cache、mrpcs 文件并恢复权限。\n\n骁龙 8 Elite 5 (SM8850) 设备检测到后跳过权限修改（防 TEE 损坏），只执行文件清理。\n\nAndroidID/SSAID 修改按钮需重启生效。"
+                android:textColor="@color/hf_text_secondary"
+                android:textSize="13sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="状态面板"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_panel"
+                android:fontFamily="monospace"
+                android:lineSpacingExtra="2dp"
+                android:minHeight="120dp"
+                android:padding="12dp"
+                android:text="正在检测 Root 与系统状态..."
+                android:textColor="@color/hf_text_primary"
+                android:textSize="12sp" />
+
+            <Switch
+                android:id="@+id/switchWatcher"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:checked="false"
+                android:switchTextAppearance="@style/TextAppearance.AppCompat.Medium"
+                android:text="启动监听（防标记守护）"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="16sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnPackageList"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:backgroundTint="@null"
+                    android:text="游戏包名列表"
+                    android:textAllCaps="false"
+                    android:textColor="@color/hf_text_primary" />
+
+                <Space
+                    android:layout_width="8dp"
+                    android:layout_height="1dp" />
+
+                <Button
+                    android:id="@+id/btnRandomizeIds"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:backgroundTint="@null"
+                    android:text="随机修改 AndroidID/SSAID"
+                    android:textAllCaps="false"
+                    android:textColor="@color/hf_text_primary"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnShowLog"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:backgroundTint="@null"
+                    android:text="查看守护日志"
+                    android:textAllCaps="false"
+                    android:textColor="@color/hf_text_primary" />
+
+                <Space
+                    android:layout_width="8dp"
+                    android:layout_height="1dp" />
+
+                <Button
+                    android:id="@+id/btnRestorePermission"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:backgroundTint="@null"
+                    android:text="手动恢复权限"
+                    android:textAllCaps="false"
+                    android:textColor="@color/hf_text_primary" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="注意事项"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:lineSpacingExtra="2dp"
+                android:text="1. 必须划掉后台退出游戏（不要直接按 Home），否则无法触发清理。\n2. 真死指纹条件：所有列出的游戏都还在后台运行，就关机刷机清数据。重启不会触发真死（开机后会自动还原权限）。\n3. 关闭监听后建议点手动恢复权限确保 /mnt/vendor/persist/data 恢复 700，否则其他系统服务可能写入失败。\n4. 骁龙 8 Elite 5 已自动跳过权限修改，仅清理文件，不会触发 TEE 损坏风险。\n5. 随机修改 AndroidID/SSAID 后必须重启手机生效。"
+                android:textColor="@color/hf_text_secondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </ScrollView>
+
+</LinearLayout>

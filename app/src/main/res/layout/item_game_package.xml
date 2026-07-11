@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="6dp"
+    android:background="@drawable/bg_panel"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/tvPackageName"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:fontFamily="monospace"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="13sp" />
+
+    <Button
+        android:id="@+id/btnRemove"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:background="@drawable/bg_button"
+        android:backgroundTint="@null"
+        android:minWidth="64dp"
+        android:text="删除"
+        android:textAllCaps="false"
+        android:textColor="@color/hf_chip_blocked"
+        android:textSize="13sp" />
+</LinearLayout>
