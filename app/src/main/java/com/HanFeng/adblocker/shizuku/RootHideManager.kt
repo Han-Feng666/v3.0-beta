@@ -79,16 +79,11 @@ class RootHideManager {
         val recommendations = mutableListOf<String>()
         if (magiskAvailable) {
             recommendations.add("启用 Magisk DenyList 以隐藏 Root 特征")
-            if (!zygiskEnabled) {
-                recommendations.add("⚠️ Zygisk 未启用，Zygisk Next 等隐藏模块将无法工作，请到 Magisk 设置中打开 Zygisk")
+            if (!zygiskEnabled && rootSolution == "Magisk") {
+                recommendations.add("⚠️ Zygisk 未启用，请到 Magisk 设置中打开 Zygisk")
             }
         } else {
             recommendations.add("建议在 Magisk/KernelSU 环境下手动配置 DenyList")
-        }
-        if (zygiskNextDetected) {
-            recommendations.add("检测到 Zygisk Next 模块已安装，内置白名单/工作模式，隐藏效果最强")
-        } else if (zygiskEnabled) {
-            recommendations.add("建议安装 Zygisk Next 模块，内置 Shamiko 同等能力，无需额外装 Shamiko")
         }
 
         val mountablePaths = mutableListOf<String>()
