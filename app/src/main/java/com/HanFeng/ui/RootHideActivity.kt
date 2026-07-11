@@ -69,19 +69,14 @@ class RootHideActivity : BaseActivity() {
         btnApply.setOnClickListener { applyHiding() }
         findViewById<Button>(R.id.btnUnhide).setOnClickListener { unhideAll() }
         findViewById<Button>(R.id.btnWatcherLog).setOnClickListener { showWatcherLog() }
+        findViewById<Button>(R.id.btnPresetAll).setOnClickListener { selectAllThirdParty() }
+        findViewById<Button>(R.id.btnPresetClear).setOnClickListener { clearScope() }
         switchProp.setOnCheckedChangeListener { _, checked ->
             handlePropToggle(checked)
         }
         switchAutoWatcher.setOnCheckedChangeListener { _, checked ->
             handleAutoWatcherToggle(checked)
         }
-        findViewById<Button>(R.id.btnPresetBank).setOnClickListener { applyPreset("Bank/Pay") }
-        findViewById<Button>(R.id.btnPresetGame).setOnClickListener { applyPreset("Game") }
-        findViewById<Button>(R.id.btnPresetSocial).setOnClickListener { applyPreset("Social") }
-        findViewById<Button>(R.id.btnPresetVideo).setOnClickListener { applyPreset("ShortVideo") }
-        findViewById<Button>(R.id.btnPresetFinance).setOnClickListener { applyPreset("Finance") }
-        findViewById<Button>(R.id.btnPresetAll).setOnClickListener { applyPreset("All") }
-        findViewById<Button>(R.id.btnPresetClear).setOnClickListener { clearScope() }
 
         checkRootStatus()
     }
@@ -186,45 +181,23 @@ class RootHideActivity : BaseActivity() {
         }.start()
     }
 
-    private fun applyPreset(category: String) {
+    private fun selectAllThirdParty() {
         Thread {
+            val scopeFragmentView = scopeFragment
             val pm = packageManager
             @Suppress("DEPRECATION")
             val flags = PackageManager.MATCH_UNINSTALLED_PACKAGES or
                 PackageManager.MATCH_DISABLED_COMPONENTS
-            val allInstalled = pm.getInstalledApplications(flags)
+            val allThirdParty = pm.getInstalledApplications(flags)
                 .asSequence()
                 .filter { it.packageName != packageName }
+                .filter { (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 }
                 .map { it.packageName }
                 .toSet()
-
-            val matched = when (category) {
-                "Bank/Pay" -> allInstalled.filterTo(mutableSetOf()) { pkg ->
-                    RootHideRepository.Presets.BANK_PAY_PREFIXES.any { pkg == it || pkg.startsWith(it) }
-                }
-                "Game" -> allInstalled.filterTo(mutableSetOf()) { pkg ->
-                    RootHideRepository.Presets.GAME_PREFIXES.any { pkg == it || pkg.startsWith(it) }
-                }
-                "Social" -> allInstalled.filterTo(mutableSetOf()) { pkg ->
-                    RootHideRepository.Presets.SOCIAL_PREFIXES.any { pkg == it || pkg.startsWith(it) }
-                }
-                "ShortVideo" -> allInstalled.filterTo(mutableSetOf()) { pkg ->
-                    RootHideRepository.Presets.SHORT_VIDEO_PREFIXES.any { pkg == it || pkg.startsWith(it) }
-                }
-                "Finance" -> allInstalled.filterTo(mutableSetOf()) { pkg ->
-                    RootHideRepository.Presets.SECURITIES_PREFIXES.any { pkg == it || pkg.startsWith(it) } ||
-                        RootHideRepository.Presets.INSURANCE_PREFIXES.any { pkg == it || pkg.startsWith(it) }
-                }
-                "All" -> RootHideRepository.Presets.filterInteresting(allInstalled)
-                else -> emptySet()
-            }
-            // 与现有作用域合并
-            val current = RootHideRepository.getScopePackages(this).toMutableSet()
-            current += matched
-            RootHideRepository.replaceScopePackages(this, current)
+            RootHideRepository.replaceScopePackages(this, allThirdParty)
             runOnUiThread {
-                Toast.makeText(this, "已加入作用域: ${matched.size} 个 ${labelForPreset(category)}", Toast.LENGTH_LONG).show()
-                scopeFragment.reloadFromOutside()
+                Toast.makeText(this, "已全选 ${allThirdParty.size} 个第三方应用", Toast.LENGTH_LONG).show()
+                scopeFragmentView.reloadFromOutside()
             }
         }.start()
     }
@@ -239,24 +212,12 @@ class RootHideActivity : BaseActivity() {
         }.start()
     }
 
-    private fun labelForPreset(category: String): String = when (category) {
-        "Bank/Pay" -> "银行/支付"
-        "Game" -> "游戏"
-        "Social" -> "社交"
-        "ShortVideo" -> "短视频"
-        "Finance" -> "证券/保险"
-        "All" -> "智能作用域"
-        else -> category
-    }
-
     private fun unhideAll() {
         tvResult.text = "正在解除所有隐藏..."
         Thread {
             val mgr = RootHideManager()
             val ok = mgr.unhideAll()
-            // 同时关闭 prop 伪装
             PropDisguiseManager.restore()
-            // 停止 watcher
             RootHideAppWatcher.stop()
             runOnUiThread {
                 tvResult.text = if (ok) "已解除所有隐藏（DenyList + 进程 + 系统路径 + Prop 伪装）" else "部分解除失败，请查看日志"

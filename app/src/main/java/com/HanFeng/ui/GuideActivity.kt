@@ -341,13 +341,7 @@ class GuideActivity : BaseActivity() {
             "3. 状态面板会实时显示：Root 方案（Magisk/KernelSU/APatch/None）、Zygisk 状态、Zygisk Next 模块状态、DenyList 可用性、系统挂载模式（EROFS 只读 / 可挂载）、隐藏路径数、已隐藏 DenyList 文件数和进程数。\n" +
             "4. Prop 伪装开关：开启后会通过 resetprop 修改 19 项关键系统属性：ro.debuggable=0、ro.secure=1、ro.build.type=user、ro.build.tags=release-keys、ro.boot.verifiedbootstate=green、ro.boot.flash.locked=1、ro.boot.unlocked=0、ro.boot.veritymode=enforcing、ro.boot.vbmeta.device_state=locked、ro.bootloader/baseband 伪装、init.svc.magisk_pfs 清空、ro.magisk.version 清空等。关掉后自动还原原值。\n" +
             "5. 启动监听开关：开启后会启动后台守护脚本，每秒扫描 /proc 下的进程命令行，作用域内 App 一启动就立即执行 mount bind 隐藏所有 Root 路径，无需手动按按钮。应用隐藏完成后会自动打开此开关。\n" +
-            "6. 作用域管理：可手动在「作用域」tab 中勾选需要隐藏 Root 的应用，也可用一键预设按钮快速批量勾选：\n" +
-            "  (1) 银行/支付：工行/建行/中行/招行/交行/农行/工行/中信/平安/支付宝/微信/银联/拉卡拉/京东金融 等\n" +
-            "  (2) 证券/保险：东方财富/蚂蚁财富/华泰证券/平安证券/中国人寿/中国平安 等\n" +
-            "  (3) 游戏：腾讯/网易/米哈游/Supercell/B站/EA 等厂商常见游戏\n" +
-            "  (4) 社交：QQ/微信/微博/小红书/Linkedin/Twitter 等\n" +
-            "  (5) 短视频：抖音/快手/B站/西瓜/爱奇艺/优酷/芒果等\n" +
-            "  (6) 一键智能作用域（推荐）：自动勾选以上全部类别已安装 App\n" +
+            "6. 作用域管理：默认隐藏所有第三方应用。可手动在「作用域」tab 中取消勾选不需要隐藏的特殊 App，也可点「全选所有应用」一键把全部第三方 App 加入作用域，点「清空作用域」撤销全部勾选。\n" +
             "7. 应用隐藏按钮：一键执行 Zygisk 启用 → DenyList/白名单 → KSU/LSPosed → root mount bind 多层组合。建议在预设作用域后点一次应用隐藏，会自动启动后台监听守候后续 App 启动。\n" +
             "8. 解除隐藏按钮：一键撤销所有隐藏操作（DenyList 全部移除 + 进程 mount 全部解绑 + 系统路径 umount + Prop 伪装还原 + 后台监听停止），用于彻底恢复隐藏前状态。\n" +
             "9. 监听日志按钮：查看 RootHide watcher 后台脚本的运行状态和最近 100 行日志（包名、PID、处理时间戳），方便排查 watcher 是否在活动、命中了哪些 App。\n" +

@@ -77,88 +77,9 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:text="一键预设作用域（按已安装 App 自动勾选）"
+        android:text="作用域管理（默认隐藏所有第三方应用）"
         android:textColor="@color/hf_text_secondary"
         android:textSize="12sp" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:orientation="horizontal"
-        android:weightSum="5">
-
-        <Button
-            android:id="@+id/btnPresetBank"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_weight="1"
-            android:background="@drawable/bg_panel"
-            android:text="银行"
-            android:textAllCaps="false"
-            android:textColor="@color/hf_text_primary"
-            android:textSize="12sp" />
-
-        <View
-            android:layout_width="4dp"
-            android:layout_height="1dp" />
-
-        <Button
-            android:id="@+id/btnPresetGame"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_weight="1"
-            android:background="@drawable/bg_panel"
-            android:text="游戏"
-            android:textAllCaps="false"
-            android:textColor="@color/hf_text_primary"
-            android:textSize="12sp" />
-
-        <View
-            android:layout_width="4dp"
-            android:layout_height="1dp" />
-
-        <Button
-            android:id="@+id/btnPresetSocial"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_weight="1"
-            android:background="@drawable/bg_panel"
-            android:text="社交"
-            android:textAllCaps="false"
-            android:textColor="@color/hf_text_primary"
-            android:textSize="12sp" />
-
-        <View
-            android:layout_width="4dp"
-            android:layout_height="1dp" />
-
-        <Button
-            android:id="@+id/btnPresetVideo"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_weight="1"
-            android:background="@drawable/bg_panel"
-            android:text="短视频"
-            android:textAllCaps="false"
-            android:textColor="@color/hf_text_primary"
-            android:textSize="12sp" />
-
-        <View
-            android:layout_width="4dp"
-            android:layout_height="1dp" />
-
-        <Button
-            android:id="@+id/btnPresetFinance"
-            android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:layout_weight="1"
-            android:background="@drawable/bg_panel"
-            android:text="证券保险"
-            android:textAllCaps="false"
-            android:textColor="@color/hf_text_primary"
-            android:textSize="12sp" />
-    </LinearLayout>
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -172,7 +93,7 @@
             android:layout_height="36dp"
             android:layout_weight="1"
             android:background="@drawable/bg_panel"
-            android:text="一键智能作用域（推荐）"
+            android:text="全选所有应用"
             android:textAllCaps="false"
             android:textColor="@color/hf_text_primary"
             android:textSize="12sp" />
