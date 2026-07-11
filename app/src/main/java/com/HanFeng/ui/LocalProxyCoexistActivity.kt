@@ -31,7 +31,22 @@ class LocalProxyCoexistActivity : BaseActivity() {
         binding.portInput.doAfterTextChanged { updatePreview() }
         binding.controllerPackageInput.doAfterTextChanged { updatePreview() }
         binding.remarksInput.doAfterTextChanged { updatePreview() }
+        bindPortReference()
         bindCurrentConfig()
+    }
+
+    private fun bindPortReference() {
+        binding.portReferenceText.text = buildString {
+            append("常见代理软件端口参考\n")
+            append("Clash for Android / Clash Meta: 7890 (混合) / 7891 (SOCKS5)\n")
+            append("V2RayNG: 10808 (SOCKS5) / 10809 (HTTP)\n")
+            append("Surfboard / Surge: 8001 (HTTP) / 8002 (SOCKS5)\n")
+            append("Shadowrocket: 1080 (SOCKS5) / 8080 (HTTP)\n")
+            append("NekoBox / sing-box: 2080 (SOCKS5) / 2081 (HTTP)\n")
+            append("SagerNet: 1080 (SOCKS5) / 1081 (HTTP)\n")
+            append("UU加速器: 本地不开放代理端口\n")
+            append("以上仅供参考，实际端口以你使用的代理软件设置为准。")
+        }
     }
 
     private fun bindCurrentConfig() {

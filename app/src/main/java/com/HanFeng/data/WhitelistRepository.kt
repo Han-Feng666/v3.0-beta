@@ -17,13 +17,16 @@ object WhitelistRepository {
     private val gson = Gson()
     private val coexistKeywordHints = listOf(
         "加速", "加速器", "游戏空间", "游戏助手", "网络加速", "手游加速", "vpn", "proxy", "tunnel",
-        "booster", "accelerator", "game booster", "代理", "翻墙", "专线", "节点", "隧道"
+        "booster", "accelerator", "game booster", "代理", "翻墙", "专线", "节点", "隧道",
+        "科学上网", "梯子", "clash", "v2ray", "shadowsocks", "trojan", "wireguard", "sing-box"
     )
     private val coexistPackageHints = listOf(
         "uu", "biubiu", "xunyou", "qiyou", "leigod", "ourplay", "ccspeed", "vpn", "proxy",
         "gamebooster", "game_booster", "accelerator", "speed", "clash", "v2ray", "wireguard",
         "openvpn", "surfshark", "expressvpn", "nordvpn", "outline", "singbox", "sing-box",
-        "shadowsocks", "ssr", "trojan", "hiddify", "nekobox", "loon", "stash", "quantumult"
+        "shadowsocks", "ssr", "trojan", "hiddify", "nekobox", "loon", "stash", "quantumult",
+        "surfboard", "sagernet", "mihomo", "kuoting", "naicli", "thunders", "tapto", "tap加速",
+        "netease.uu", "tencent.qqgame", "cmccmigs", "cmcc", "chromebook", "wattToolkit"
     )
     private val coexistFamilyHints = listOf(
         listOf("clash", "meta", "mihomo"),
@@ -34,20 +37,25 @@ object WhitelistRepository {
         listOf("loon"),
         listOf("stash"),
         listOf("quantumult"),
+        listOf("surfboard"),
+        listOf("sagernet"),
         listOf("uu", "netease.uu"),
         listOf("biubiu"),
         listOf("xunyou"),
         listOf("qiyou"),
         listOf("leigod"),
         listOf("ourplay"),
-        listOf("gamebooster", "game_booster")
+        listOf("ccspeed"),
+        listOf("gamebooster", "game_booster"),
+        listOf("watt", "tap加速", "taptap")
     )
     private val localProxyPortHints = listOf(
         ProxyPortHint(listOf("clash", "meta", "mihomo"), listOf(7890, 7891, 7892), "Clash/Mihomo 常见本地代理端口"),
         ProxyPortHint(listOf("singbox", "sing-box", "sfa", "nekobox", "v2ray", "xray", "hiddify"), listOf(1080, 10808, 2080, 7890), "V2Ray/sing-box 常见本地代理端口"),
         ProxyPortHint(listOf("shadowsocks", "ssr", "trojan"), listOf(1080, 1081, 8388), "Shadowsocks/Trojan 常见本地代理端口"),
-        ProxyPortHint(listOf("surfboard"), listOf(6152, 7890), "Surfboard 常见本地代理端口"),
-        ProxyPortHint(listOf("loon", "stash", "quantumult"), listOf(7890, 7891, 9090), "代理工具常见本地代理端口")
+        ProxyPortHint(listOf("surfboard", "sagernet"), listOf(6152, 7890, 1080), "Surfboard/SagerNet 常见本地代理端口"),
+        ProxyPortHint(listOf("loon", "stash", "quantumult"), listOf(7890, 7891, 9090), "代理工具常见本地代理端口"),
+        ProxyPortHint(listOf("watt", "taptap"), listOf(0), "Watt Toolkit（原 TapTap 加速器）一般不开放本地代理端口")
     )
 
     fun getPackages(context: Context): Set<String> {
