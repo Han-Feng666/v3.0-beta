@@ -5572,16 +5572,35 @@ object RuleRepository {
     }
 
     private fun sanitizeDomain(raw: String): String? {
-        val value = raw.trim().lowercase()
-            .removePrefix("https://")
-            .removePrefix("http://")
-            .substringBefore('/')
-            .substringBefore('^')
-            .substringBefore(':')
-            .trim('.')
-            .trim()
-        if (value.isBlank() || !value.contains('.')) return null
-        if (!value.matches(domainValidationRegex)) return null
+        var value = raw
+        var start = 0
+        val len = value.length
+        while (start < len && value[start].isWhitespace()) start++
+        var end = len
+        while (end > start && value[end - 1].isWhitespace()) end--
+        if (start > 0 || end < len) value = value.substring(start, end)
+        value = value.lowercase()
+        if (value.startsWith("https://")) value = value.substring(8)
+        else if (value.startsWith("http://")) value = value.substring(7)
+        val slashIdx = value.indexOf('/')
+        if (slashIdx >= 0) value = value.substring(0, slashIdx)
+        val caretIdx = value.indexOf('^')
+        if (caretIdx >= 0) value = value.substring(0, caretIdx)
+        val colonIdx = value.indexOf(':')
+        if (colonIdx >= 0) value = value.substring(0, colonIdx)
+        var vEnd = value.length
+        while (vEnd > 0 && value[vEnd - 1] == '.') vEnd--
+        if (vEnd == 0) return null
+        if (vEnd < value.length) value = value.substring(0, vEnd)
+        if (value.isEmpty() || !value.contains('.')) return null
+        var i = 0
+        val n = value.length
+        while (i < n) {
+            val c = value[i]
+            val ok = (c in 'a'..'z') || (c in '0'..'9') || c == '.' || c == '-' || c == '_'
+            if (!ok) return null
+            i++
+        }
         return value
     }
 

@@ -7,48 +7,211 @@
     android:orientation="vertical"
     android:padding="16dp">
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Root 隐藏"
             android:textColor="@color/hf_text_primary"
-            android:textSize="24sp"
+            android:textSize="22sp"
             android:textStyle="bold" />
 
-        <com.google.android.material.tabs.TabLayout
-            android:id="@+id/tabLayout"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_panel" />
-
-        <androidx.viewpager2.widget.ViewPager2
-            android:id="@+id/viewPager"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:layout_marginTop="8dp"
-            android:background="@drawable/bg_panel" />
-
-        <Button
-            android:id="@+id/btnApplyHide"
-            android:layout_width="match_parent"
-            android:layout_height="44dp"
-            android:layout_marginTop="8dp"
-            android:background="@drawable/bg_panel"
-            android:text="应用隐藏"
-            android:textAllCaps="false"
-            android:textColor="@color/hf_text_primary"
-            android:textSize="14sp" />
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
 
         <TextView
-            android:id="@+id/tvHideResult"
-            android:layout_width="match_parent"
+            android:id="@+id/tvRootSolution"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text=""
             android:textColor="@color/hf_text_secondary"
             android:textSize="12sp"
-            android:maxLines="8"
-            android:scrollbars="vertical" />
+            android:text="检测中..." />
     </LinearLayout>
+
+    <TextView
+        android:id="@+id/tvHideStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_panel"
+        android:padding="12dp"
+        android:text="正在检测 Root 隐藏环境..."
+        android:textColor="@color/hf_text_primary"
+        android:textSize="12sp"
+        android:maxLines="6"
+        android:scrollbars="vertical" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <Switch
+            android:id="@+id/switchPropDisguise"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Prop 伪装"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="13sp" />
+
+        <Switch
+            android:id="@+id/switchAutoWatcher"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="启动监听"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="一键预设作用域（按已安装 App 自动勾选）"
+        android:textColor="@color/hf_text_secondary"
+        android:textSize="12sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:orientation="horizontal"
+        android:weightSum="4">
+
+        <Button
+            android:id="@+id/btnPresetBank"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_panel"
+            android:text="银行"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="12sp" />
+
+        <View
+            android:layout_width="4dp"
+            android:layout_height="1dp" />
+
+        <Button
+            android:id="@+id/btnPresetGame"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_panel"
+            android:text="游戏"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="12sp" />
+
+        <View
+            android:layout_width="4dp"
+            android:layout_height="1dp" />
+
+        <Button
+            android:id="@+id/btnPresetSocial"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_panel"
+            android:text="社交"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="12sp" />
+
+        <View
+            android:layout_width="4dp"
+            android:layout_height="1dp" />
+
+        <Button
+            android:id="@+id/btnPresetVideo"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_panel"
+            android:text="短视频"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnPresetAll"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_panel"
+            android:text="一键智能作用域（推荐）"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="12sp" />
+
+        <View
+            android:layout_width="4dp"
+            android:layout_height="1dp" />
+
+        <Button
+            android:id="@+id/btnPresetClear"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_panel"
+            android:text="清空作用域"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/tabLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/bg_panel" />
+
+    <androidx.viewpager2.widget.ViewPager2
+        android:id="@+id/viewPager"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_panel" />
+
+    <Button
+        android:id="@+id/btnApplyHide"
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_panel"
+        android:text="应用隐藏（DenyList + Prop 伪装 + mount bind）"
+        android:textAllCaps="false"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="13sp" />
+
+    <TextView
+        android:id="@+id/tvHideResult"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text=""
+        android:textColor="@color/hf_text_secondary"
+        android:textSize="11sp"
+        android:maxLines="8"
+        android:scrollbars="vertical" />
+</LinearLayout>

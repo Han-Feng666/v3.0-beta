@@ -27,6 +27,21 @@ object SniInterceptor {
         val reason: String
     )
 
+    private const val SNI_CACHE_TTL_MS = 10_000L
+    private const val SNI_CACHE_MAX = 256
+
+    private data class CachedSniDecision(
+        val decision: SniBlockDecision,
+        val timestamp: Long
+    )
+
+    private val sniCache = object : LinkedHashMap<String, CachedSniDecision>(SNI_CACHE_MAX, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedSniDecision>?): Boolean {
+            return size > SNI_CACHE_MAX
+        }
+    }
+    private val sniCacheLock = Any()
+
     fun evaluate(
         context: Context,
         sniHost: String,
@@ -37,48 +52,53 @@ object SniInterceptor {
             return SniBlockDecision(false, sniHost, "", "empty-sni")
         }
 
-        // 排除：社交核心
+        synchronized(sniCacheLock) {
+            sniCache[sniHost]?.let { cached ->
+                if (System.currentTimeMillis() - cached.timestamp < SNI_CACHE_TTL_MS) {
+                    return cached.decision
+                }
+            }
+        }
+
+        // 域名快速排除：社交核心 / 白名单（在这两步命中时不需要 vendor 分类）
         if (RuleRepository.isSocialCoreDomain(sniHost)) {
-            return SniBlockDecision(false, sniHost, "", "social-core")
+            return makeDecision(false, sniHost, "", "social-core").also { cacheDecision(sniHost, it) }
         }
 
-        // 排除：受保护域名（由 VpnService 传入）
         if (isProtectedDomain) {
-            return SniBlockDecision(false, sniHost, "", "protected-domain")
+            return makeDecision(false, sniHost, "", "protected-domain").also { cacheDecision(sniHost, it) }
         }
 
-        // 排除：白名单
         if (RuleRepository.isWhitelistedDomain(sniHost)) {
-            return SniBlockDecision(false, sniHost, "", "whitelisted")
+            return makeDecision(false, sniHost, "", "whitelisted").also { cacheDecision(sniHost, it) }
         }
 
-        // 排除：敏感认证域名
         if (RuleRepository.isSensitiveAuthDomain(sniHost)) {
-            return SniBlockDecision(false, sniHost, "", "sensitive-auth")
+            return makeDecision(false, sniHost, "", "sensitive-auth").also { cacheDecision(sniHost, it) }
         }
 
         val vendor = RuleRepository.classifyVendor(context, sniHost)
 
         // 命中通用广告流量
         if (RuleRepository.shouldTreatAsGeneralAdTraffic(sniHost, vendor, appName)) {
-            return SniBlockDecision(
-                shouldBlock = true,
-                domain = sniHost,
-                vendor = vendor,
-                reason = "general-ad-traffic"
-            )
+            return makeDecision(true, sniHost, vendor, "general-ad-traffic").also { cacheDecision(sniHost, it) }
         }
 
         // 命中广告 SDK 基础设施域名
         if (RuleRepository.looksLikeAdSdkInfraDomain(sniHost, vendor)) {
-            return SniBlockDecision(
-                shouldBlock = true,
-                domain = sniHost,
-                vendor = vendor,
-                reason = "ad-sdk-infra"
-            )
+            return makeDecision(true, sniHost, vendor, "ad-sdk-infra").also { cacheDecision(sniHost, it) }
         }
 
-        return SniBlockDecision(false, sniHost, vendor, "pass")
+        return makeDecision(false, sniHost, vendor, "pass").also { cacheDecision(sniHost, it) }
+    }
+
+    private fun makeDecision(shouldBlock: Boolean, domain: String, vendor: String, reason: String): SniBlockDecision {
+        return SniBlockDecision(shouldBlock, domain, vendor, reason)
+    }
+
+    private fun cacheDecision(sniHost: String, decision: SniBlockDecision) {
+        synchronized(sniCacheLock) {
+            sniCache[sniHost] = CachedSniDecision(decision, System.currentTimeMillis())
+        }
     }
 }

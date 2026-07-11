@@ -32,7 +32,8 @@ class RootHideModulesFragment : Fragment() {
         val key: String,
         val label: String,
         val detail: String,
-        var selected: Boolean = false
+        var selected: Boolean = false,
+        val icon: android.graphics.drawable.Drawable? = null
     )
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -181,7 +182,7 @@ class RootHideModulesFragment : Fragment() {
         val modules = mutableListOf<HideSectionItem>()
         val apps = mutableListOf<HideSectionItem>()
 
-        val pathCheckScript = "for p in /system/bin/su /data/adb/magisk /data/adb/magisk.db /data/adb/ksu /data/adb/ap /data/adb/lspd /data/adb/lsp /data/adb/zygisk /dev/zygisk /debug_ramdisk /sbin/.magisk /system/etc/init/magisk /cache/.disable_magisk; do test -e \"\$p\" && echo \"\$p\"; done; for D in /data/adb/modules/*/module.prop; do test -f \"\$D\" && head -1 \"\$D\" 2>/dev/null; done"
+        val pathCheckScript = "for p in /system/bin/su /data/adb/magisk /data/adb/magisk.db /data/adb/ksu /data/adb/ap /data/adb/lspd /data/adb/lsp /data/adb/zygisk /dev/zygisk /debug_ramdisk /sbin/.magisk /system/etc/init/magisk /cache/.disable_magisk; do test -e \"\$p\" && echo \"\$p\"; done"
         val raw = runRootCheck(pathCheckScript)
         for (line in raw.lines()) {
             val t = line.trim()
@@ -191,11 +192,24 @@ class RootHideModulesFragment : Fragment() {
                 if (entry != null) {
                     modules.add(HideSectionItem(entry.key, "[路径] ${entry.label}", entry.path))
                 }
-            } else if (t.startsWith("name=")) {
-                val name = t.substringAfter("name=").trim()
-                if (name.isNotBlank() && name.length < 64) {
-                    modules.add(HideSectionItem("mod_${name.hashCode().toUInt()}", "[模块] $name", "/data/adb/modules/"))
-                }
+            }
+        }
+
+        val moduleListScript = "for base in /data/adb/modules /data/adb/ksu/modules /data/adb/ap/modules /data/adb/magisk/modules; do for D in \"\$base\"/*/module.prop; do test -f \"\$D\" || continue; id=\$(grep '^id=' \"\$D\" | head -1 | cut -d= -f2-); name=\$(grep '^name=' \"\$D\" | head -1 | cut -d= -f2-); ver=\$(grep '^version=' \"\$D\" | head -1 | cut -d= -f2-); disp=\$name; [ -z \"\$disp\" ] && disp=\$id; [ -z \"\$disp\" ] && continue; extra=\$(dirname \"\$D\"); echo \"module:\${disp}:\${ver}:\${extra}\"; done; done 2>/dev/null"
+        val moduleListRaw = runRootCheck(moduleListScript)
+        for (line in moduleListRaw.lines().map { it.trim() }.filter { it.isNotBlank() }) {
+            if (line.startsWith("module:")) {
+                val payload = line.removePrefix("module:")
+                val sep1 = payload.indexOf(':')
+                if (sep1 < 0) continue
+                val name = payload.substring(0, sep1)
+                val rest = payload.substring(sep1 + 1)
+                val sep2 = rest.indexOf(':')
+                val ver = if (sep2 < 0) rest else rest.substring(0, sep2)
+                val dir = if (sep2 < 0) "" else rest.substring(sep2 + 1)
+                val display = if (ver.isNotBlank()) "[模块] $name ($ver)" else "[模块] $name"
+                val detail = if (dir.isNotBlank()) dir else "/data/adb/modules/"
+                modules.add(HideSectionItem("mod_${name.hashCode().toUInt()}", display, detail))
             }
         }
 
@@ -207,17 +221,31 @@ class RootHideModulesFragment : Fragment() {
             "icu.nullptr.nativetest" to "Native Root Detector",
             "com.scottyab.rootbeer.sample" to "RootBeer Sample"
         )
+        val ctx = context ?: return modules to apps
+        val pm = ctx.packageManager
+        val selfPkg = ctx.packageName
+        @Suppress("DEPRECATION")
+        val pkgFlags = android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES or
+            android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS
         for ((pkg, label) in knownCheckerApps) {
             val installed = runRootCheck("pm list packages '$pkg' 2>/dev/null | grep -q '$pkg' && echo YES || echo NO")
-            if (installed == "YES") apps.add(HideSectionItem("app_$pkg", "[检测App] $label", pkg))
+            if (installed == "YES") {
+                val appInfo = runCatching { pm.getApplicationInfo(pkg, pkgFlags) }.getOrNull()
+                val dispLabel = runCatching { appInfo?.loadLabel(pm)?.toString() }.getOrNull() ?: label
+                val icon = runCatching { appInfo?.loadIcon(pm) }.getOrNull()
+                apps.add(HideSectionItem("app_$pkg", "[检测App] $dispLabel", pkg, icon = icon))
+            }
         }
 
         val thirdParty = runRootCheck("pm list packages -3 2>/dev/null | sed 's/^package://' | head -200")
         if (thirdParty.isNotBlank()) {
             val seen = apps.mapTo(mutableSetOf()) { it.key.substringAfter("app_") }
-            for (pkg in thirdParty.trim().lines().map { it.trim() }.filter { it.isNotBlank() && it !in seen }) {
+            for (pkg in thirdParty.trim().lines().map { it.trim() }.filter { it.isNotBlank() && it !in seen && it != selfPkg }) {
                 if (pkg.length < 128) {
-                    apps.add(HideSectionItem("app_$pkg", "$pkg", pkg))
+                    val appInfo = runCatching { pm.getApplicationInfo(pkg, pkgFlags) }.getOrNull()
+                    val dispLabel = runCatching { appInfo?.loadLabel(pm)?.toString() }.getOrNull() ?: pkg
+                    val icon = runCatching { appInfo?.loadIcon(pm) }.getOrNull()
+                    apps.add(HideSectionItem("app_$pkg", dispLabel, pkg, icon = icon))
                 }
             }
         }
@@ -260,9 +288,24 @@ class RootHideModulesFragment : Fragment() {
                 }
             }
             row.addView(cb)
+            val iconSize = 32.dp
+            if (item.icon != null) {
+                val iconView = android.widget.ImageView(requireContext()).apply {
+                    setImageDrawable(item.icon)
+                    scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+                    layoutParams = LinearLayout.LayoutParams(iconSize, iconSize).apply {
+                        marginEnd = 8.dp
+                    }
+                }
+                row.addView(iconView)
+            } else {
+                row.addView(View(requireContext()).apply {
+                    layoutParams = LinearLayout.LayoutParams(iconSize, 1)
+                })
+            }
             val labelLayout = LinearLayout(requireContext()).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(8.dp, 0, 0, 0)
+                setPadding(0, 0, 0, 0)
             }
             labelLayout.addView(TextView(requireContext()).apply {
                 text = item.label

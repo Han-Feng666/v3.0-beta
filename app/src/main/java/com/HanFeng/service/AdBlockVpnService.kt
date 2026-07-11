@@ -70,6 +70,7 @@ import com.HanFeng.data.ShizukuConnectionOwnerRepository
 import com.HanFeng.data.ShizukuRepository
 import com.HanFeng.data.StatsRepository
 import com.HanFeng.data.WhitelistRepository
+import com.HanFeng.adblocker.shizuku.HotspotInterceptor
 import com.HanFeng.dns.DnsMessageParser
 import com.HanFeng.model.BlockRule
 import com.HanFeng.model.RuleSource
@@ -210,6 +211,26 @@ class AdBlockVpnService : VpnService() {
         val shouldUseActiveMitmRouting: Boolean
     )
     private val blockedIpNetworks by lazy(LazyThreadSafetyMode.NONE) { loadBlockedIpNetworks() }
+
+    private val blockedIpNetworkIndexV4 by lazy(LazyThreadSafetyMode.NONE) {
+        val map = HashMap<Int, ArrayList<BlockedIpNetwork>>(32)
+        for (network in blockedIpNetworks) {
+            if (network.addressBytes.size != 4) continue
+            val key = ((network.addressBytes[0].toInt() and 0xFF) shl 8) or (network.addressBytes[1].toInt() and 0xFF)
+            map.getOrPut(key) { ArrayList(8) }.add(network)
+        }
+        map
+    }
+
+    private val blockedIpNetworkIndexV6 by lazy(LazyThreadSafetyMode.NONE) {
+        val map = HashMap<Int, ArrayList<BlockedIpNetwork>>(32)
+        for (network in blockedIpNetworks) {
+            if (network.addressBytes.size != 16) continue
+            val key = ((network.addressBytes[0].toInt() and 0xFF) shl 8) or (network.addressBytes[1].toInt() and 0xFF)
+            map.getOrPut(key) { ArrayList(8) }.add(network)
+        }
+        map
+    }
     private val upstreamFallbackDnsHosts = listOf(
         "223.5.5.5",
         "223.6.6.6",
@@ -316,6 +337,13 @@ class AdBlockVpnService : VpnService() {
                     LogRepository.append(this, "VPN reload skipped: ad block disabled by user")
                     stopSelf()
                     return START_NOT_STICKY
+                }
+                runCatching {
+                    if (FeatureSettingsRepository.isHotspotBlockEnabled(this) &&
+                        FeatureSettingsRepository.getHotspotBlockMode(this) == "dns"
+                    ) {
+                        HotspotInterceptor.refreshRules(this)
+                    }
                 }
                 scheduleVpnReload()
                 true
@@ -457,6 +485,20 @@ class AdBlockVpnService : VpnService() {
                 whitelistCount = WhitelistRepository.getPackages(this@AdBlockVpnService).size,
                 dynamicDecryptRouteCount = HttpsDecryptRouteRepository.getRoutes(this@AdBlockVpnService).size
             )
+            if (FeatureSettingsRepository.isHotspotBlockEnabled(this@AdBlockVpnService) &&
+                FeatureSettingsRepository.getHotspotBlockMode(this@AdBlockVpnService) == "dns"
+            ) {
+                scope.launch {
+                    runCatching {
+                        val started = HotspotInterceptor.startDnsHijack(this@AdBlockVpnService)
+                        if (!started) {
+                            LogRepository.append(this@AdBlockVpnService, "Hotspot DNS hijack failed to start on VPN ready")
+                        }
+                    }.onFailure {
+                        LogRepository.append(this@AdBlockVpnService, "Hotspot DNS hijack exception: ${it.message ?: it.javaClass.simpleName}")
+                    }
+                }
+            }
         }.onFailure {
             LogRepository.append(this@AdBlockVpnService, "VPN deferred setup failed: ${it.message ?: it.javaClass.simpleName}")
         }
@@ -672,6 +714,13 @@ class AdBlockVpnService : VpnService() {
         vpnInterface?.close()
         vpnInterface = null
         clearRuntimeState()
+        runCatching {
+            if (FeatureSettingsRepository.isHotspotBlockEnabled(this) &&
+                FeatureSettingsRepository.getHotspotBlockMode(this) == "dns"
+            ) {
+                HotspotInterceptor.stopDnsHijack(this)
+            }
+        }
         if (keepForeground) {
             refreshForegroundNotification()
         } else {
@@ -824,9 +873,12 @@ class AdBlockVpnService : VpnService() {
         for ((cache, max) in caches) {
             if (cache.size <= max) continue
             val excess = cache.size - max
-            val keysToEvict = cache.keys().toList().take(excess)
-            for (key in keysToEvict) {
-                cache.remove(key)
+            var removed = 0
+            val iter = cache.entries.iterator()
+            while (removed < excess && iter.hasNext()) {
+                iter.next()
+                iter.remove()
+                removed++
             }
         }
     }
@@ -885,6 +937,8 @@ class AdBlockVpnService : VpnService() {
         val localProxyFullCapture = fullCaptureMode == FullCaptureRoutingSupport.Mode.LOCAL_PROXY
         val mitmAppFullCapture = fullCaptureMode == FullCaptureRoutingSupport.Mode.MITM_APP
         val mitmFullCapture = fullCaptureMode == FullCaptureRoutingSupport.Mode.MITM_GLOBAL
+        val hotspotVpnMode = FeatureSettingsRepository.isHotspotBlockEnabled(this) &&
+            FeatureSettingsRepository.getHotspotBlockMode(this) == "vpn"
         val builder = Builder()
             .setSession(getString(R.string.app_name))
             .setMtu(1500)
@@ -904,7 +958,15 @@ class AdBlockVpnService : VpnService() {
             builder.allowFamily(OsConstants.AF_INET6)
         }
 
-        if (localProxyFullCapture || mitmAppFullCapture || mitmFullCapture) {
+        if (hotspotVpnMode) {
+            runCatching {
+                builder.addRoute("0.0.0.0", 0)
+                builder.addRoute("::", 0)
+            }.onFailure {
+                LogRepository.append(this, "Hotspot VPN full-tunnel routes failed: ${it.message ?: it.javaClass.simpleName}")
+            }
+            LogRepository.append(this, "Hotspot VPN mode: full tunnel routes applied for tethered device traffic")
+        } else if (localProxyFullCapture || mitmAppFullCapture || mitmFullCapture) {
             runCatching {
                 builder.addRoute("0.0.0.0", 0)
                 builder.addRoute("::", 0)
@@ -977,6 +1039,14 @@ class AdBlockVpnService : VpnService() {
         fastStart: Boolean
     ) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
+
+        val hotspotVpnMode = FeatureSettingsRepository.isHotspotBlockEnabled(this) &&
+            FeatureSettingsRepository.getHotspotBlockMode(this) == "vpn"
+        if (hotspotVpnMode) {
+            LogRepository.append(this, "Hotspot VPN mode: skipping app scope restrictions for tethered traffic capture")
+            return
+        }
+
         if (fullCaptureMode == FullCaptureRoutingSupport.Mode.LOCAL_PROXY ||
             fullCaptureMode == FullCaptureRoutingSupport.Mode.MITM_APP
         ) {
@@ -8777,6 +8847,14 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun findBlockedIpNetwork(address: ByteArray): BlockedIpNetwork? {
+        if (address.size == 4 || address.size == 16) {
+            val index = if (address.size == 4) blockedIpNetworkIndexV4 else blockedIpNetworkIndexV6
+            val key = ((address[0].toInt() and 0xFF) shl 8) or (address[1].toInt() and 0xFF)
+            val bucket = index[key] ?: return null
+            return bucket.firstOrNull { network ->
+                network.addressBytes.size == address.size && matchesPrefix(address, network.addressBytes, network.prefixLength)
+            }
+        }
         return blockedIpNetworks.firstOrNull { network ->
             network.addressBytes.size == address.size && matchesPrefix(address, network.addressBytes, network.prefixLength)
         }
@@ -8857,6 +8935,29 @@ class AdBlockVpnService : VpnService() {
             return sb.toString()
         }
         return InetAddress.getByAddress(bytes).hostAddress ?: ""
+    }
+
+    private fun formatAddress(bytes: ByteArray, sb: StringBuilder): StringBuilder {
+        if (bytes.size == 4) {
+            val key = ((bytes[0].toInt() and 0xFF) shl 24) or ((bytes[1].toInt() and 0xFF) shl 16) or ((bytes[2].toInt() and 0xFF) shl 8) or (bytes[3].toInt() and 0xFF)
+            ipv4FormatCache[key]?.let { sb.append(it); return sb }
+            val result = "${bytes[0].toInt() and 0xFF}.${bytes[1].toInt() and 0xFF}.${bytes[2].toInt() and 0xFF}.${bytes[3].toInt() and 0xFF}"
+            ipv4FormatCache[key] = result
+            sb.append(result)
+            return sb
+        }
+        if (bytes.size == 16) {
+            for (i in bytes.indices step 2) {
+                if (i > 0) sb.append(':')
+                val hi = bytes[i].toInt() and 0xFF
+                val lo = bytes[i + 1].toInt() and 0xFF
+                val combined = (hi shl 8) or lo
+                if (combined != 0) sb.append(combined.toString(16))
+            }
+            return sb
+        }
+        sb.append(InetAddress.getByAddress(bytes).hostAddress ?: "")
+        return sb
     }
 
     private fun resolveDestinationAppContext(info: com.HanFeng.model.PacketInfo): DestinationAppContext? {
@@ -9215,22 +9316,33 @@ class AdBlockVpnService : VpnService() {
         return parts.takeLast(2).joinToString(".")
     }
 
+    private val flowKeyBuffer = object : ThreadLocal<StringBuilder>() {
+        override fun initialValue() = StringBuilder(64)
+    }
+
     private fun flowCacheKey(info: com.HanFeng.model.PacketInfo): String {
-        return listOf(
-            info.protocol.toString(),
-            formatAddress(info.sourceAddress),
-            info.sourcePort.toString(),
-            formatAddress(info.destinationAddress),
-            info.destinationPort.toString()
-        ).joinToString(":")
+        val sb = flowKeyBuffer.get()!!.apply { setLength(0) }
+        sb.append(info.protocol).append(':')
+        formatAddress(info.sourceAddress, sb).append(':')
+        sb.append(info.sourcePort).append(':')
+        formatAddress(info.destinationAddress, sb).append(':')
+        sb.append(info.destinationPort)
+        return sb.toString()
     }
 
     private fun portCacheKey(info: com.HanFeng.model.PacketInfo): String {
-        return "${info.protocol}:${formatAddress(info.sourceAddress)}:${info.sourcePort}"
+        val sb = flowKeyBuffer.get()!!.apply { setLength(0) }
+        sb.append(info.protocol).append(':')
+        formatAddress(info.sourceAddress, sb).append(':')
+        sb.append(info.sourcePort)
+        return sb.toString()
     }
 
     private fun sourcePortCacheKey(info: com.HanFeng.model.PacketInfo): String {
-        return "${formatAddress(info.sourceAddress)}:${info.sourcePort}"
+        val sb = flowKeyBuffer.get()!!.apply { setLength(0) }
+        formatAddress(info.sourceAddress, sb).append(':')
+        sb.append(info.sourcePort)
+        return sb.toString()
     }
 
     private fun synthesizeServerSequence(flowKey: String): Long {

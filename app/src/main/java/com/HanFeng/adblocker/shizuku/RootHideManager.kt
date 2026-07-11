@@ -22,6 +22,8 @@ class RootHideManager {
         val mountablePaths: List<String>,
         val readonlyPaths: List<String>,
         val magiskDenyListAvailable: Boolean,
+        val zygiskEnabled: Boolean,
+        val shamikoDetected: Boolean,
         val systemMountable: Boolean,
         val recommendations: List<String>
     )
@@ -71,9 +73,23 @@ class RootHideManager {
         val rootDetected = if (rootSolution != "None") "已检测到 Root" else "未检测到 Root"
         val magiskAvailable = rootSolution == "Magisk" || rootSolution == "KernelSU"
 
+        val zygiskEnabled = rootSolution == "Magisk" && checkZygiskEnabled()
+        val shamikoDetected = checkShamikoInstalled()
+
         val recommendations = mutableListOf<String>()
-        if (magiskAvailable) recommendations.add("启用 Magisk DenyList 以隐藏 Root 特征")
-        else recommendations.add("建议在 Magisk/KernelSU 环境下手动配置 DenyList")
+        if (magiskAvailable) {
+            recommendations.add("启用 Magisk DenyList 以隐藏 Root 特征")
+            if (!zygiskEnabled) {
+                recommendations.add("⚠️ Zygisk 未启用，Shamiko/LSPosed 等隐藏模块将无法工作，请到 Magisk 设置中打开 Zygisk")
+            }
+        } else {
+            recommendations.add("建议在 Magisk/KernelSU 环境下手动配置 DenyList")
+        }
+        if (shamikoDetected) {
+            recommendations.add("检测到 Shamiko 模块已安装，配合 DenyList 可达白名单/工作模式，隐藏效果更好")
+        } else if (zygiskEnabled) {
+            recommendations.add("建议安装 Shamiko 模块以增强隐藏效果（Zygisk 已启用，环境已就绪）")
+        }
 
         val mountablePaths = mutableListOf<String>()
         val readonlyPaths = mutableListOf<String>()
@@ -106,6 +122,8 @@ class RootHideManager {
             mountablePaths = mountablePaths,
             readonlyPaths = readonlyPaths,
             magiskDenyListAvailable = magiskAvailable,
+            zygiskEnabled = zygiskEnabled,
+            shamikoDetected = shamikoDetected,
             systemMountable = systemMountable,
             recommendations = recommendations
         )
@@ -170,6 +188,12 @@ class RootHideManager {
         val detectedRoot = detectRootSolution()
         Log.d(TAG, "Detected root solution: $detectedRoot")
 
+        // 自动启用 Zygisk（仅在 Magisk 上；KSU/APatch 自带实现）
+        if (detectedRoot == "Magisk") {
+            val zygOk = ensureZygiskEnabled()
+            Log.d(TAG, "Zygisk ensure enabled: $zygOk (Shamiko 等隐藏模块依赖此)")
+        }
+
         val existingPaths = knownDetectionPaths.filter { pathExists(it) }
         Log.d(TAG, "Found ${existingPaths.size} root traces: ${existingPaths.joinToString(", ")}")
 
@@ -177,6 +201,7 @@ class RootHideManager {
         val remaining = mutableListOf<String>()
 
         for (pkg in packages) {
+            // 0) 先尝试 prop 伪装 + mount bind（对所有目标 App 都做，最广泛的覆盖）
             // 1) KernelSU/APatch 优先走官方 magiskhide 兼容接口
             val ksuR = tryKsuHide(pkg)
             if (ksuR != null) {
@@ -184,7 +209,7 @@ class RootHideManager {
                 if (ksuR.success) magiskDenyListPackages.add(pkg)
                 continue
             }
-            // 2) Magisk 设备走 DenyList
+            // 2) Magisk 设备走 DenyList（含自动启用 DenyList）
             val r = tryMagiskDenyList(pkg)
             if (r != null) {
                 magiskResults.add(r)
@@ -270,6 +295,44 @@ class RootHideManager {
             "else echo None; fi"
         )
         return check.output.trim()
+    }
+
+    /** 检测 Magisk Zygisk 是否启用。 */
+    fun checkZygiskEnabled(): Boolean {
+        val r = runRootShell(
+            "magisk --sqlite \"SELECT value FROM settings WHERE key='zygisk'\" 2>/dev/null | grep -qx 1 && echo ON || " +
+                "(getprop persist.sys.zygisk.enabled 2>/dev/null | grep -qx 1 && echo ON) || " +
+                "(test -d /data/adb/modules/zygisksu && echo ON) || echo OFF",
+            5
+        )
+        return r.output.trim() == "ON"
+    }
+
+    /** 检测 Shamiko 模块是否安装（Magisk Zygisk 上的 Root 隐藏白名单扩展）。 */
+    fun checkShamikoInstalled(): Boolean {
+        val r = runRootShell(
+            "for base in /data/adb/modules /data/adb/modules_update; do " +
+                "for f in \"\$base\"/shamiko*/module.prop; do " +
+                "test -f \"\$f\" && grep -q '^id=.*shamiko' \"\$f\" 2>/dev/null && echo FOUND; " +
+                "done; done 2>/dev/null",
+            5
+        )
+        return r.output.trim() == "FOUND"
+    }
+
+    /** 尝试自动启用 Zygisk（Magisk 设置写入 + 服务重启）。只在 Magisk 自身上有效，KSU/APatch 有自家 Zygisk 实现。 */
+    fun ensureZygiskEnabled(): Boolean {
+        if (detectRootSolution() != "Magisk") return checkZygiskEnabled()
+        if (checkZygiskEnabled()) return true
+        val r = runRootShell(
+            "magisk --sqlite \"INSERT OR REPLACE INTO settings (key, value) VALUES ('zygisk', 1)\" 2>/dev/null && echo ZYGISK_ON || echo FAIL",
+            5
+        )
+        if (r.output.trim() != "ZYGISK_ON") return false
+        // 重启 zygote 让设置生效（会闪一下屏，但避免用户手动 reboot）
+        runRootShell("setprop ctl.restart zygote 2>/dev/null; echo KICKED", 3)
+        Thread.sleep(800)
+        return checkZygiskEnabled()
     }
 
     private fun tryKsuHide(packageName: String): HideResult? {

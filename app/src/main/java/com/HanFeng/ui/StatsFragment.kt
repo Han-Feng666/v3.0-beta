@@ -11,6 +11,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.isVisible
 import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import com.HanFeng.R
 import com.HanFeng.data.StatsRepository
 import com.HanFeng.databinding.FragmentStatsBinding
@@ -21,6 +22,9 @@ import com.HanFeng.model.DashboardStats
 import com.HanFeng.model.RankingEntry
 import com.HanFeng.model.RankingBundle
 import com.HanFeng.model.RankingType
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class StatsFragment : Fragment(R.layout.fragment_stats) {
     private var _binding: FragmentStatsBinding? = null
@@ -73,23 +77,56 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
         }
     }
 
+    private data class RenderData(
+        val dashboard: DashboardStats,
+        val rankings: RankingBundle
+    )
+
     private fun render(force: Boolean) {
         val binding = _binding ?: return
         val ctx = context ?: return
-        val dashboard = StatsRepository.getDashboard(ctx)
-        val rankings = StatsRepository.getRankings(ctx)
-        if (!force && dashboard == lastDashboard && rankings == lastRankings) {
-            return
+        if (!force && lastDashboard != null && lastRankings != null) {
+            // Background — fetch + diff, only touch UI if changed
+            viewLifecycleOwner.lifecycleScope.launch {
+                val data = withContext(Dispatchers.Default) {
+                    val dashboard = StatsRepository.getDashboard(ctx)
+                    val rankings = StatsRepository.getRankings(ctx)
+                    RenderData(dashboard, rankings)
+                }
+                if (!isAdded || _binding == null) return@launch
+                if (!force && data.dashboard == lastDashboard && data.rankings == lastRankings) return@launch
+                lastDashboard = data.dashboard
+                lastRankings = data.rankings
+                updateViews(binding, data.dashboard, data.rankings)
+            }
+        } else {
+            // No previous data — fetch on background, fallback path
+            viewLifecycleOwner.lifecycleScope.launch {
+                val data = withContext(Dispatchers.Default) {
+                    val dashboard = StatsRepository.getDashboard(ctx)
+                    val rankings = StatsRepository.getRankings(ctx)
+                    RenderData(dashboard, rankings)
+                }
+                if (!isAdded || _binding == null) return@launch
+                lastDashboard = data.dashboard
+                lastRankings = data.rankings
+                updateViews(binding, data.dashboard, data.rankings)
+            }
         }
-        lastDashboard = dashboard
-        lastRankings = rankings
+    }
+
+    private fun updateViews(
+        binding: FragmentStatsBinding,
+        dashboard: DashboardStats,
+        rankings: RankingBundle
+    ) {
         binding.statGrid.removeAllViews()
-        addStatCard("今日拦截", dashboard.todayBlocked.toString())
-        addStatCard("累计拦截", dashboard.totalBlocked.toString())
-        addStatCard("DNS 总拦截", dashboard.dnsBlocked.toString())
-        addStatCard("请求总数", dashboard.requestTotal.toString())
-        addStatCard("响应总数", dashboard.responseTotal.toString())
-        addStatCard("累计节省流量", formatBytes(dashboard.bytesSaved))
+        addStatCard(binding, "今日拦截", dashboard.todayBlocked.toString())
+        addStatCard(binding, "累计拦截", dashboard.totalBlocked.toString())
+        addStatCard(binding, "DNS 总拦截", dashboard.dnsBlocked.toString())
+        addStatCard(binding, "请求总数", dashboard.requestTotal.toString())
+        addStatCard(binding, "响应总数", dashboard.responseTotal.toString())
+        addStatCard(binding, "累计节省流量", formatBytes(dashboard.bytesSaved))
 
         binding.leftColumn.removeAllViews()
         binding.rightColumn.removeAllViews()
@@ -110,8 +147,7 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
         }
     }
 
-    private fun addStatCard(title: String, value: String) {
-        val binding = _binding ?: return
+    private fun addStatCard(binding: FragmentStatsBinding, title: String, value: String) {
         val card = ItemStatCardBinding.inflate(layoutInflater, binding.statGrid, false)
         card.statTitle.text = title
         card.statValue.text = value

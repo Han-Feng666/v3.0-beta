@@ -23,6 +23,8 @@ object FeatureSettingsRepository {
     private const val KEY_AD_FREE_REWARD_ENABLED = "ad_free_reward_enabled"
     private const val KEY_AD_REWARD_INTERCEPT_COUNT = "ad_reward_intercept_count"
     private const val KEY_AD_REWARD_INTERCEPT_TODAY = "ad_reward_intercept_today"
+    private const val KEY_HOTSPOT_BLOCK_ENABLED = "hotspot_block_enabled"
+    private const val KEY_HOTSPOT_BLOCK_MODE = "hotspot_block_mode"
     private const val MAX_PENDING_FEEDBACK_RULES = 50
     private val gson = Gson()
     @Volatile private var cachedAdFreeRewardEnabled: Boolean? = null
@@ -36,6 +38,8 @@ object FeatureSettingsRepository {
     @Volatile private var cachedStealthStripTrackingParams: Boolean? = null
     @Volatile private var cachedStealthHideReferer: Boolean? = null
     @Volatile private var cachedStealthRemoveFingerprintHeaders: Boolean? = null
+    @Volatile private var cachedHotspotBlockEnabled: Boolean? = null
+    @Volatile private var cachedHotspotBlockMode: String? = null
 
     fun isAdBlockEnabled(context: Context): Boolean {
         cachedAdBlockEnabled?.let { return it }
@@ -304,6 +308,36 @@ object FeatureSettingsRepository {
     fun recordAdRewardIntercept(context: Context) {
         incrementAdRewardInterceptCount(context)
         incrementAdRewardInterceptToday(context)
+    }
+
+    fun isHotspotBlockEnabled(context: Context): Boolean {
+        cachedHotspotBlockEnabled?.let { return it }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_HOTSPOT_BLOCK_ENABLED, false)
+            .also { cachedHotspotBlockEnabled = it }
+    }
+
+    fun setHotspotBlockEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_HOTSPOT_BLOCK_ENABLED, enabled)
+            .apply()
+        cachedHotspotBlockEnabled = enabled
+    }
+
+    fun getHotspotBlockMode(context: Context): String {
+        cachedHotspotBlockMode?.let { return it }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_HOTSPOT_BLOCK_MODE, "vpn")
+            ?.also { cachedHotspotBlockMode = it } ?: "vpn"
+    }
+
+    fun setHotspotBlockMode(context: Context, mode: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_HOTSPOT_BLOCK_MODE, mode)
+            .apply()
+        cachedHotspotBlockMode = mode
     }
 
     private fun savePendingFeedbackRules(context: Context, rules: List<PendingFeedbackRule>) {

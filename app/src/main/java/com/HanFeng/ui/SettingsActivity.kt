@@ -12,12 +12,14 @@ import android.view.View
 import android.widget.EditText
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.RadioGroup
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import com.HanFeng.core.network.NetworkKernel
+import com.HanFeng.service.AdBlockVpnService
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -80,6 +82,11 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnBackgroundRestrict: Button
     private lateinit var btnRootScript: Button
     private lateinit var btnRootHide: Button
+
+    private lateinit var switchHotspotBlock: Switch
+    private lateinit var hotspotModeLayout: LinearLayout
+    private lateinit var rgHotspotMode: RadioGroup
+    private lateinit var tvHotspotStatus: TextView
     
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode != ShizukuRepository.REQUEST_CODE) return@OnRequestPermissionResultListener
@@ -148,6 +155,11 @@ class SettingsActivity : BaseActivity() {
         btnBackgroundRestrict = findViewById(R.id.btnBackgroundRestrict)
         btnRootScript = findViewById(R.id.btnRootScript)
         btnRootHide = findViewById(R.id.btnRootHide)
+
+        switchHotspotBlock = findViewById(R.id.switchHotspotBlock)
+        hotspotModeLayout = findViewById(R.id.hotspotModeLayout)
+        rgHotspotMode = findViewById(R.id.rgHotspotMode)
+        tvHotspotStatus = findViewById(R.id.tvHotspotStatus)
 
         val initialTopPadding = settingsRoot.paddingTop
         val initialBottomPadding = settingsRoot.paddingBottom
@@ -219,6 +231,30 @@ class SettingsActivity : BaseActivity() {
         refreshCustomTrackingPreviews()
         btnShizukuAdControl.setOnClickListener {
             openShizukuAdControlCatalog()
+        }
+
+        val hotspotEnabled = FeatureSettingsRepository.isHotspotBlockEnabled(this)
+        switchHotspotBlock.isChecked = hotspotEnabled
+        hotspotModeLayout.visibility = if (hotspotEnabled) View.VISIBLE else View.GONE
+        when (FeatureSettingsRepository.getHotspotBlockMode(this)) {
+            "dns" -> rgHotspotMode.check(R.id.rbHotspotDns)
+            else -> rgHotspotMode.check(R.id.rbHotspotVpn)
+        }
+        switchHotspotBlock.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setHotspotBlockEnabled(this, isChecked)
+            hotspotModeLayout.visibility = if (isChecked) View.VISIBLE else View.GONE
+            sendBroadcast(Intent(AdBlockVpnService.ACTION_RELOAD).setPackage(packageName))
+        }
+        rgHotspotMode.setOnCheckedChangeListener { _, checkedId ->
+            val mode = if (checkedId == R.id.rbHotspotDns) "dns" else "vpn"
+            FeatureSettingsRepository.setHotspotBlockMode(this, mode)
+            if (mode == "dns") {
+                tvHotspotStatus.visibility = View.VISIBLE
+                tvHotspotStatus.text = "DNS 劫持模式需要 Root 权限及 dnsmasq，请确保设备已 Root"
+            } else {
+                tvHotspotStatus.visibility = View.GONE
+            }
+            sendBroadcast(Intent(AdBlockVpnService.ACTION_RELOAD).setPackage(packageName))
         }
         btnCoexistSettings.setOnClickListener {
             launchActivitySafely(

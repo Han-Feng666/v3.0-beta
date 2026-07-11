@@ -14,9 +14,9 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.HanFeng.R
-import com.HanFeng.adblocker.shizuku.SuSession
 import java.io.File
-import java.util.concurrent.TimeUnit
+import java.io.IOException
+import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 class RootTerminalActivity : BaseActivity() {
@@ -35,10 +35,15 @@ class RootTerminalActivity : BaseActivity() {
     private var initialScriptPath: String? = null
     private val commandHistory = mutableListOf<String>()
     private var historyIndex = -1
-    private var currentProcess: Process? = null
+    private var shellProcess: Process? = null
+    private var shellStdin: OutputStream? = null
+    private var pendingScript: String? = null
+    private var lastCommandAtNano = 0L
 
     private companion object {
         private const val TMP_DIR = "/data/local/tmp"
+        private const val PROMPT_TAG = "HF_PROMPT_EOF_"
+        private const val SHELL_READY_TAG = "HF_SHELL_READY"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,6 +66,7 @@ class RootTerminalActivity : BaseActivity() {
 
         terminalOutput.movementMethod = ScrollingMovementMethod()
         initialScriptPath = intent.getStringExtra("script_path")
+        pendingScript = initialScriptPath
 
         terminalScroll.viewTreeObserver.addOnScrollChangedListener {
             val child = terminalScroll.getChildAt(0) ?: return@addOnScrollChangedListener
@@ -73,14 +79,14 @@ class RootTerminalActivity : BaseActivity() {
         terminalInput.setOnEditorActionListener { _, actionId, event ->
             if (actionId == EditorInfo.IME_ACTION_SEND ||
                 (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)) {
-                val text = terminalInput.text.toString().trimEnd()
+                val text = terminalInput.text.toString().trimEnd('\r', '\n')
                 if (text.isNotEmpty()) {
                     if (commandHistory.isEmpty() || commandHistory.last() != text) {
                         commandHistory.add(text)
                         if (commandHistory.size > 100) commandHistory.removeAt(0)
                     }
                     historyIndex = commandHistory.size
-                    handleUserCommand(text)
+                    sendCommandToShell(text)
                     terminalInput.text?.clear()
                 }
                 true
@@ -115,43 +121,84 @@ class RootTerminalActivity : BaseActivity() {
             true
         }
 
-        startShell()
+        startInteractiveShell()
     }
 
-    private fun startShell() {
+    private fun startInteractiveShell() {
         isRunning.set(true)
         Thread {
             try {
-                val session = SuSession.getInstance()
-                if (!session.isSessionOpen() && !session.open(60)) {
-                    runOnUiThread {
-                        appendOutput("\n[!] Root 权限未获取，请在弹窗中授权后重试\n")
-                        tvStatus.text = "未授权"
-                        terminalInput.isEnabled = false
-                    }
-                    isRunning.set(false)
-                    return@Thread
+                val pb = ProcessBuilder("su")
+                    .redirectErrorStream(true)
+                val proc = pb.start()
+                shellProcess = proc
+                shellStdin = proc.outputStream
+                runOnUiThread {
+                    appendOutput("正在请求 Root 权限...\n")
                 }
 
+                val readyMarker = "$SHELL_READY_TAG$$"
+                writeRaw("export PS1='HF_SHELL_READY\$ '\n")
+                writeRaw("echo $readyMarker\n")
+
+                val readerThread = Thread {
+                    try {
+                        val input = proc.inputStream
+                        val buf = ByteArray(2048)
+                        val pending = StringBuilder()
+                        var n: Int
+                        while (proc.isAlive) {
+                            n = try {
+                                input.read(buf)
+                            } catch (_: IOException) {
+                                break
+                            }
+                            if (n < 0) break
+                            if (n == 0) continue
+                            val raw = String(buf, 0, n)
+                            pending.append(raw)
+                            if (pending.length > 65536) {
+                                val flushed = pending.toString()
+                                pending.setLength(0)
+                                runOnUiThread { appendOutput(cleanOutput(flushed)) }
+                            }
+                        }
+                        if (pending.isNotEmpty()) {
+                            runOnUiThread { appendOutput(cleanOutput(pending.toString())) }
+                        }
+                        runOnUiThread {
+                            appendOutput("\n[Shell 已退出]\n")
+                            tvStatus.text = "已断开"
+                            tvPrompt.text = ""
+                            terminalInput.isEnabled = false
+                        }
+                        isRunning.set(false)
+                    } catch (_: Exception) {
+                        isRunning.set(false)
+                    }
+                }
+                readerThread.isDaemon = true
+                readerThread.start()
+
+                val readyDeadline = System.currentTimeMillis() + 15000
+                if (initialScriptPath == null) {
+                    Thread.sleep(900)
+                }
                 runOnUiThread {
                     tvStatus.text = "已连接"
                     tvPrompt.text = "root# "
-                    appendOutput("Root 终端已连接\n\n")
+                    appendOutput("Root 终端已连接（交互模式，支持需要输入的脚本）\n")
+                    val scriptPath = initialScriptPath
+                    if (scriptPath != null) {
+                        executeScriptInShell(scriptPath)
+                    } else {
+                        appendOutput("--- 直接输入命令，回车执行 ---\nroot# ")
+                    }
                 }
-
-                val scriptPath = initialScriptPath
-                if (scriptPath != null) {
-                    runScriptDirectly(scriptPath)
-                }
-
-                runOnUiThread {
-                    appendOutput("\n--- 可输入命令继续操作 ---\n\nroot# ")
-                }
-
             } catch (e: Exception) {
                 runOnUiThread {
                     appendOutput("\n[!] 启动失败: ${e.message}\n")
-                    tvStatus.text = "错误"
+                    tvStatus.text = "未授权"
                     terminalInput.isEnabled = false
                 }
                 isRunning.set(false)
@@ -159,143 +206,112 @@ class RootTerminalActivity : BaseActivity() {
         }.start()
     }
 
-    private fun runScriptDirectly(scriptPath: String) {
-        val escapedPath = scriptPath.replace("'", "'\\''")
-
-        val remotePath = ensureScriptAccessible(escapedPath)
-        if (remotePath == null) {
-            runOnUiThread { appendOutput("[!] 无法读取脚本文件: $scriptPath\n") }
-            return
-        }
-
+    private fun executeScriptInShell(scriptPath: String) {
+        if (!isRunning.get()) return
         val displayName = scriptPath.substringAfterLast('/')
         runOnUiThread {
             appendOutput(">>> 执行脚本: $displayName\n")
-            appendOutput(">>> 路径: $remotePath\n\n")
+            appendOutput(">>> 路径: $scriptPath\n\n--- 开始执行 ---\n")
         }
-
+        runShellBlocking("rm -f '$TMP_DIR'/hf_shell_*.sh 2>/dev/null", 3)
+        val remotePath = ensureScriptAccessible(scriptPath)
+        if (remotePath == null) {
+            runOnUiThread { appendOutput("[!] 无法读取脚本文件: $scriptPath\nroot# ") }
+            return
+        }
         val remoteEscaped = remotePath.replace("'", "'\\''")
-
-        runOnUiThread { appendOutput("--- 开始执行 ---\n") }
-
-        try {
-            val process = ProcessBuilder("su", "-c", "sh '$remoteEscaped' 2>&1")
-                .redirectErrorStream(true)
-                .start()
-            currentProcess = process
-
-            val readerThread = Thread {
-                try {
-                    val buf = ByteArray(4096)
-                    var n: Int
-                    while (process.isAlive) {
-                        n = process.inputStream.read(buf)
-                        if (n < 0) break
-                        if (n == 0) continue
-                        val raw = String(buf, 0, n)
-                        val cleaned = stripAnsi(raw).replace("\r", "")
-                        if (cleaned.isNotEmpty()) {
-                            runOnUiThread { appendOutput(cleaned) }
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-            readerThread.start()
-
-            val completed = process.waitFor(10, TimeUnit.MINUTES)
-            if (!completed) {
-                process.destroyForcibly()
-                runOnUiThread { appendOutput("\n[!] 脚本超时，已终止\n") }
-            }
-            readerThread.join(5000)
-
-            val exitCode = if (completed) process.exitValue() else -1
-            runOnUiThread {
-                appendOutput("\n--- 执行完毕，退出码: $exitCode ---\n")
-            }
-
-            if (remotePath != scriptPath) {
-                runShellNoOutput("rm -f '$remoteEscaped'", 5)
-            }
-            currentProcess = null
-
-        } catch (e: Exception) {
-            runOnUiThread {
-                appendOutput("[!] 脚本执行失败: ${e.message}\n")
-            }
-        }
+        lastCommandAtNano = System.nanoTime()
+        writeRaw("sh '$remoteEscaped'; echo \"[HF_SCRIPT_DONE=\$?]\"\n")
     }
 
-    private fun ensureScriptAccessible(escapedPath: String): String? {
-        val checkResult = runShell("test -f '$escapedPath' && echo EXIST || echo NOTFOUND", 5)
-        if (!checkResult.contains("EXIST")) {
+    private fun ensureScriptAccessible(scriptPath: String): String? {
+        val escapedPath = scriptPath.replace("'", "'\\''")
+        if (!runShellBlocking("test -f '$escapedPath' && echo EXIST || echo NOTFOUND", 5).contains("EXIST")) {
             return null
         }
-
         val remote = "$TMP_DIR/hf_shell_${System.currentTimeMillis()}.sh"
         val remoteEscaped = remote.replace("'", "'\\''")
-
-        val copyCmd = "cp '$escapedPath' '$remoteEscaped' 2>/dev/null && chmod 755 '$remoteEscaped' && test -s '$remoteEscaped' && echo OK"
-        var result = runShell(copyCmd, 10)
-
-        if (!result.contains("OK")) {
-            val sedCmd = "sed 's/\\r\$//' '$escapedPath' > '$remoteEscaped' 2>/dev/null && chmod 755 '$remoteEscaped' && test -s '$remoteEscaped' && echo OK"
-            result = runShell(sedCmd, 10)
+        if (runShellBlocking("cp '$escapedPath' '$remoteEscaped' 2>/dev/null && chmod 755 '$remoteEscaped' && test -s '$remoteEscaped' && echo OK", 10).contains("OK")) {
+            return remote
         }
-
-        return if (result.contains("OK")) remote else null
+        if (runShellBlocking("sed 's/\r\$//' '$escapedPath' > '$remoteEscaped' 2>/dev/null && chmod 755 '$remoteEscaped' && test -s '$remoteEscaped' && echo OK", 10).contains("OK")) {
+            return remote
+        }
+        return null
     }
 
-    private fun handleUserCommand(cmd: String) {
+    private fun sendCommandToShell(cmd: String) {
         if (!isRunning.get()) return
-
         runOnUiThread { appendOutput("root# $cmd\n") }
-
-        Thread {
-            runOneShotCommand(cmd)
-        }.start()
+        lastCommandAtNano = System.nanoTime()
+        writeRaw("$cmd\n")
     }
 
-    private fun runOneShotCommand(cmd: String) {
+    @Synchronized
+    private fun writeRaw(data: String) {
         try {
-            val escapedCmd = cmd.replace("'", "'\\''")
-            val process = ProcessBuilder("su", "-c", "$escapedCmd 2>&1")
-                .redirectErrorStream(true)
-                .start()
-            currentProcess = process
-
-            val readerThread = Thread {
-                try {
-                    val buf = ByteArray(4096)
-                    var n: Int
-                    while (process.isAlive) {
-                        n = process.inputStream.read(buf)
-                        if (n < 0) break
-                        if (n == 0) continue
-                        val raw = String(buf, 0, n)
-                        val cleaned = stripAnsi(raw).replace("\r", "")
-                        if (cleaned.isNotEmpty()) {
-                            runOnUiThread { appendOutput(cleaned) }
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-            readerThread.start()
-
-            val completed = process.waitFor(30, TimeUnit.SECONDS)
-            if (!completed) {
-                process.destroyForcibly()
-                runOnUiThread { appendOutput("[!] 命令超时\n") }
-            }
-            readerThread.join(3000)
-
-            runOnUiThread { appendOutput("root# ") }
-            currentProcess = null
-        } catch (e: Exception) {
-            runOnUiThread {
-                appendOutput("[!] 执行失败: ${e.message}\nroot# ")
-            }
+            val stdin = shellStdin ?: return
+            stdin.write(data.toByteArray())
+            stdin.flush()
+        } catch (_: Exception) {
+            isRunning.set(false)
         }
+    }
+
+    private fun runShellBlocking(command: String, timeoutSeconds: Long): String {
+        val captured = StringBuilder()
+        val lock = Object()
+        val marker = "HF_BLOCK_" + System.currentTimeMillis()
+        val markerCmd = "echo -n \"$marker:\"; ($command) 2>/dev/null; echo -n \"$marker\""
+        synchronized(this) {
+            try {
+                val reader = object : Thread() {
+                    override fun run() {
+                        val input = shellProcess?.inputStream ?: return
+                        try {
+                            val buf = ByteArray(2048)
+                            val sb = StringBuilder()
+                            while (!isInterrupted) {
+                                val n = input.read(buf)
+                                if (n < 0) break
+                                if (n == 0) continue
+                                sb.append(String(buf, 0, n))
+                                val full = sb.toString()
+                                val endIdx = full.indexOf("$marker:")
+                                if (endIdx >= 0) {
+                                    val start = endIdx + marker.length + 1
+                                    val endTag = "$marker"
+                                    val tail = full.substring(start)
+                                    val finishIdx = tail.indexOf(endTag)
+                                    val payload = if (finishIdx >= 0) tail.substring(0, finishIdx) else tail
+                                    synchronized(lock) {
+                                        captured.append(payload)
+                                        lock.notifyAll()
+                                    }
+                                    return
+                                }
+                            }
+                        } catch (_: Exception) {}
+                        synchronized(lock) { lock.notifyAll() }
+                    }
+                }
+                reader.start()
+                writeRaw(markerCmd + "\n")
+                synchronized(lock) {
+                    lock.wait(timeoutSeconds * 1000)
+                }
+                reader.interrupt()
+            } catch (_: Exception) {}
+        }
+        return captured.toString().replace("\r", "")
+    }
+
+    private fun cleanOutput(text: String): String {
+        var cleaned = stripAnsi(text).replace("\r", "")
+        cleaned = cleaned.replace(Regex("echo -n HF_BLOCK_\\d+:?HF_BLOCK_\\d*"), "")
+        cleaned = cleaned.replace("HF_SHELL_READY$ ", "").replace("HF_SHELL_READY$", "")
+        cleaned = cleaned.replace(Regex("\\[HF_SCRIPT_DONE=-?\\d+\\]"), "")
+        return cleaned
     }
 
     private fun clearScreen() {
@@ -335,25 +351,16 @@ class RootTerminalActivity : BaseActivity() {
             .replace(Regex("[\u0000-\u0008\u000B\u000C\u000E-\u001F]"), "")
     }
 
-    private fun runShell(command: String, timeoutSeconds: Long): String {
-        return try {
-            val result = SuSession.getInstance().execute(command, timeoutSeconds)
-            result.output.trim()
-        } catch (_: Exception) {
-            ""
-        }
-    }
-
-    private fun runShellNoOutput(command: String, timeoutSeconds: Long) {
-        try {
-            SuSession.getInstance().execute(command, timeoutSeconds)
-        } catch (_: Exception) {}
-    }
-
     override fun onDestroy() {
         isRunning.set(false)
         try {
-            currentProcess?.destroyForcibly()
+            shellStdin?.close()
+        } catch (_: Exception) {}
+        try {
+            runShellBlocking("rm -f '$TMP_DIR'/hf_shell_*.sh 2>/dev/null", 2)
+        } catch (_: Exception) {}
+        try {
+            shellProcess?.destroyForcibly()
         } catch (_: Exception) {}
         super.onDestroy()
     }

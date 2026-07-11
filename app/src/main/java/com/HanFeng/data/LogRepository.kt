@@ -33,7 +33,7 @@ object LogRepository {
     private val legacyLogExportNames = setOf("hanfeng-adblock-logs.zip")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var logChannel = Channel<String>(capacity = LOG_CHANNEL_CAPACITY)
-    private var writerJob: Job? = null
+    @Volatile private var writerJob: Job? = null
     private var currentContext: Context? = null
     private var snapshotExportJob: Job? = null
     private val droppedLogCount = AtomicInteger(0)
@@ -103,7 +103,8 @@ object LogRepository {
     }
 
     private fun ensureWriterRunning() {
-        if (writerJob?.isActive == true) return
+        val job = writerJob
+        if (job?.isActive == true) return
         synchronized(this) {
             if (writerJob?.isActive == true) return
             writerJob = scope.launch {

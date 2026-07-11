@@ -108,7 +108,6 @@ class RootHideScopeFragment : Fragment() {
         loadVersion++
         val requestVersion = loadVersion
         loadJob?.cancel()
-        // 在主线程缓存 context 与 PackageManager，避免 Dispatchers.Default 中 requireContext() NPE
         val ctx = context ?: return
         val pm = ctx.packageManager
         val selfPkg = ctx.packageName
@@ -116,10 +115,10 @@ class RootHideScopeFragment : Fragment() {
             try {
                 val apps = withContext(Dispatchers.Default) {
                     val scopePackages = RootHideRepository.getScopePackages(ctx)
-                    // MATCH_UNINSTALLED_PACKAGES 让列表包含被冻结/隐藏的应用（root 场景常见）
-                    // 同时也绕过 Android 13+ 对 flags=0 的某些可见性限制
                     @Suppress("DEPRECATION")
-                    val flags = android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES
+                    val flags = android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES or
+                        android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS or
+                        android.content.pm.PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
                     val visiblePackages = pm.getInstalledPackages(flags)
                         .asSequence()
                         .filter { it.packageName != selfPkg && it.applicationInfo != null }
@@ -136,13 +135,19 @@ class RootHideScopeFragment : Fragment() {
                         }
                         .toList()
 
-                    val rootPackages = if (visiblePackages.size <= 1) loadThirdPartyPackagesViaRoot() else emptyList()
+                    val thirdPartyVisible = visiblePackages.count {
+                        (it.rootHideSelected || true) && runCatching {
+                            val ai = pm.getApplicationInfo(it.packageName, 0)
+                            (ai.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0
+                        }.getOrDefault(false)
+                    }
+                    val rootPackages = if (thirdPartyVisible <= 1) loadThirdPartyPackagesViaRoot() else emptyList()
                     val visibleNames = visiblePackages.mapTo(hashSetOf()) { it.packageName }
                     val rootOnlyApps = rootPackages
                         .asSequence()
                         .filter { it != selfPkg && it !in visibleNames }
                         .map { pkg ->
-                            val appInfo = runCatching { pm.getApplicationInfo(pkg, 0) }.getOrNull()
+                            val appInfo = runCatching { pm.getApplicationInfo(pkg, flags) }.getOrNull()
                             InstalledApp(
                                 label = runCatching { appInfo?.loadLabel(pm)?.toString() }.getOrNull() ?: pkg,
                                 packageName = pkg,
@@ -155,12 +160,15 @@ class RootHideScopeFragment : Fragment() {
                         }
                         .toList()
 
-                    (visiblePackages + rootOnlyApps).sortedBy { it.label.lowercase() }
+                    (visiblePackages + rootOnlyApps).distinctBy { it.packageName }.sortedBy { it.label.lowercase() }
                 }
                 if (requestVersion != loadVersion) return@launch
                 allApps = apps
                 applyFilter(searchInput?.text?.toString().orEmpty())
                 updateCount()
+                if (apps.isEmpty()) {
+                    countText?.text = "未发现可勾选的应用。请确认已授予应用列表权限（已声明 QUERY_ALL_PACKAGES），或设备无第三方 App。"
+                }
             } catch (e: Exception) {
                 if (requestVersion != loadVersion) return@launch
                 activity?.runOnUiThread {
@@ -224,6 +232,12 @@ class RootHideScopeFragment : Fragment() {
 
     fun getSelectedScopePackages(): Set<String> {
         return allApps.filter { it.rootHideSelected }.map { it.packageName }.toSet()
+    }
+
+    /** 允许外部（RootHideActivity）触发作用域重新加载。 */
+    fun reloadFromOutside() {
+        if (context == null) return
+        loadApps()
     }
 
     private fun updateCount() {
