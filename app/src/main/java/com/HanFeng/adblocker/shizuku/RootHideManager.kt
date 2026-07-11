@@ -23,7 +23,7 @@ class RootHideManager {
         val readonlyPaths: List<String>,
         val magiskDenyListAvailable: Boolean,
         val zygiskEnabled: Boolean,
-        val shamikoDetected: Boolean,
+        val zygiskNextDetected: Boolean,
         val systemMountable: Boolean,
         val recommendations: List<String>
     )
@@ -74,21 +74,21 @@ class RootHideManager {
         val magiskAvailable = rootSolution == "Magisk" || rootSolution == "KernelSU"
 
         val zygiskEnabled = rootSolution == "Magisk" && checkZygiskEnabled()
-        val shamikoDetected = checkShamikoInstalled()
+        val zygiskNextDetected = checkZygiskNextInstalled()
 
         val recommendations = mutableListOf<String>()
         if (magiskAvailable) {
             recommendations.add("启用 Magisk DenyList 以隐藏 Root 特征")
             if (!zygiskEnabled) {
-                recommendations.add("⚠️ Zygisk 未启用，Shamiko/LSPosed 等隐藏模块将无法工作，请到 Magisk 设置中打开 Zygisk")
+                recommendations.add("⚠️ Zygisk 未启用，Zygisk Next 等隐藏模块将无法工作，请到 Magisk 设置中打开 Zygisk")
             }
         } else {
             recommendations.add("建议在 Magisk/KernelSU 环境下手动配置 DenyList")
         }
-        if (shamikoDetected) {
-            recommendations.add("检测到 Shamiko 模块已安装，配合 DenyList 可达白名单/工作模式，隐藏效果更好")
+        if (zygiskNextDetected) {
+            recommendations.add("检测到 Zygisk Next 模块已安装，内置白名单/工作模式，隐藏效果最强")
         } else if (zygiskEnabled) {
-            recommendations.add("建议安装 Shamiko 模块以增强隐藏效果（Zygisk 已启用，环境已就绪）")
+            recommendations.add("建议安装 Zygisk Next 模块，内置 Shamiko 同等能力，无需额外装 Shamiko")
         }
 
         val mountablePaths = mutableListOf<String>()
@@ -123,7 +123,7 @@ class RootHideManager {
             readonlyPaths = readonlyPaths,
             magiskDenyListAvailable = magiskAvailable,
             zygiskEnabled = zygiskEnabled,
-            shamikoDetected = shamikoDetected,
+            zygiskNextDetected = zygiskNextDetected,
             systemMountable = systemMountable,
             recommendations = recommendations
         )
@@ -191,7 +191,7 @@ class RootHideManager {
         // 自动启用 Zygisk（仅在 Magisk 上；KSU/APatch 自带实现）
         if (detectedRoot == "Magisk") {
             val zygOk = ensureZygiskEnabled()
-            Log.d(TAG, "Zygisk ensure enabled: $zygOk (Shamiko 等隐藏模块依赖此)")
+            Log.d(TAG, "Zygisk ensure enabled: $zygOk (Zygisk Next 等隐藏模块依赖此)")
         }
 
         val existingPaths = knownDetectionPaths.filter { pathExists(it) }
@@ -308,12 +308,12 @@ class RootHideManager {
         return r.output.trim() == "ON"
     }
 
-    /** 检测 Shamiko 模块是否安装（Magisk Zygisk 上的 Root 隐藏白名单扩展）。 */
-    fun checkShamikoInstalled(): Boolean {
+    /** 检测 Zygisk Next 模块是否安装（内置 Shamiko 同等能力，无需额外装 Shamiko）。 */
+    fun checkZygiskNextInstalled(): Boolean {
         val r = runRootShell(
             "for base in /data/adb/modules /data/adb/modules_update; do " +
-                "for f in \"\$base\"/shamiko*/module.prop; do " +
-                "test -f \"\$f\" && grep -q '^id=.*shamiko' \"\$f\" 2>/dev/null && echo FOUND; " +
+                "for f in \"\$base\"/zygisk_next*/module.prop \"\$base\"/zygisksu*/module.prop; do " +
+                "test -f \"\$f\" && grep -q '^id=.*zygisk_next\\|^id=.*zygisksu' \"\$f\" 2>/dev/null && echo FOUND; " +
                 "done; done 2>/dev/null",
             5
         )

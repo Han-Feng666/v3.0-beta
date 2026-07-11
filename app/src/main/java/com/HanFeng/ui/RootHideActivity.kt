@@ -112,7 +112,7 @@ class RootHideActivity : BaseActivity() {
             val sb = StringBuilder()
             sb.append("Root 方案: ${pc.rootSolution}\n")
             sb.append("Zygisk: ${if (pc.zygiskEnabled) "已启用" else "未启用"}\n")
-            sb.append("Shamiko 模块: ${if (pc.shamikoDetected) "已安装" else "未安装"}\n")
+            sb.append("Zygisk Next 模块: ${if (pc.zygiskNextDetected) "已安装" else "未安装"}\n")
             sb.append("DenyList 可用: ${if (pc.magiskDenyListAvailable) "是" else "否"}\n")
             sb.append("系统挂载: ${if (pc.systemMountable) "可" else "不可（EROFS / 只读）"}\n")
             sb.append("路径数: ${pc.mountablePaths.size + pc.readonlyPaths.size}\n")
