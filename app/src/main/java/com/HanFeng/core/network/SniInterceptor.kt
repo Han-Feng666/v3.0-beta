@@ -27,8 +27,8 @@ object SniInterceptor {
         val reason: String
     )
 
-    private const val SNI_CACHE_TTL_MS = 10_000L
-    private const val SNI_CACHE_MAX = 256
+    private const val SNI_CACHE_TTL_MS = 30_000L
+    private const val SNI_CACHE_MAX = 1024
 
     private data class CachedSniDecision(
         val decision: SniBlockDecision,
@@ -60,36 +60,77 @@ object SniInterceptor {
             }
         }
 
+        val slowPathStartedAt = System.nanoTime()
+
         // 域名快速排除：社交核心 / 白名单（在这两步命中时不需要 vendor 分类）
         if (RuleRepository.isSocialCoreDomain(sniHost)) {
-            return makeDecision(false, sniHost, "", "social-core").also { cacheDecision(sniHost, it) }
+            return makeDecision(false, sniHost, "", "social-core").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
         }
 
         if (isProtectedDomain) {
-            return makeDecision(false, sniHost, "", "protected-domain").also { cacheDecision(sniHost, it) }
+            return makeDecision(false, sniHost, "", "protected-domain").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
         }
 
         if (RuleRepository.isWhitelistedDomain(sniHost)) {
-            return makeDecision(false, sniHost, "", "whitelisted").also { cacheDecision(sniHost, it) }
+            return makeDecision(false, sniHost, "", "whitelisted").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
         }
 
         if (RuleRepository.isSensitiveAuthDomain(sniHost)) {
-            return makeDecision(false, sniHost, "", "sensitive-auth").also { cacheDecision(sniHost, it) }
+            return makeDecision(false, sniHost, "", "sensitive-auth").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
+        }
+
+        val learnedHit = ScoredBlockCache.isDomainBlocked(sniHost)
+        if (learnedHit != null) {
+            return makeDecision(true, sniHost, learnedHit.vendor.ifBlank { "" }, "learning-feedback").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
         }
 
         val vendor = RuleRepository.classifyVendor(context, sniHost)
 
         // 命中通用广告流量
         if (RuleRepository.shouldTreatAsGeneralAdTraffic(sniHost, vendor, appName)) {
-            return makeDecision(true, sniHost, vendor, "general-ad-traffic").also { cacheDecision(sniHost, it) }
+            return makeDecision(true, sniHost, vendor, "general-ad-traffic").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
         }
 
         // 命中广告 SDK 基础设施域名
         if (RuleRepository.looksLikeAdSdkInfraDomain(sniHost, vendor)) {
-            return makeDecision(true, sniHost, vendor, "ad-sdk-infra").also { cacheDecision(sniHost, it) }
+            return makeDecision(true, sniHost, vendor, "ad-sdk-infra").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
         }
 
-        return makeDecision(false, sniHost, vendor, "pass").also { cacheDecision(sniHost, it) }
+        return makeDecision(false, sniHost, vendor, "pass").also {
+            cacheDecision(sniHost, it)
+            recordSlowPathLatency(slowPathStartedAt)
+        }
+    }
+
+    private fun recordSlowPathLatency(startedAtNanos: Long) {
+        runCatching {
+            val tookMillis = (System.nanoTime() - startedAtNanos) / 1_000_000L
+            com.HanFeng.data.StatsRepository.recordLatency(
+                com.HanFeng.data.StatsRepository.LatencyMetric.SNI,
+                tookMillis
+            )
+        }
     }
 
     private fun makeDecision(shouldBlock: Boolean, domain: String, vendor: String, reason: String): SniBlockDecision {

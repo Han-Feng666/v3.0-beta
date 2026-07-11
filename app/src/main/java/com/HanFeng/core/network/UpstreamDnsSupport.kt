@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 object UpstreamDnsSupport {
     private const val DNS_RACE_CONCURRENCY = 3
-    private const val DNS_RACE_TIMEOUT_MS = 2500L
+    private const val DNS_RACE_TIMEOUT_MS = 1500L
 
     private val dnsRaceExecutor = Executors.newFixedThreadPool(DNS_RACE_CONCURRENCY) { runnable ->
         Thread(runnable).apply {
@@ -39,12 +39,27 @@ object UpstreamDnsSupport {
         markFailure: (InetAddress) -> Unit,
         onServerFailed: (InetAddress, Throwable) -> Unit
     ): UpstreamDnsResult? {
+        val startedAt = System.nanoTime()
         // Race DNS servers in waves - query up to 3 concurrently, first to respond wins
         servers.chunked(DNS_RACE_CONCURRENCY).forEach { wave ->
             val result = raceDnsWave(payload, wave, acquireSocket, releaseSocket, markSuccess, markFailure, onServerFailed)
-            if (result != null) return result
+            if (result != null) {
+                recordDnsRaceLatency(startedAt)
+                return result
+            }
         }
+        recordDnsRaceLatency(startedAt)
         return null
+    }
+
+    private fun recordDnsRaceLatency(startedAtNanos: Long) {
+        runCatching {
+            val tookMillis = (System.nanoTime() - startedAtNanos) / 1_000_000L
+            com.HanFeng.data.StatsRepository.recordLatency(
+                com.HanFeng.data.StatsRepository.LatencyMetric.DNS,
+                tookMillis
+            )
+        }
     }
 
     private fun raceDnsWave(
@@ -65,7 +80,7 @@ object UpstreamDnsSupport {
                     if (done.get()) return@submit
                     val socket = acquireSocket(server) ?: return@repeat
                     runCatching {
-                        socket.soTimeout = if (attempt == 0) 800 else 1200
+                        socket.soTimeout = if (attempt == 0) 400 else 800
                         socket.connect(server, 53)
                         socket.send(DatagramPacket(payload, payload.size))
                         val recvBuf = dnsRecvBuffer.get()

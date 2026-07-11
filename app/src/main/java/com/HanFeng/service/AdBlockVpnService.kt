@@ -54,6 +54,7 @@ import com.HanFeng.core.network.TrafficDecisionEngine
 import com.HanFeng.core.network.UpstreamDnsSupport
 import com.HanFeng.core.network.MitmLearningEngine
 import com.HanFeng.core.network.SniInterceptor
+import com.HanFeng.core.network.ScoredBlockCache
 import com.HanFeng.core.network.ProcNetResolver
 import com.HanFeng.core.network.UserAdFeedbackManager
 import com.HanFeng.core.network.VpnHealthChecker
@@ -941,7 +942,7 @@ class AdBlockVpnService : VpnService() {
             FeatureSettingsRepository.getHotspotBlockMode(this) == "vpn"
         val builder = Builder()
             .setSession(getString(R.string.app_name))
-            .setMtu(1500)
+            .setMtu(resolveTunMtu())
             .addAddress("10.99.0.1", 24)
             .addAddress("fd66:66::1", 64)
             .addDnsServer(localDnsV4)
@@ -1030,6 +1031,23 @@ class AdBlockVpnService : VpnService() {
             LogRepository.append(this, "VPN established with targeted routes only")
         }
         return builder.establish()
+    }
+
+    private fun resolveTunMtu(): Int {
+        val DEFAULT_TUN_MTU = 1500
+        val MIN_TUN_MTU = 1280
+        return runCatching {
+            val cm = getSystemService(ConnectivityManager::class.java) ?: return DEFAULT_TUN_MTU
+            val active = cm.activeNetwork ?: return DEFAULT_TUN_MTU
+            val lp = cm.getLinkProperties(active) ?: return DEFAULT_TUN_MTU
+            val underlying = lp.mtu
+            if (underlying <= 0) return DEFAULT_TUN_MTU
+            val tun = (underlying - 40).coerceAtLeast(MIN_TUN_MTU).coerceAtMost(DEFAULT_TUN_MTU)
+            if (tun != DEFAULT_TUN_MTU) {
+                LogRepository.append(this, "TUN MTU adapted to $tun based on underlying link MTU $underlying")
+            }
+            tun
+        }.getOrDefault(DEFAULT_TUN_MTU)
     }
 
     private fun applyVpnApplicationScope(
@@ -1481,6 +1499,24 @@ class AdBlockVpnService : VpnService() {
 
     private fun handleBlockedPacketTargets(info: com.HanFeng.model.PacketInfo): Boolean {
         findBlockedIpNetwork(info.destinationAddress)?.let { return true }
+        val learnedIpHit = formatAddress(info.destinationAddress).let { ip ->
+            if (ip.isNotBlank()) ScoredBlockCache.isIpBlocked(ip) else null
+        }
+        if (learnedIpHit != null) {
+            StatsRepository.recordBlockedHttp(
+                this,
+                learnedIpHit.vendor.ifBlank { GENERIC_AD_VENDOR_LABEL },
+                "",
+                32 * 1024,
+                source = StatsRepository.BlockSource.LEARNING_CANDIDATE
+            )
+            logDecisionOnce(
+                key = "learning-ip-block:${formatAddress(info.destinationAddress)}:${info.destinationPort}",
+                message = "Blocked learning-feedback IP ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} score=${learnedIpHit.score} reason=${learnedIpHit.reason}",
+                minIntervalMillis = 30_000L
+            )
+            return true
+        }
         findMatchingIpRule(info)?.let { match ->
             StatsRepository.recordBlockedHttp(this, match.rule.vendor, match.appName, 32 * 1024)
             logDecisionOnce(
@@ -9707,6 +9743,7 @@ class AdBlockVpnService : VpnService() {
         private const val TCP_FLAG_URG = 0x20
         private const val DEFAULT_TCP_WINDOW_SIZE = 65535
         private const val TCP_SEGMENT_PAYLOAD_SIZE = 1400
+        private const val TCP_SNDBUF_SIZE = 128 * 1024
         private const val HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS = 75_000L
         private const val HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS = 45_000L
         private const val HTTP_DECRYPT_ROUTE_BATCH_WINDOW_MILLIS = 15_000L
@@ -9717,7 +9754,7 @@ class AdBlockVpnService : VpnService() {
         private const val HTTPS_BRIDGE_CONNECT_TIMEOUT_MILLIS = 4_000
         private const val PASSTHROUGH_TCP_CONNECT_TIMEOUT_MILLIS = 5_000
         private const val PASSTHROUGH_UDP_READ_TIMEOUT_MILLIS = 1_000
-        private const val PASSTHROUGH_UDP_IDLE_TIMEOUT_MILLIS = 30_000L
+        private const val PASSTHROUGH_UDP_IDLE_TIMEOUT_MILLIS = 25_000L
         private const val PASSTHROUGH_HEALTH_WINDOW_MILLIS = 30_000L
         private const val PASSTHROUGH_HEALTH_MIN_ATTEMPTS = 10
         private const val PASSTHROUGH_HEALTH_ABSOLUTE_FAILURES = 8

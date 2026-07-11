@@ -130,7 +130,7 @@ object MitmLearningEngine {
 
         val score = score(bucket)
         if (score < thresholdForApp(appName)) return null
-        return Candidate(
+        val candidate = Candidate(
             appName = appName,
             domain = domain,
             ip = ip,
@@ -138,6 +138,8 @@ object MitmLearningEngine {
             ttlMillis = ttlForScore(score),
             reasons = bucket.reasons.toList()
         )
+        publishCandidate(candidate)
+        return candidate
     }
 
     private fun observeEmptySniCluster(appName: String, ip: String, signal: Signal): Candidate? {
@@ -155,7 +157,7 @@ object MitmLearningEngine {
         recordSharedIp("<empty-sni>", ip)
         val score = score(bucket)
         if (score < thresholdForApp(appName)) return null
-        return Candidate(
+        val candidate = Candidate(
             appName = appName,
             domain = "<empty-sni>",
             ip = ip,
@@ -163,6 +165,7 @@ object MitmLearningEngine {
             ttlMillis = ttlForScore(score),
             reasons = bucket.reasons.toList()
         )
+        return candidate
     }
 
     private fun observeOverridingWhitelist(appName: String, domain: String, ip: String, signal: Signal): Candidate? {
@@ -180,13 +183,25 @@ object MitmLearningEngine {
         recordSharedIp(domain, ip)
         val score = score(bucket) + 4
         if (score < thresholdForApp(appName)) return null
-        return Candidate(
+        val candidate = Candidate(
             appName = appName,
             domain = domain,
             ip = ip,
             score = score,
             ttlMillis = ttlForScore(score),
             reasons = (bucket.reasons + "whitelist-override").toList()
+        )
+        return candidate
+    }
+
+    private fun publishCandidate(candidate: Candidate) {
+        ScoredBlockCache.recordCandidate(
+            domain = candidate.domain,
+            ip = candidate.ip,
+            score = candidate.score,
+            ttlMillis = candidate.ttlMillis,
+            vendor = "",
+            reason = candidate.reasons.joinToString("+")
         )
     }
 

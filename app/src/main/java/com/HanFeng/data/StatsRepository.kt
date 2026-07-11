@@ -73,6 +73,58 @@ object StatsRepository {
     private val appResponseMap = ConcurrentHashMap<String, AtomicInteger>()
     private val blockSourceMap = ConcurrentHashMap<String, AtomicInteger>()
 
+    object LatencyMetric {
+        const val DNS = "dns"
+        const val SNI = "sni"
+    }
+
+    private val latencyBuckets = ConcurrentHashMap<String, IntArray>()
+    private val LATENCY_BUCKET_BOUNDS_MS = longArrayOf(5, 10, 20, 40, 80, 160, 320, 640, 1280)
+    private const val LATENCY_FLUSH_INTERVAL = 30
+    private val latencySampleSinceFlush = AtomicInteger(0)
+
+    fun recordLatency(metric: String, durationMillis: Long) {
+        if (durationMillis < 0) return
+        val failsafe = durationMillis.toInt()
+        val buckets = latencyBuckets.computeIfAbsent(metric) { IntArray(LATENCY_BUCKET_BOUNDS_MS.size + 1) }
+        var idx = LATENCY_BUCKET_BOUNDS_MS.indexOfFirst { failsafe <= it }
+        if (idx < 0) idx = LATENCY_BUCKET_BOUNDS_MS.size
+        buckets[idx] = buckets[idx] + 1
+        if (latencySampleSinceFlush.incrementAndGet() >= LATENCY_FLUSH_INTERVAL) {
+            latencySampleSinceFlush.set(0)
+        }
+    }
+
+    fun getLatencyPercentile(metric: String, percentile: Double): Long {
+        val buckets = latencyBuckets[metric] ?: return 0L
+        val total = buckets.sum()
+        if (total == 0) return 0L
+        val target = (total * percentile).toInt().coerceAtLeast(1)
+        var cumulative = 0
+        for (i in buckets.indices) {
+            cumulative += buckets[i]
+            if (cumulative >= target) {
+                val lower = if (i == 0) 0 else LATENCY_BUCKET_BOUNDS_MS[i - 1].toInt()
+                val upper = if (i < LATENCY_BUCKET_BOUNDS_MS.size) LATENCY_BUCKET_BOUNDS_MS[i].toInt() else 2048
+                return ((lower + upper) / 2).toLong()
+            }
+        }
+        return 0L
+    }
+
+    fun getLatencySnapshot(metric: String): LatencySnapshot {
+        val buckets = latencyBuckets[metric] ?: IntArray(0)
+        return LatencySnapshot(
+            total = buckets.sum(),
+            p50 = getLatencyPercentile(metric, 0.5),
+            p95 = getLatencyPercentile(metric, 0.95)
+        )
+    }
+
+    data class LatencySnapshot(val total: Int, val p50: Long, val p95: Long) {
+        val isEmpty: Boolean get() = total == 0
+    }
+
     // Async flush handler
     private val mainHandler = Handler(Looper.getMainLooper())
     private var flushPending = false
