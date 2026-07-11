@@ -7,14 +7,18 @@ import android.util.Log
  * 让银行/支付类 App 在 Build/ro.* 层面读不到 Root/调试/解锁痕迹。
  *
  * 关键修改点（基于 LSPosed/EdXposed/SafetyNet 检测特征）：
- * - ro.debuggable         Android Studio 调试开关，部分检测器使用
+ * - ro.debuggable         Android Studio 调试开关
+ * - ro.secure             安全构建标志（银行强检测项）
  * - ro.build.type         改为 user，避免 eng/userdebug 暴露
- * - ro.boot.verifiedbootstate   改为 green，避免 orange/yellow/red 暴露解锁
+ * - ro.build.tags         release-keys（金融 App 常检测）
+ * - ro.boot.verifiedbootstate   改为 green
  * - ro.boot.flash.locked        改为 1，表示 bootloader 已锁
+ * - ro.boot.unlocked             改为 0（MIUI / Xiaomi 系金融 App 检测）
  * - ro.boot.veritymode          改为 enforcing
  * - ro.boot.vbmeta.device_state 改为 locked
+ * - ro.bootloader               伪装 bootloader 版本字串
+ * - ro.baseband                  伪装基带版本
  * - init.svc.magisk_pfs、ro.magisk.version 等可直接卸载/置空
- * - ro.boot.veritymode enforcing + Override of 系统属性钩子
  *
  * 兼容 Magisk 20+ 的 resetprop。KernelSU/APatch 走 kd期刊 resetprop 命令或 manual 路径切换。
  */
@@ -30,16 +34,19 @@ object PropDisguiseManager {
      */
     private val PROP_OVERRIDES = linkedMapOf(
         "ro.debuggable" to "0",
+        "ro.secure" to "1",
         "ro.build.type" to "user",
+        "ro.build.tags" to "release-keys",
         "ro.boot.verifiedbootstate" to "green",
         "ro.boot.flash.locked" to "1",
+        "ro.boot.unlocked" to "0",
         "ro.boot.veritymode" to "enforcing",
         "ro.boot.vbmeta.device_state" to "locked",
         "ro.boot.warranty_bit" to "0",
         "ro.warranty_bit" to "0",
-        "ro.boot.warranty_bit" to "0",
         "ro.build.selinux" to "1",
-        "ro.boot.verifiedbootstate" to "green",
+        "ro.bootloader" to "unknown",
+        "ro.baseband" to "unknown",
         "init.svc.magisk_pfsd" to "",
         "init.svc.magisk_pfs" to "",
         "ro.magisk.version" to "",

@@ -67,6 +67,8 @@ class RootHideActivity : BaseActivity() {
         }.attach()
 
         btnApply.setOnClickListener { applyHiding() }
+        findViewById<Button>(R.id.btnUnhide).setOnClickListener { unhideAll() }
+        findViewById<Button>(R.id.btnWatcherLog).setOnClickListener { showWatcherLog() }
         switchProp.setOnCheckedChangeListener { _, checked ->
             handlePropToggle(checked)
         }
@@ -77,6 +79,7 @@ class RootHideActivity : BaseActivity() {
         findViewById<Button>(R.id.btnPresetGame).setOnClickListener { applyPreset("Game") }
         findViewById<Button>(R.id.btnPresetSocial).setOnClickListener { applyPreset("Social") }
         findViewById<Button>(R.id.btnPresetVideo).setOnClickListener { applyPreset("ShortVideo") }
+        findViewById<Button>(R.id.btnPresetFinance).setOnClickListener { applyPreset("Finance") }
         findViewById<Button>(R.id.btnPresetAll).setOnClickListener { applyPreset("All") }
         findViewById<Button>(R.id.btnPresetClear).setOnClickListener { clearScope() }
 
@@ -208,6 +211,10 @@ class RootHideActivity : BaseActivity() {
                 "ShortVideo" -> allInstalled.filterTo(mutableSetOf()) { pkg ->
                     RootHideRepository.Presets.SHORT_VIDEO_PREFIXES.any { pkg == it || pkg.startsWith(it) }
                 }
+                "Finance" -> allInstalled.filterTo(mutableSetOf()) { pkg ->
+                    RootHideRepository.Presets.SECURITIES_PREFIXES.any { pkg == it || pkg.startsWith(it) } ||
+                        RootHideRepository.Presets.INSURANCE_PREFIXES.any { pkg == it || pkg.startsWith(it) }
+                }
                 "All" -> RootHideRepository.Presets.filterInteresting(allInstalled)
                 else -> emptySet()
             }
@@ -237,8 +244,43 @@ class RootHideActivity : BaseActivity() {
         "Game" -> "游戏"
         "Social" -> "社交"
         "ShortVideo" -> "短视频"
+        "Finance" -> "证券/保险"
         "All" -> "智能作用域"
         else -> category
+    }
+
+    private fun unhideAll() {
+        tvResult.text = "正在解除所有隐藏..."
+        Thread {
+            val mgr = RootHideManager()
+            val ok = mgr.unhideAll()
+            // 同时关闭 prop 伪装
+            PropDisguiseManager.restore()
+            // 停止 watcher
+            RootHideAppWatcher.stop()
+            runOnUiThread {
+                tvResult.text = if (ok) "已解除所有隐藏（DenyList + 进程 + 系统路径 + Prop 伪装）" else "部分解除失败，请查看日志"
+                Toast.makeText(this, if (ok) "已全部解除" else "部分失败", Toast.LENGTH_SHORT).show()
+                refreshStatus()
+            }
+        }.start()
+    }
+
+    private fun showWatcherLog() {
+        Thread {
+            val status = RootHideAppWatcher.status()
+            val log = RootHideAppWatcher.dumpLog(100)
+            runOnUiThread {
+                val sb = StringBuilder()
+                sb.append("=== Watcher 状态 ===\n")
+                sb.append("运行中: ${if (status.running) "是 (PID=${status.pid})" else "否"}\n")
+                sb.append("作用域: ${status.scopePackages.size} 个\n")
+                sb.append("已处理 PID: ${status.handledPids}\n\n")
+                sb.append("=== 最近日志 ===\n")
+                sb.append(log)
+                tvResult.text = sb.toString()
+            }
+        }.start()
     }
 
     private fun applyHiding() {
@@ -265,9 +307,17 @@ class RootHideActivity : BaseActivity() {
             }
             if (results.size > 20) sb.appendLine("... 共 ${results.size} 项")
 
-            // 应用完成后自动启用 watcher（如果开关打开）
+            // 应用完成后自动启用 watcher（如果开关已打开）
             if (RootHideRepository.isAutoWatcherEnabled(this)) {
                 RootHideAppWatcher.refreshScope(this, scopePackages)
+            } else if (scopePackages.isNotEmpty()) {
+                // 开关未打开但 scope 非空，自动打开并启动
+                RootHideRepository.setAutoWatcherEnabled(this, true)
+                RootHideAppWatcher.start(this, scopePackages)
+                runOnUiThread {
+                    switchAutoWatcher.isChecked = true
+                    Toast.makeText(this, "已自动开启后台监听", Toast.LENGTH_SHORT).show()
+                }
             }
 
             runOnUiThread {

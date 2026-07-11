@@ -61,7 +61,6 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         }
         view.findViewById<Button>(R.id.btnGuide).setOnClickListener { activity.showGuideDialog() }
         view.findViewById<Button>(R.id.btnWhitelist).setOnClickListener { activity.openWhitelist() }
-        view.findViewById<Button>(R.id.btnCoexist).setOnClickListener { activity.openCoexistApps() }
         view.findViewById<ImageView>(R.id.btnSettings).setOnClickListener { activity.openSettings() }
         view.findViewById<TextView>(R.id.textVersion)?.text = "v${BuildConfig.VERSION_NAME}"
         updateAllStatus()

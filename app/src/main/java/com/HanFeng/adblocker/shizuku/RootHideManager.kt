@@ -92,17 +92,17 @@ class RootHideManager {
 
         if (rootDetected == "已检测到 Root") {
             val existingPaths = knownDetectionPaths.filter { p -> pathExists(p) }
-            for (path in existingPaths) {
-                val testResult = runRootShell("mount -o remount,rw / 2>/dev/null && echo RW || echo RO; mount -o remount,ro / 2>/dev/null || true")
-                if (testResult.output.contains("RW")) {
-                    mountablePaths.add(path)
-                    systemMountable = true
-                } else {
-                    readonlyPaths.add(path)
-                }
+            // 只读检测，不真的 remount
+            val mountCheck = runRootShell("mount | grep ' / ' | head -1")
+            val isErfs = mountCheck.output.contains("erofs")
+            val isRo = mountCheck.output.contains("ro,") || mountCheck.output.contains(" ro ") || isErfs
+            systemMountable = !isRo
+            if (isRo) {
+                readonlyPaths.addAll(existingPaths)
+            } else {
+                mountablePaths.addAll(existingPaths)
             }
-            val erofsCheck = runRootShell("mount | grep ' / ' | grep -q erofs && echo EROFS || echo NOT_EROFS")
-            if (erofsCheck.output.contains("EROFS")) {
+            if (isErfs) {
                 recommendations.add("系统分区为 EROFS 只读文件系统，无法直接挂载隐藏，请使用进程级隐藏")
                 systemMountable = false
             }
@@ -134,12 +134,61 @@ class RootHideManager {
         val kernelHider = KernelProcessHider()
         val hiddenPids = kernelHider.getHiddenPids().size
 
+        // 从设备实际读取 denylist 包名列表
+        val denyListPackages = listActuallyHidden()
+
         return HideStatus(
             systemWideHidden = systemHidden,
             hiddenPathCount = actualMounts,
-            magiskDenyListCount = magiskDenyListPackages.size,
+            magiskDenyListCount = denyListPackages.size,
             processHiddenCount = hiddenPids
         )
+    }
+
+    /** 从设备实际读取 DenyList / KSU magiskhide 已隐藏的包名列表 */
+    fun listActuallyHidden(): Set<String> {
+        if (!suSession.isSessionOpen() && !suSession.open(15)) return emptySet()
+        val combined = mutableSetOf<String>()
+
+        // Magisk DenyList
+        val magiskList = runRootShell("magisk --denylist ls 2>/dev/null | grep -v '^$' | cut -d' ' -f2", 10)
+        combined.addAll(magiskList.output.lines().map { it.trim() }.filter { it.isNotBlank() })
+
+        // KernelSU magiskhide
+        val ksuList = runRootShell("ksud magiskhide ls 2>/dev/null | grep -v '^$' | cut -d' ' -f2", 10)
+        combined.addAll(ksuList.output.lines().map { it.trim() }.filter { it.isNotBlank() })
+
+        magiskDenyListPackages.addAll(combined)
+        return combined
+    }
+
+    /** 一键解除所有隐藏（DenyList + KSU + 系统路径 + 进程 mount） */
+    fun unhideAll(): Boolean {
+        if (!suSession.isSessionOpen() && !suSession.open(30)) return false
+        var allOk = true
+
+        // Magisk DenyList 清空
+        val pkgs = listActuallyHidden()
+        for (pkg in pkgs) {
+            val r = runRootShell("magisk --denylist rm '$pkg' 2>/dev/null && echo OK || echo FAIL", 5)
+            if (!r.output.contains("OK")) {
+                val ksuR = runRootShell("ksud magiskhide remove '$pkg' 2>/dev/null && echo OK || echo FAIL", 5)
+                if (!ksuR.output.contains("OK")) allOk = false
+            }
+            magiskDenyListPackages.remove(pkg)
+        }
+
+        // 系统路径 umount
+        val sw = trySystemWideMount()
+        if (sw != null) {
+            runRootShell("for p in $SYS_HIDE_DIR/*; do umount \"\$p\" 2>/dev/null; done; rm -rf '$SYS_HIDE_DIR' 2>/dev/null", 10)
+            systemWideApplied = false
+            systemWidePathCount = 0
+        }
+
+        // 进程 mount 解除
+        KernelProcessHider().unhideAll()
+        return allOk
     }
 
     fun hideFromPackage(packageName: String): HideResult {
@@ -330,11 +379,18 @@ class RootHideManager {
         return checkZygiskEnabled()
     }
 
+    @Volatile private var cachedKsudAvailable: Boolean? = null
+
     private fun tryKsuHide(packageName: String): HideResult? {
         // KernelSU 的 su 一般提供 ksud CLI 与 MagiskDenyList 兼容接口，
-        // 探测一下 ksud 是否存在、profile/aidl 是否可调用。
-        val detectResult = runRootShell("command -v ksud >/dev/null 2>&1 && echo KSUD_OK || echo KSUD_NONE")
-        if (!detectResult.output.contains("KSUD_OK")) return null
+        // 探测一次 ksud 是否存在，后续复用缓存
+        val ksuOk = cachedKsudAvailable ?: run {
+            val detectResult = runRootShell("command -v ksud >/dev/null 2>&1 && echo KSUD_OK || echo KSUD_NONE")
+            val ok = detectResult.output.contains("KSUD_OK")
+            cachedKsudAvailable = ok
+            ok
+        }
+        if (!ksuOk) return null
 
         val escapedPkg = packageName.replace("'", "'\\''")
         // KSU 1.0+ 的 hide 子命令（与 MagiskDenyList 行为类似）

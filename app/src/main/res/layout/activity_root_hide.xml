@@ -86,7 +86,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
         android:orientation="horizontal"
-        android:weightSum="4">
+        android:weightSum="5">
 
         <Button
             android:id="@+id/btnPresetBank"
@@ -140,6 +140,21 @@
             android:layout_weight="1"
             android:background="@drawable/bg_panel"
             android:text="短视频"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="12sp" />
+
+        <View
+            android:layout_width="4dp"
+            android:layout_height="1dp" />
+
+        <Button
+            android:id="@+id/btnPresetFinance"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_panel"
+            android:text="证券保险"
             android:textAllCaps="false"
             android:textColor="@color/hf_text_primary"
             android:textSize="12sp" />
@@ -203,6 +218,39 @@
         android:textAllCaps="false"
         android:textColor="@color/hf_text_primary"
         android:textSize="13sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnUnhide"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_panel"
+            android:text="解除隐藏"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="13sp" />
+
+        <View
+            android:layout_width="4dp"
+            android:layout_height="1dp" />
+
+        <Button
+            android:id="@+id/btnWatcherLog"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_panel"
+            android:text="监听日志"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="13sp" />
+    </LinearLayout>
 
     <TextView
         android:id="@+id/tvHideResult"

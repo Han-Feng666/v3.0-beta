@@ -83,21 +83,46 @@ object RootHideRepository {
      * 用 [filterInstalled] 拿到属于预设类别的 packageNames。
      */
     object Presets {
-        // 银行/支付
+        // 银行/支付完整包名
         val BANK_PAY = setOf(
-            "com.icbc", "com.chinamworld.main", "com.chinamworld.bocmbci", "com.chinamworldろう", "com.ccb", "com.ccb.haierpay",
-            "com.chinamworld.icbc", "com.ccb.ccbnetpay", "com.chinamworld.bocmbci", "com.boc.bocmb",
-            "com.abc.mobile", "com.chinamworld.bocmbci", "com.bcm.mobile", "com.cmbchina.lifelong",
-            "com.cmbchina.CMB", "com.cmbchina.cmb", "com.chinamworld.icbc.b2c", "com.icbc.ccb",
-            "com.icbc.mobilebank", "com.bankcomm.multihelper", "com.bankcomm.Bankcomm",
-            "com.ccb.mobile支行", "com.ccb.fund", "com.ccb.huarui", "com.ceb.mobilebank", "com.cebbank.lakala",
-            "com.spdb.mobilebank", "com.spdb.spdbank", "com.cib.cibmb", "com.cmbc.cibmb",
-            "com.cmbc.mobile", "com.chinamworld.citic", "com.citicbank.mobilebank", "com.citicbank.creditcard",
-            "com.chinamworld.pingan", "com.pingan.bank", "com.pingan.lifeinsurance", "com.pingan.paces.ccms",
-            "com.eg.android.AlipayGphone", "com.tencent.mm", "com.unionpay.mobilepay", "com.unionpay.tsm",
-            "com.unionpay.tsmservice", "com.unionpay.lakala", "com.lakala.mobile", "com.lakala.dlian",
-            "com.ryt.hbf", "com.yitong.founder", "com.jingdong.finance", "com.jdztapp.main",
-            "com.tencent.qcloudfta", "com.zidongdian.Service"
+            "com.icbc.mobilebank", "com.icbc", "com.chinamworld.main",
+            "com.ccb.ccbnetpay", "com.ccb", "com.ccb.life",
+            "com.boc.bocmb", "com.boc.bocpas", "com.boc.bocdigi",
+            "com.chinamworld.bocmbci",
+            "com.abc.mobilebank", "com.android.bankabc", "com.chinamworld.creditcard",
+            "com.bankcomm.multihelper", "com.bankcomm.Bankcomm",
+            "com.cmbchina.CMB", "com.cmbchina.cmb", "com.cmbchina.ccp",
+            "com.ceb.mobilebank", "com.cebbank.lakala",
+            "com.spdb.mobilebank", "com.spdb.spdbank",
+            "com.cib.cibmb", "com.cmbc.cibmb", "com.cmbc.mobile",
+            "com.citicbank.mobilebank", "com.citicbank.creditcard", "com.chinamworld.citic",
+            "com.pingan.bank", "com.pingan.paces.ccms",
+            "com.hkbea", "com.hxbank.mbank", "com.psbc", "com.bankofshanghai",
+            "com.eg.android.AlipayGphone", "com.tencent.mm",
+            "com.unionpay.mobilepay", "com.unionpay.tsm", "com.unionpay.tsmservice",
+            "com.lakala.mobile", "com.lakala.dlian",
+            "com.jingdong.finance", "com.jdztapp.main",
+            "com.ryt.hbf", "com.yitong.founder"
+        )
+
+        // 证券/基金
+        val SECURITIES_PREFIXES = setOf(
+            "com.eastmoney.android.", "com.eastmoney.fund",
+            "com.hundsun.", "com.hszq.phone",
+            "com.pingansec.", "com.pingan.lifeinsurance",
+            "com.antfortune.android", "com.antgroup.antforest",
+            "com.tencent.wealth", "com.lexin.finance",
+            "com.mycreditcard", "com.tiantianjijin",
+            "com.taobao.finance", "com.alipay.togetheraho"
+        )
+
+        // 保险
+        val INSURANCE_PREFIXES = setOf(
+            "com.chinainsurance.mobile", "com.pingan.lifeinsurance",
+            "com.pingan.jzgj", "com.sinosig.mobile",
+            "com.taikanglife.mobile", "com.taikang.app",
+            "com.picc.life", "com.chinalife.mobile",
+            "com.cpic.app", "com.cpic.life"
         )
 
         // 常见包名前缀 / 子串匹配
@@ -141,8 +166,8 @@ object RootHideRepository {
             "com.netease.cloudmusic", "com.netease.yanxuan",
             "cn.com.iresearch", "com.xiaomi.xmsf",
             "com.taobao.taobao", "com.taobao.cart", "com.taobao.live",
-            "com.taobao.idlefish", "com.alibaba.aliyun", "com.alibaba.ali inquire",
-            "com.alibaba.aliwgt", "com.alibaba.wireless", "com.alibaba.android.pistol",
+            "com.taobao.idlefish", "com.alibaba.aliyun", "com.alibaba.aliwgt",
+            "com.alibaba.wireless", "com.alibaba.android.pistol",
             "com.alibaba.aliexpress", "com.alibaba.aliexpress.mobile",
             "com.alibaba.android.rpc", "jp.naver.line.android", "com.nhn.android.search",
             "com.naver.linewebtoon", "com.naver.tmap", "com.naver.ttf", "com.naver.kbuzz",
@@ -179,9 +204,16 @@ object RootHideRepository {
          */
         fun matchesCategory(packageName: String): String? {
             for (p in BANK_PAY_PREFIXES) if (packageName == p || packageName.startsWith(p)) return "Bank/Pay"
+            for (p in SECURITIES_PREFIXES) if (packageName == p || packageName.startsWith(p)) return "Securities"
+            for (p in INSURANCE_PREFIXES) if (packageName == p || packageName.startsWith(p)) return "Insurance"
             for (p in SOCIAL_PREFIXES) if (packageName == p || packageName.startsWith(p)) return "Social"
             for (p in GAME_PREFIXES) if (packageName == p || packageName.startsWith(p)) return "Game"
             for (p in SHORT_VIDEO_PREFIXES) if (packageName == p || packageName.startsWith(p)) return "ShortVideo"
+            // 兜底关键字匹配
+            val lowerPkg = packageName.lowercase()
+            if (lowerPkg.contains("bank") || lowerPkg.contains("pay") || lowerPkg.contains("finance") ||
+                lowerPkg.contains("wallet") || lowerPkg.contains("fund") || lowerPkg.contains("stock") ||
+                lowerPkg.contains("insurance") || lowerPkg.contains("jijin")) return "Bank/Pay"
             return null
         }
 
@@ -193,7 +225,6 @@ object RootHideRepository {
         fun filterInteresting(installedPackageNames: Collection<String>): Set<String> {
             return installedPackageNames.filterTo(mutableSetOf()) { pkg ->
                 matchesCategory(pkg) != null ||
-                    // 兜底：含 com.tencent.、com.netease.、com.alibaba.、com.sina.、com.ss.android.、com.smile.、com.bilibili.、com.kuaishou.、com.taobao.、com.xunmeng.、com.miHoYo.、com.mihoyo.、com.supercell.、com.mojang.、com.popcap.、com.rovio.、com.ea.game.、com.king.com.、com.habby.、com.lilithgame.、com.longtugame.
                     pkg.startsWith("com.tencent.") ||
                     pkg.startsWith("com.netease.") ||
                     pkg.startsWith("com.alibaba.") ||

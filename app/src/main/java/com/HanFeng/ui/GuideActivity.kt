@@ -132,7 +132,7 @@ class GuideActivity : BaseActivity() {
             "6. 第一次建议先只用 DNS 拦截确认联网正常，再按需开启 MITM 模式。\n" +
             "7. 如果你需要更强的系统推广治理和连接归属增强，再去设置里开启 Shizuku 增强。\n" +
             "8. 需要 MITM 证书时，首页开启 MITM 开关后会自动导出证书文件。\n" +
-            "9. 如果你同时使用加速器、VPN 或代理，先到首页 \"加速器共存\" 把本体和目标应用一起勾选。详见第七节加速器共存教程。\n" +
+            "9. 如果你同时使用加速器、VPN 或代理，先到设置页 \"加速器共存设置\" 把本体和目标应用一起勾选。详见第七节加速器共存教程。\n" +
             "10. 追求更省电时，优先只开 DNS 拦截；MITM 和 Shizuku 按需开启。\n\n" +
             "二、各厂商设备专项设置\n" +
             "1. 小米/Redmi（MIUI/HyperOS）：系统设置 → 应用设置 → 应用管理 → 寒枫 → 自启动（允许）+ 省电策略（无限制）+ 锁屏显示（允许）。\n" +
@@ -148,7 +148,7 @@ class GuideActivity : BaseActivity() {
             "2. MITM 模式开关：开启后会导出证书文件，并对命中的 HTTP/HTTPS/HTTP2 流量进行增强过滤。证书未安装时仍会保留 DNS/IP 层拦截。\n" +
             "3. 使用说明：打开当前帮助文档。\n" +
             "4. 黑白名单：管理完全放行应用。加入白名单的应用会绕过寒枫拦截链。\n" +
-            "5. 加速器共存：管理 VPN、代理、加速器和需要跟随它们走同一链路的目标应用。勾选的加速器/VPN 本体绕过寒枫 VPN，目标 App 可由寒枫承接后转发到本地代理。详见第七节。\n" +
+            "5. 加速器共存：管理 VPN、代理、加速器和需要跟随它们走同一链路的目标应用。勾选的加速器/VPN 本体绕过寒枫 VPN，目标 App 可由寒枫承接后转发到本地代理。入口在设置页的 \"加速器共存设置\"。详见第七节。\n" +
             "6. 设置：进入 Shizuku、隐藏后台、共存设置和加群入口等设置项。\n" +
             "7. 状态卡当前会显示：工作状态、拦截模式、证书状态、Shizuku 状态。\n" +
             "8. Shizuku 状态会区分：未启用、未安装、未启动、已连接、服务连接中等状态。\n" +
@@ -197,7 +197,7 @@ class GuideActivity : BaseActivity() {
             "17. 风险建议：普通用户优先顺序为关闭推送广告、组件治理、暂停、冻结；系统核心应用和常用主业务 App 处理前先看风险提示。\n\n" +
             "七、加速器共存与本地代理共存教程\n" +
             "1. 使用场景：你在用 VPN、代理或游戏加速器（如 Clash、V2Ray、UU 加速器等），同时又要让寒枫拦截广告，就需要让加速器或 VPN 和寒枫同时运行。加速器共存功能正是为此设计。\n" +
-            "2. 入口：首页直接点 \"加速器共存\" 按钮（或设置页的 \"加速器共存设置\"）。\n" +
+            "2. 入口：设置页点击 \"加速器共存设置\"。\n" +
             "3. 第一步——勾选加速器或 VPN 本体：列表会自动把常见加速器、VPN、代理应用置顶（带标记）。勾选本体的意思，是让这个应用不走寒枫 VPN 隧道，直接用它自己的出口联网。\n" +
             "4. 第二步——勾选需要跟着加速器走的目标应用：例如正在加速的游戏、需要走代理的 App。勾选后，这些应用的 TCP 流量会由寒枫承接，再转发到你配置的本地代理端口，最终走加速器链路。与只加白名单相比，这样做还能保留 DNS 拦截和 MITM 拦截能力。\n" +
             "5. 第三步——打开页面底部 \"配置信息\"：填写本地代理的地址和端口。\n" +
@@ -336,16 +336,25 @@ class GuideActivity : BaseActivity() {
             "4. 隐身模式与广告拦截互不干扰：追踪参数、Referer、指纹头的移除在广告规则匹配之后、请求转发之前完成，不影响广告拦截效果。\n" +
             "5. 如果开启后部分网站功能异常（如跳转回源、第三方登录失效），可以关闭对应子开关排查，或参考常见问题中的排障步骤。\n\n" +
             "二十、Root 隐藏功能说明（需 Root 设备）\n" +
-            "1. 入口：设置页或首页进入 Root 隐藏。\n" +
+            "1. 入口：设置页进入 Root 隐藏。\n" +
             "2. Root 隐藏用于让银行、支付、游戏等检测 Root 的 App 看不到 Root 痕迹，同时让寒枫自己的 Root 加速能力继续可用。\n" +
-            "3. 状态面板会实时显示：Root 方案（Magisk/KernelSU/APatch/None）、Zygisk 状态、Zygisk Next 模块状态、DenyList 可用性、系统挂载模式（EROFS 只读 / 可挂载）、隐藏路径数。\n" +
-            "4. Prop 伪装开关：开启后会通过 resetprop 修改 17 项关键系统属性（ro.debuggable、ro.boot.verifiedbootstate、ro.boot.flash.locked、ro.boot.veritymode、ro.magisk.version 等），把设备伪装成未解锁、未 Root 的官方系统。关闭后可一键还原原值。\n" +
-            "5. 启动监听开关：开启后会启动后台守护脚本，每秒扫描 /proc 下的进程命令行，作用域内 App 一启动就立即执行 mount bind 隐藏所有 Root 路径，无需手动按按钮。\n" +
-            "6. 作用域管理：可手动勾选需要隐藏 Root 的应用，也可用一键预设按钮（银行/游戏/社交/短视频/一键智能作用域）快速批量勾选。\n" +
-            "7. 应用隐藏按钮：一键执行 Zygisk 启用 → DenyList/白名单 → KSU/LSPosed → root mount bind 多层兜底组合。建议在预设作用域后点一次应用隐藏。\n" +
-            "8. Zygisk Next 已内置 Shamiko 同等能力，无需额外安装 Shamiko 模块。\n" +
-            "9. EROFS 系统分区无法直接修改文件，寒枫会自动改用进程级 mount bind 和 DenyList 隐藏方式。\n" +
-            "10. KernelSU/APatch 设备有自带 Zygisk 实现，无需 Magisk 也可使用 Root 隐藏。\n\n" +
+            "3. 状态面板会实时显示：Root 方案（Magisk/KernelSU/APatch/None）、Zygisk 状态、Zygisk Next 模块状态、DenyList 可用性、系统挂载模式（EROFS 只读 / 可挂载）、隐藏路径数、已隐藏 DenyList 文件数和进程数。\n" +
+            "4. Prop 伪装开关：开启后会通过 resetprop 修改 19 项关键系统属性：ro.debuggable=0、ro.secure=1、ro.build.type=user、ro.build.tags=release-keys、ro.boot.verifiedbootstate=green、ro.boot.flash.locked=1、ro.boot.unlocked=0、ro.boot.veritymode=enforcing、ro.boot.vbmeta.device_state=locked、ro.bootloader/baseband 伪装、init.svc.magisk_pfs 清空、ro.magisk.version 清空等。关掉后自动还原原值。\n" +
+            "5. 启动监听开关：开启后会启动后台守护脚本，每秒扫描 /proc 下的进程命令行，作用域内 App 一启动就立即执行 mount bind 隐藏所有 Root 路径，无需手动按按钮。应用隐藏完成后会自动打开此开关。\n" +
+            "6. 作用域管理：可手动在「作用域」tab 中勾选需要隐藏 Root 的应用，也可用一键预设按钮快速批量勾选：\n" +
+            "  (1) 银行/支付：工行/建行/中行/招行/交行/农行/工行/中信/平安/支付宝/微信/银联/拉卡拉/京东金融 等\n" +
+            "  (2) 证券/保险：东方财富/蚂蚁财富/华泰证券/平安证券/中国人寿/中国平安 等\n" +
+            "  (3) 游戏：腾讯/网易/米哈游/Supercell/B站/EA 等厂商常见游戏\n" +
+            "  (4) 社交：QQ/微信/微博/小红书/Linkedin/Twitter 等\n" +
+            "  (5) 短视频：抖音/快手/B站/西瓜/爱奇艺/优酷/芒果等\n" +
+            "  (6) 一键智能作用域（推荐）：自动勾选以上全部类别已安装 App\n" +
+            "7. 应用隐藏按钮：一键执行 Zygisk 启用 → DenyList/白名单 → KSU/LSPosed → root mount bind 多层组合。建议在预设作用域后点一次应用隐藏，会自动启动后台监听守候后续 App 启动。\n" +
+            "8. 解除隐藏按钮：一键撤销所有隐藏操作（DenyList 全部移除 + 进程 mount 全部解绑 + 系统路径 umount + Prop 伪装还原 + 后台监听停止），用于彻底恢复隐藏前状态。\n" +
+            "9. 监听日志按钮：查看 RootHide watcher 后台脚本的运行状态和最近 100 行日志（包名、PID、处理时间戳），方便排查 watcher 是否在活动、命中了哪些 App。\n" +
+            "10. Zygisk Next 已内置 Shamiko 同等能力，无需额外安装 Shamiko 模块。\n" +
+            "11. EROFS 系统分区无法直接修改文件，寒枫会自动改用进程级 mount bind 和 DenyList 隐藏处理；只做只读检测不真的 remount 系统分区。\n" +
+            "12. KernelSU/APatch 设备有自带 Zygisk 实现，无需 Magisk 也可使用 Root 隐藏。\n" +
+            "13. 隐藏记录在 reboot 后会自动恢复：DenyList 是 Magisk/KSU 持久化的，Prop 伪装重启后失效（需重新打开开关，会自动检测并重新应用），Watcher 脚本重启手机后需重新打开启动监听。\n\n" +
             "二十一、常见问题与排障教程\n" +
             "1. 某个 App 联网异常：先把它加入白名单测试。\n" +
             "2. 加速器或代理异常：先把本体和目标 App 一起加入加速器共存；本地代理类（Clash/V2Ray）还需在配置信息里填写 127.0.0.1 和端口。\n" +
@@ -365,7 +374,12 @@ class GuideActivity : BaseActivity() {
             "16. 远程规则源同步失败：检查网络、规则源地址和 GitHub 访问情况，再进入规则源管理页单独同步失败源。\n" +
             "17. 冻结后桌面图标消失：这是系统禁用应用的正常效果，到推广治理里点解冻或恢复最近治理即可找回。\n" +
             "18. 组件治理列表没有想处理的组件：使用高级手动输入，输入完整组件名后选择冻结组件或解冻组件。\n" +
-            "19. 如有 BUG 或建议，可通过设置页加群入口、日志导出或现有沟通渠道继续反馈。"
+            "19. Root 隐藏后银行/支付仍检测到 Root：先确认 DenyList 可用（内核版本太老的 Magisk 可能不支持 DenyList），然后点应用隐藏按钮查看输出日志确认每个 App 是否成功加入 DenyList，再确认 Prop 伪装开关是否打开（状态面板会显示 Prop 是否完整伪装）；再确认已打开启动监听；最后强制停止目标银行/支付 App 进程让其重新加载系统属性。\n" +
+            "20. Root 隐藏 watcher 显示未运行：重启手机后 watcher 脚本不会自动恢复；进入 Root 隐藏页面重新打开\"启动监听\"开关即可。如已开启但某任务被杀（如系统清理加速），同样需手动重新打开监听。\n" +
+            "21. Root 隐藏解除后发现仍有部分 App 受影响：可能是 DenyList 移除命令执行被 Magisk/KSU 拒绝；进入监听日志查看是否有遗留 PID 仍在 mount bind；强制停止目标 App 后下一轮 watcher 扫描会自动覆盖；若仍卡死可重启手机后再点解除隐藏。\n" +
+            "22. Prop 伪装提示未找到 resetprop：需确认你的 Magisk 20+ 自带 resetprop 命令。KernelSU 请升级到最新版自带 resetprop 或 kproprop，APatch 请安装对应 resetprop 补丁。\n" +
+            "23. 首页状态卡显示 Shizuku 完全断开：可能因后台被系统杀进程，重启 Shizuku 服务并重新申请权限即可恢复。\n" +
+            "24. 如有 BUG 或建议，可通过设置页加群入口、日志导出或现有沟通渠道继续反馈。"
 
         fun createIntent(context: Context, title: String, content: String): Intent {
             return Intent(context, GuideActivity::class.java)
