@@ -428,6 +428,13 @@
                 android:layout_marginBottom="12dp"
                 android:text="腾讯游戏防设备标记 (Root)" />
 
+            <Button
+                android:id="@+id/btnPerformanceMonitor"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="性能占用监控 (Root+Shizuku)" />
+
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

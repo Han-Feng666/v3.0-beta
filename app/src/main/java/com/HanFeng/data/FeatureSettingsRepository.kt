@@ -25,6 +25,10 @@ object FeatureSettingsRepository {
     private const val KEY_AD_REWARD_INTERCEPT_TODAY = "ad_reward_intercept_today"
     private const val KEY_HOTSPOT_BLOCK_ENABLED = "hotspot_block_enabled"
     private const val KEY_HOTSPOT_BLOCK_MODE = "hotspot_block_mode"
+    private const val KEY_PERF_FLOAT_ENABLED = "perf_float_enabled"
+    private const val KEY_PERF_FLOAT_MODE = "perf_float_mode"
+    private const val KEY_PERF_FLOAT_INTERVAL_MS = "perf_float_interval_ms"
+    private const val PERF_FLOAT_INTERVAL_DEFAULT_MS = 1500L
     private const val MAX_PENDING_FEEDBACK_RULES = 50
     private val gson = Gson()
     @Volatile private var cachedAdFreeRewardEnabled: Boolean? = null
@@ -40,6 +44,9 @@ object FeatureSettingsRepository {
     @Volatile private var cachedStealthRemoveFingerprintHeaders: Boolean? = null
     @Volatile private var cachedHotspotBlockEnabled: Boolean? = null
     @Volatile private var cachedHotspotBlockMode: String? = null
+    @Volatile private var cachedPerfFloatEnabled: Boolean? = null
+    @Volatile private var cachedPerfFloatMode: String? = null
+    @Volatile private var cachedPerfFloatInterval: Long? = null
 
     fun isAdBlockEnabled(context: Context): Boolean {
         cachedAdBlockEnabled?.let { return it }
@@ -340,10 +347,61 @@ object FeatureSettingsRepository {
         cachedHotspotBlockMode = mode
     }
 
+    fun isPerfFloatEnabled(context: Context): Boolean {
+        cachedPerfFloatEnabled?.let { return it }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_PERF_FLOAT_ENABLED, false)
+            .also { cachedPerfFloatEnabled = it }
+    }
+
+    fun setPerfFloatEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_PERF_FLOAT_ENABLED, enabled)
+            .apply()
+        cachedPerfFloatEnabled = enabled
+    }
+
+    fun getPerfFloatMode(context: Context): String {
+        cachedPerfFloatMode?.let { return it }
+        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_PERF_FLOAT_MODE, PerfFloatMode.CPU)
+            ?.also { cachedPerfFloatMode = it } ?: PerfFloatMode.CPU
+        return stored
+    }
+
+    fun setPerfFloatMode(context: Context, mode: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_PERF_FLOAT_MODE, mode)
+            .apply()
+        cachedPerfFloatMode = mode
+    }
+
+    fun getPerfFloatIntervalMs(context: Context): Long {
+        cachedPerfFloatInterval?.let { return it }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_PERF_FLOAT_INTERVAL_MS, PERF_FLOAT_INTERVAL_DEFAULT_MS)
+            .also { cachedPerfFloatInterval = it }
+    }
+
+    fun setPerfFloatIntervalMs(context: Context, intervalMs: Long) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_PERF_FLOAT_INTERVAL_MS, intervalMs)
+            .apply()
+        cachedPerfFloatInterval = intervalMs
+    }
+
     private fun savePendingFeedbackRules(context: Context, rules: List<PendingFeedbackRule>) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_PENDING_FEEDBACK_RULES, gson.toJson(rules))
             .apply()
     }
+}
+
+object PerfFloatMode {
+    const val CPU = "cpu"
+    const val MEMORY = "memory"
 }
