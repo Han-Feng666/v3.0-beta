@@ -75,6 +75,10 @@
             android:exported="false" />
 
         <activity
+            android:name="com.HanFeng.ui.AppFreezeActivity"
+            android:exported="false" />
+
+        <activity
             android:name="com.HanFeng.ui.PromoComponentGovernActivity"
             android:exported="false" />
 

@@ -297,6 +297,13 @@
                 android:text="推广治理" />
 
             <Button
+                android:id="@+id/btnAppFreeze"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="应用冻结" />
+
+            <Button
                 android:id="@+id/btnCoexistSettings"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
