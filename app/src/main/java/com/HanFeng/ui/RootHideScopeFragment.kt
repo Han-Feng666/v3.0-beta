@@ -123,60 +123,57 @@ class RootHideScopeFragment : Fragment() {
                 val apps = withContext(Dispatchers.IO) {
                     val scopePackages = RootHideRepository.getScopePackages(ctx)
                     @Suppress("DEPRECATION")
-                    val flags = android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES or
-                        android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS or
-                        android.content.pm.PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
-                    val rawInfos = runCatching {
-                        pm.getInstalledApplications(flags)
-                    }.getOrNull() ?: runCatching {
-                        @Suppress("DEPRECATION")
-                        pm.getInstalledPackages(0)
-                            .mapNotNull { it.applicationInfo }
-                    }.getOrNull() ?: emptyList()
+                    val pkgFlags = android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES or
+                        android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS
 
-                    val visibleList = rawInfos.asSequence()
-                        .filter { it.packageName != selfPkg }
-                        .map { ai ->
-                            InstalledApp(
-                                label = runCatching { pm.getApplicationLabel(ai).toString() }
-                                    .getOrDefault(ai.packageName),
-                                packageName = ai.packageName,
-                                icon = null,
-                                whitelisted = false,
-                                coexistSelected = false,
-                                coexistRecommended = false,
-                                rootHideSelected = ai.packageName in scopePackages
-                            )
-                        }
-                        .distinctBy { it.packageName }
-                        .sortedBy { it.label.lowercase() }
+                    val thirdPartyRaw = runCatching {
+                        val s = SuSession.getInstance()
+                        if (!s.isSessionOpen()) s.open(10)
+                        s.execute("pm list packages 2>/dev/null | sed 's/^package://'", 10).output
+                    }.getOrDefault("")
+
+                    val allPkgs = thirdPartyRaw.lineSequence()
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() && it != selfPkg }
+                        .distinct()
                         .toList()
 
-                    val visibleNames = visibleList.mapTo(hashSetOf()) { it.packageName }
-                    val thirdPartyVisibleCount = rawInfos.count { ai ->
-                        ai.packageName != selfPkg &&
-                            (ai.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0
-                    }
-                    val rootOnlyApps = if (thirdPartyVisibleCount == 0) {
-                        loadThirdPartyPackagesViaRoot()
-                            .filter { it != selfPkg && it !in visibleNames }
-                            .map { pkg ->
-                                val ai = runCatching { pm.getApplicationInfo(pkg, flags) }.getOrNull()
+                    val visibleList = allPkgs.mapNotNull { pkg ->
+                        val ai = runCatching { pm.getApplicationInfo(pkg, pkgFlags) }.getOrNull()
+                            ?: return@mapNotNull null
+                        InstalledApp(
+                            label = runCatching { pm.getApplicationLabel(ai).toString() }
+                                .getOrDefault(pkg),
+                            packageName = pkg,
+                            icon = null,
+                            whitelisted = false,
+                            coexistSelected = false,
+                            coexistRecommended = false,
+                            rootHideSelected = pkg in scopePackages
+                        )
+                    }.sortedBy { it.label.lowercase() }
+
+                    if (visibleList.isEmpty()) {
+                        val fallback = runCatching { pm.getInstalledApplications(0) }
+                            .getOrDefault(emptyList())
+                            .filter { it.packageName != selfPkg }
+                            .map { ai ->
                                 InstalledApp(
-                                    label = runCatching { ai?.let { pm.getApplicationLabel(it).toString() } }
-                                        .getOrNull() ?: pkg,
-                                    packageName = pkg,
+                                    label = runCatching { pm.getApplicationLabel(ai).toString() }
+                                        .getOrDefault(ai.packageName),
+                                    packageName = ai.packageName,
                                     icon = null,
                                     whitelisted = false,
                                     coexistSelected = false,
                                     coexistRecommended = false,
-                                    rootHideSelected = pkg in scopePackages
+                                    rootHideSelected = ai.packageName in scopePackages
                                 )
                             }
+                            .sortedBy { it.label.lowercase() }
+                        fallback
                     } else {
-                        emptyList()
+                        visibleList
                     }
-                    visibleList + rootOnlyApps
                 }
                 if (requestVersion != loadVersion) return@launch
                 allApps = apps
@@ -200,21 +197,6 @@ class RootHideScopeFragment : Fragment() {
         val filtered = if (normalized.isBlank()) allApps
         else allApps.filter { it.label.lowercase().contains(normalized) || it.packageName.lowercase().contains(normalized) }
         adapter.submit(filtered)
-    }
-
-    private fun loadThirdPartyPackagesViaRoot(): List<String> {
-        return runCatching {
-            val session = SuSession.getInstance()
-            if (!session.isSessionOpen()) session.open(10)
-            val result = session.execute("pm list packages -3 2>/dev/null | sed 's/^package://'", 10)
-            result.output
-                .lineSequence()
-                .map { it.trim() }
-                .filter { it.isNotBlank() && it.contains('.') }
-                .distinct()
-                .take(500)
-                .toList()
-        }.getOrDefault(emptyList())
     }
 
     private fun updateAppState(packageName: String, checked: Boolean) {

@@ -63,7 +63,6 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnShizukuAdControl: Button
     private lateinit var btnAppFreeze: Button
     private lateinit var btnGameAntiMark: Button
-    private lateinit var btnPerformanceMonitor: Button
     private lateinit var btnCoexistSettings: Button
     private lateinit var btnTrafficCardSettings: Button
     private lateinit var btnJoinGroupSettings: Button
@@ -143,7 +142,6 @@ class SettingsActivity : BaseActivity() {
         btnShizukuAdControl = findViewById(R.id.btnShizukuAdControl)
         btnAppFreeze = findViewById(R.id.btnAppFreeze)
         btnGameAntiMark = findViewById(R.id.btnGameAntiMark)
-        btnPerformanceMonitor = findViewById(R.id.btnPerformanceMonitor)
         btnCoexistSettings = findViewById(R.id.btnCoexistSettings)
         btnTrafficCardSettings = findViewById(R.id.btnTrafficCardSettings)
         btnJoinGroupSettings = findViewById(R.id.btnJoinGroupSettings)
@@ -250,12 +248,6 @@ class SettingsActivity : BaseActivity() {
             launchActivitySafely(
                 GameAntiMarkActivity.createIntent(this),
                 failureMessage = "打开腾讯游戏防标记失败"
-            )
-        }
-        btnPerformanceMonitor.setOnClickListener {
-            launchActivitySafely(
-                PerformanceMonitorActivity.createIntent(this),
-                failureMessage = "打开性能占用监控失败"
             )
         }
 

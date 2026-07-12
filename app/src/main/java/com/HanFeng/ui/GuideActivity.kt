@@ -399,20 +399,7 @@ class GuideActivity : BaseActivity() {
             "10. 手动恢复权限按钮：把 /mnt/vendor/persist/data 权限立即设为 700。如果守护未正确还原权限（比如寒枫被杀导致无后续 sleep），可手动触发恢复。\n" +
             "11. 真死指纹条件：只有当列表中所有游戏都还运行在后台（pidof 返回非空）就关机刷机清数据。正常使用场景下：必须划掉后台退出游戏，下一轮扫描检测到没有 pidof 时会自动清理并还原权限，不会触发真死。\n" +
             "12. 重启不会真死：守护脚本启动时会先显式 chmod 700 还原权限，重启后系统其它服务可正常写入 /mnt/vendor/persist/data。\n" +
-            "13. 与 Root 隐藏的关系：两者都在 /data/adb/ 下创建工作目录、都用 SuSession 执行 root 命令、都用 nohup sh 持久运行。但 Root 隐藏是 zygisk mount bind 隐藏路径 + prop 伪装，防的是 Root 检测；游戏防设备标记是 chmod + 文件清理，防的是设备识别追踪，互不冲突可同时启用。\n\n" +
-            "二十四、性能占用监控与悬浮窗说明（需 Root + Shizuku）\n" +
-            "1. 入口：设置页 Root 区进入性能占用监控。该功能混合使用 Root 与 Shizuku：进程 CPU/内存数据来自 Root 路径读取 /proc/_pid_/stat 与 /proc/_pid_/statm，前台 App 探测首选用 Shizuku UserService（ActivityManager.getRunningTasks(1)），失败时退化到 dumpsys activity activities 解析。\n" +
-            "2. 列表显示：进入页面自动采集一次全部运行进程快照，按 CPU 百分比降序排列，CPU 相同则按 RSS 降序。每条显示 PID、进程名、CPU 进度条、CPU 百分比、内存 RSS、'前台' 徽章（前台进程时显示）。\n" +
-            "3. CPU 占比计算：基于两次连续采样之间的 jiffies 差分。首次进入时所有进程显示 0%（无以前节拍）。后续刷新会基于 wall-clock 与 jiffies 差分真实计算。所以首次刷新后等待 2 秒（自动刷新周期）再看到合理数据是正常现象。\n" +
-            "4. 自动刷新开关：默认关闭。打开后每 2 秒重新采样并刷新列表，可看到实时 CPU 变化。关闭后只在你手动点 '刷新' 按钮时采样。\n" +
-            "5. 悬浮窗开关：打开悬浮窗开关前必须授予 App 悬浮窗权限（Settings.canDrawOverlays），未授权时自动跳转到系统 '显示在其它应用上层' 设置页，授权后回到本页重新点击开关即可启用。\n" +
-            "6. 悬浮窗外观：胶囊式半透明黑色悬浮窗（圆角、APP_NAME 居左 - 数据值居左下),默认显示在屏幕左上角；可拖拽任意位置；点击悬浮窗切换 CPU 占用 / 运存占用显示模式（无视觉动画但内容立即变化）。\n" +
-            "7. 悬浮窗显示内容：默认每 1.5 秒采样一次前台 App 的性能数据并刷新文本。前台 App 通过 Shizuku 探测；前台 App 的 PID/进程名匹配 PerfMonitor 列表中同名进程取其 CPU 与 RSS。无前台 App（桌面/锁屏）时显示 '...'。\n" +
-            "8. 显示模式持久化：CPU 与运存两种模式的选择存在 SharedPreferences 中，下次启用悬浮窗维持上次设置。点击悬浮窗切换会即时持久化。\n" +
-            "9. 悬浮窗依赖服务：启用悬浮窗会启动 FloatingPerfService 前台服务（通知渠道 '性能悬浮窗'，最小优先级通知不会响铃，最小化耗电）。关闭悬浮窗开关会停止服务、移除悬浮窗。寒枫被杀后服务可能被回收，下次进入到本页打开开关会重新拉起。\n" +
-            "10. /proc 可读性：Android 10+ 对非自身进程的 /proc/[pid]/stat 默认不可读，必须 Root；Shizuku ADB 模式（uid 2000）也无法读，Shizuku Root 模式可以走 UserService 内 ProcessBuilder，但本项目统一走 SuSession root shell 一次性 cat 全部进程 stat，效率更高。\n" +
-            "11. Shizuku 预热：本功能首次使用前需在设置页 '^ Shizuku 强力控制^' 入口授权并启动 Shizuku，确保前台探测可用。即使 Shizuku 不可用，本功能仍可工作（前台探测退化到 dumpsys root 解析）。\n" +
-            "12. 与广告拦截无关：本功能纯性能监控，不参与任何 VPN/广告拦截路径，启用/关闭悬浮窗不影响广告拦截效果。"
+            "13. 与 Root 隐藏的关系：两者都在 /data/adb/ 下创建工作目录、都用 SuSession 执行 root 命令、都用 nohup sh 持久运行。但 Root 隐藏是 zygisk mount bind 隐藏路径 + prop 伪装，防的是 Root 检测；游戏防设备标记是 chmod + 文件清理，防的是设备识别追踪，互不冲突可同时启用。"
 
         fun createIntent(context: Context, title: String, content: String): Intent {
             return Intent(context, GuideActivity::class.java)
