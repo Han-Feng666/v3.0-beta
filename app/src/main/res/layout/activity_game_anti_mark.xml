@@ -172,7 +172,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
                 android:lineSpacingExtra="2dp"
-                android:text="1. 必须划掉后台退出游戏（不要直接按 Home），否则无法触发清理。\n2. 真死指纹条件：所有列出的游戏都还在后台运行，就关机刷机清数据。重启不会触发真死（开机后会自动还原权限）。\n3. 关闭监听后建议点手动恢复权限确保 /mnt/vendor/persist/data 恢复 700，否则其他系统服务可能写入失败。\n4. 骁龙 8 Elite 5 已自动跳过权限修改，仅清理文件，不会触发 TEE 损坏风险。\n5. 随机修改 AndroidID/SSAID 后必须重启手机生效。"
+                android:text="1. 必须划掉后台退出游戏，否则无法触发清理。\n2. 真死指纹条件：所有列出的游戏都还在后台运行，就关机刷机清数据。重启不会触发真死（开机后会自动还原权限）。\n3. 关闭监听后建议点手动恢复权限确保 /mnt/vendor/persist/data 恢复 700，否则其他系统服务可能写入失败。\n4. 骁龙 8 Elite 5 已自动跳过权限修改，仅清理文件，不会触发 TEE 损坏风险。\n5. 随机修改 AndroidID/SSAID 后必须重启手机生效。"
                 android:textColor="@color/hf_text_secondary"
                 android:textSize="12sp" />
         </LinearLayout>

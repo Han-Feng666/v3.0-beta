@@ -104,6 +104,13 @@ class RootHideScopeFragment : Fragment() {
         return root
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (view != null) {
+            loadApps()
+        }
+    }
+
     private fun loadApps() {
         loadVersion++
         val requestVersion = loadVersion

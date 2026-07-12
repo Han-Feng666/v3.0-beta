@@ -397,7 +397,7 @@ class GuideActivity : BaseActivity() {
             "8. 骁龙 8 Elite 5（SM8850）特判：进入页面时自动检测 SoC，若匹配则自动设置 SM8850 标志位，并跳过 chmod 000 / chmod 700 步骤，仅执行文件清理，防止 TEE 损坏。\n" +
             "9. 查看守护日志按钮：tail 200 行 watcher.log，包含 watcher started、permission set to 000、permission restored、CLEANED 等事件，便于排查守护是否真的在工作。\n" +
             "10. 手动恢复权限按钮：把 /mnt/vendor/persist/data 权限立即设为 700。如果守护未正确还原权限（比如寒枫被杀导致无后续 sleep），可手动触发恢复。\n" +
-            "11. 真死指纹条件：只有当列表中所有游戏都还运行在后台（pidof 返回非空）就关机刷机清数据。正常使用场景下：必须划掉后台退出游戏（不要按 Home），下一轮扫描检测到没有 pidof 时会自动清理并还原权限，不会触发真死。\n" +
+            "11. 真死指纹条件：只有当列表中所有游戏都还运行在后台（pidof 返回非空）就关机刷机清数据。正常使用场景下：必须划掉后台退出游戏，下一轮扫描检测到没有 pidof 时会自动清理并还原权限，不会触发真死。\n" +
             "12. 重启不会真死：守护脚本启动时会先显式 chmod 700 还原权限，重启后系统其它服务可正常写入 /mnt/vendor/persist/data。\n" +
             "13. 与 Root 隐藏的关系：两者都在 /data/adb/ 下创建工作目录、都用 SuSession 执行 root 命令、都用 nohup sh 持久运行。但 Root 隐藏是 zygisk mount bind 隐藏路径 + prop 伪装，防的是 Root 检测；游戏防设备标记是 chmod + 文件清理，防的是设备识别追踪，互不冲突可同时启用。\n\n" +
             "二十四、性能占用监控与悬浮窗说明（需 Root + Shizuku）\n" +
