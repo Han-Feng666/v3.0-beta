@@ -120,54 +120,63 @@ class RootHideScopeFragment : Fragment() {
         val selfPkg = ctx.packageName
         loadJob = lifecycleScope.launch {
             try {
-                val apps = withContext(Dispatchers.Default) {
+                val apps = withContext(Dispatchers.IO) {
                     val scopePackages = RootHideRepository.getScopePackages(ctx)
                     @Suppress("DEPRECATION")
                     val flags = android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES or
                         android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS or
                         android.content.pm.PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
-                    val visiblePackages = pm.getInstalledPackages(flags)
-                        .asSequence()
-                        .filter { it.packageName != selfPkg && it.applicationInfo != null }
-                        .map { info ->
+                    val rawInfos = runCatching {
+                        pm.getInstalledApplications(flags)
+                    }.getOrNull() ?: runCatching {
+                        @Suppress("DEPRECATION")
+                        pm.getInstalledPackages(0)
+                            .mapNotNull { it.applicationInfo }
+                    }.getOrNull() ?: emptyList()
+
+                    val visibleList = rawInfos.asSequence()
+                        .filter { it.packageName != selfPkg }
+                        .map { ai ->
                             InstalledApp(
-                                label = runCatching { info.applicationInfo!!.loadLabel(pm).toString() }.getOrDefault(info.packageName),
-                                packageName = info.packageName,
-                                icon = runCatching { info.applicationInfo!!.loadIcon(pm) }.getOrNull(),
+                                label = runCatching { pm.getApplicationLabel(ai).toString() }
+                                    .getOrDefault(ai.packageName),
+                                packageName = ai.packageName,
+                                icon = null,
                                 whitelisted = false,
                                 coexistSelected = false,
                                 coexistRecommended = false,
-                                rootHideSelected = info.packageName in scopePackages
+                                rootHideSelected = ai.packageName in scopePackages
                             )
                         }
+                        .distinctBy { it.packageName }
+                        .sortedBy { it.label.lowercase() }
                         .toList()
 
-                    val thirdPartyVisible = visiblePackages.count {
-                        (it.rootHideSelected || true) && runCatching {
-                            val ai = pm.getApplicationInfo(it.packageName, 0)
+                    val visibleNames = visibleList.mapTo(hashSetOf()) { it.packageName }
+                    val thirdPartyVisibleCount = rawInfos.count { ai ->
+                        ai.packageName != selfPkg &&
                             (ai.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0
-                        }.getOrDefault(false)
                     }
-                    val rootPackages = if (thirdPartyVisible <= 1) loadThirdPartyPackagesViaRoot() else emptyList()
-                    val visibleNames = visiblePackages.mapTo(hashSetOf()) { it.packageName }
-                    val rootOnlyApps = rootPackages
-                        .asSequence()
-                        .filter { it != selfPkg && it !in visibleNames }
-                        .map { pkg ->
-                            val appInfo = runCatching { pm.getApplicationInfo(pkg, flags) }.getOrNull()
-                            InstalledApp(
-                                label = runCatching { appInfo?.loadLabel(pm)?.toString() }.getOrNull() ?: pkg,
-                                packageName = pkg,
-                                icon = runCatching { appInfo?.loadIcon(pm) }.getOrNull(),
-                                whitelisted = false,
-                                coexistSelected = false,
-                                coexistRecommended = false,
-                                rootHideSelected = pkg in scopePackages
-                            )
-                        }
-                        .toList()
-
-                    (visiblePackages + rootOnlyApps).distinctBy { it.packageName }.sortedBy { it.label.lowercase() }
+                    val rootOnlyApps = if (thirdPartyVisibleCount == 0) {
+                        loadThirdPartyPackagesViaRoot()
+                            .filter { it != selfPkg && it !in visibleNames }
+                            .map { pkg ->
+                                val ai = runCatching { pm.getApplicationInfo(pkg, flags) }.getOrNull()
+                                InstalledApp(
+                                    label = runCatching { ai?.let { pm.getApplicationLabel(it).toString() } }
+                                        .getOrNull() ?: pkg,
+                                    packageName = pkg,
+                                    icon = null,
+                                    whitelisted = false,
+                                    coexistSelected = false,
+                                    coexistRecommended = false,
+                                    rootHideSelected = pkg in scopePackages
+                                )
+                            }
+                    } else {
+                        emptyList()
+                    }
+                    visibleList + rootOnlyApps
                 }
                 if (requestVersion != loadVersion) return@launch
                 allApps = apps

@@ -355,15 +355,14 @@ class RootHideManager {
     /** 检测 Zygisk Next 模块是否安装（内置 Shamiko 同等能力，无需额外装 Shamiko）。 */
     fun checkZygiskNextInstalled(): Boolean {
         val r = runRootShell(
-            "shopt -s nullglob nocaseglob; " +
-                "for base in /data/adb/modules /data/adb/modules_update; do " +
-                "for f in \"\$base\"/zygisk*/module.prop \"\$base\"/Zygisk*/module.prop; do " +
+            "for base in /data/adb/modules /data/adb/modules_update; do " +
+                "for f in \"\$base\"/[zZ]ygisk*/module.prop; do " +
                 "test -f \"\$f\" || continue; " +
-                "grep -Eqi '^id=.*(zygisk[-_ ]?next|zygisksu)' \"\$f\" 2>/dev/null && echo FOUND && exit 0; " +
-                "grep -Eqi '^name=.*(Zygisk[ _]?Next|ZygiskSU|Zygisk-Next)' \"\$f\" 2>/dev/null && echo FOUND && exit 0; " +
+                "if grep -Eqi '^id=.*(zygisk[-_ ]?next|zygisksu)' \"\$f\" 2>/dev/null; then echo FOUND; exit 0; fi; " +
+                "if grep -Eqi '^name=.*(Zygisk[ _]?Next|ZygiskSU|Zygisk-Next)' \"\$f\" 2>/dev/null; then echo FOUND; exit 0; fi; " +
                 "done; " +
                 "done 2>/dev/null; echo NOTFOUND",
-            5
+            6
         )
         return r.output.trim() == "FOUND"
     }

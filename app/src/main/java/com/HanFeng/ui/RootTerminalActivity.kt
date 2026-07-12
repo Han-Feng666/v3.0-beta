@@ -170,14 +170,17 @@ class RootTerminalActivity : BaseActivity() {
                 if (initialScriptPath == null) {
                     Thread.sleep(600)
                 }
+                if (initialScriptPath != null) {
+                    Thread {
+                        Thread.sleep(200)
+                        executeScriptInShell(initialScriptPath!!)
+                    }.start()
+                }
                 runOnUiThreadSafe {
                     tvStatus.text = "已连接"
                     tvPrompt.text = "root# "
                     appendOutput("Root 终端已连接（交互模式，支持需要输入的脚本）\n")
-                    val scriptPath = initialScriptPath
-                    if (scriptPath != null) {
-                        executeScriptInShell(scriptPath)
-                    } else {
+                    if (initialScriptPath == null) {
                         appendOutput("--- 直接输入命令，回车执行 ---\nroot# ")
                     }
                 }

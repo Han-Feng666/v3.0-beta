@@ -3,6 +3,7 @@ package com.HanFeng.ui
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.graphics.drawable.Drawable
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
@@ -14,6 +15,10 @@ class AppListAdapter(
     private val checkedSelector: (InstalledApp) -> Boolean = { it.whitelisted },
     private val onToggle: (InstalledApp, Boolean) -> Unit
 ) : ListAdapter<InstalledApp, AppListAdapter.AppHolder>(DIFF_CALLBACK) {
+
+    private val iconCache = HashMap<String, Drawable>()
+    private val iconExecutor = java.util.concurrent.Executors.newFixedThreadPool(2)
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     fun submit(items: List<InstalledApp>) {
         submitList(items)
@@ -30,9 +35,28 @@ class AppListAdapter(
     inner class AppHolder(private val binding: ItemAppBinding) : RecyclerView.ViewHolder(binding.root) {
         fun bind(item: InstalledApp) {
             binding.loadingIndicator.visibility = View.GONE
-            Glide.with(binding.appIcon)
-                .load(item.icon)
-                .into(binding.appIcon)
+            val existing = item.icon ?: iconCache[item.packageName]
+            if (existing != null) {
+                binding.appIcon.setImageDrawable(existing)
+            } else {
+                binding.appIcon.setImageDrawable(null)
+                val ctx = binding.root.context
+                iconExecutor.execute {
+                    val dr = runCatching {
+                        ctx.packageManager.getApplicationIcon(item.packageName)
+                    }.getOrNull()
+                    if (dr != null) {
+                        iconCache[item.packageName] = dr
+                        mainHandler.post {
+                            if (bindingAdapterPosition >= 0 &&
+                                bindingAdapterPosition < itemCount &&
+                                getItem(bindingAdapterPosition).packageName == item.packageName) {
+                                binding.appIcon.setImageDrawable(dr)
+                            }
+                        }
+                    }
+                }
+            }
             binding.appName.text = item.label
             binding.packageName.text = item.packageName
             binding.whitelistBox.setOnCheckedChangeListener(null)
