@@ -412,13 +412,7 @@ class GuideActivity : BaseActivity() {
             "9. 悬浮窗依赖服务：启用悬浮窗会启动 FloatingPerfService 前台服务（通知渠道 '性能悬浮窗'，最小优先级通知不会响铃，最小化耗电）。关闭悬浮窗开关会停止服务、移除悬浮窗。寒枫被杀后服务可能被回收，下次进入到本页打开开关会重新拉起。\n" +
             "10. /proc 可读性：Android 10+ 对非自身进程的 /proc/[pid]/stat 默认不可读，必须 Root；Shizuku ADB 模式（uid 2000）也无法读，Shizuku Root 模式可以走 UserService 内 ProcessBuilder，但本项目统一走 SuSession root shell 一次性 cat 全部进程 stat，效率更高。\n" +
             "11. Shizuku 预热：本功能首次使用前需在设置页 '^ Shizuku 强力控制^' 入口授权并启动 Shizuku，确保前台探测可用。即使 Shizuku 不可用，本功能仍可工作（前台探测退化到 dumpsys root 解析）。\n" +
-            "12. 与广告拦截无关：本功能纯性能监控，不参与任何 VPN/广告拦截路径，启用/关闭悬浮窗不影响广告拦截效果。\n\n" +
-            "二十五、赞助开发者说明\n" +
-            "1. 入口：设置页底部 '赞助开发者' 按钮。\n" +
-            "2. 内容：跳转到 RewardActivity，全屏黑色背景展示开发者赞赏码图片（首次使用为占位图）。\n" +
-            "3. 替换赞赏码：将真实付款码图片命名为 reward_qr.png 放在 app/src/main/res/drawable 目录下，RewardActivity 的 ImageView 会自动引用；不需要改任何代码。\n" +
-            "4. 退出：按返回键即可关闭页面。\n" +
-            "5. 赞助纯属自愿，不影响 App 任何功能。"
+            "12. 与广告拦截无关：本功能纯性能监控，不参与任何 VPN/广告拦截路径，启用/关闭悬浮窗不影响广告拦截效果。"
 
         fun createIntent(context: Context, title: String, content: String): Intent {
             return Intent(context, GuideActivity::class.java)
