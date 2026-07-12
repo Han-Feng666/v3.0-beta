@@ -39,8 +39,7 @@
             android:background="#33FFFFFF"
             android:contentDescription="赞赏码"
             android:padding="8dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/reward_qr" />
+            android:scaleType="fitCenter" />
 
         <TextView
             android:id="@+id/txtRewardHint"
@@ -48,9 +47,10 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
             android:gravity="center"
-            android:text="（占位图：开发者将替换为真实赞赏码）"
+            android:text="未放入赞赏码：请把 reward_qr.png 放到 app/src/main/assets/custom/"
             android:textColor="#99FFFFFF"
-            android:textSize="11sp" />
+            android:textSize="11sp"
+            android:visibility="gone" />
 
     </LinearLayout>
 
