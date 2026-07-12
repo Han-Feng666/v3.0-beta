@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.Build
 import android.os.Process
 import android.os.SystemClock
+import com.HanFeng.service.IdleShutdownController
 import java.io.File
 import java.io.FileOutputStream
 import java.io.PrintWriter
@@ -26,6 +27,8 @@ class HanFengApp : Application() {
         writeStartupLog("Application.onCreate")
         installGlobalCrashHandler()
         writeStartupLog("CrashHandler installed")
+        IdleShutdownController.init(this)
+        writeStartupLog("IdleShutdownController installed")
     }
 
     private fun installGlobalCrashHandler() {

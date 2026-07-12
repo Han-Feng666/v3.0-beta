@@ -121,6 +121,8 @@ object RootHideAppWatcher {
         return started
     }
 
+    fun isRunning(): Boolean = running.get()
+
     fun stop(): Boolean {
         if (!suSession.isSessionOpen() && !suSession.open(8)) return false
         val r = suSession.execute(
