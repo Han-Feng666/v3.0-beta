@@ -92,6 +92,10 @@
             android:exported="false" />
 
         <activity
+            android:name="com.HanFeng.ui.RewardActivity"
+            android:exported="false" />
+
+        <activity
             android:name="com.HanFeng.ui.PromoComponentGovernActivity"
             android:exported="false" />
 

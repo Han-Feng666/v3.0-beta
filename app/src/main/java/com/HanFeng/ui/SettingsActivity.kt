@@ -70,6 +70,7 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnResetHideBackground: Button
     private lateinit var btnExportLogs: Button
     private lateinit var btnExportRules: Button
+    private lateinit var btnRewardDeveloper: Button
     private lateinit var btnExportCertificate: Button
     private lateinit var btnInstallSystemCert: Button
     private lateinit var btnModifyDeviceId: Button
@@ -149,6 +150,7 @@ class SettingsActivity : BaseActivity() {
         btnResetHideBackground = findViewById(R.id.btnResetHideBackground)
         btnExportLogs = findViewById(R.id.btnExportLogs)
         btnExportRules = findViewById(R.id.btnExportRules)
+        btnRewardDeveloper = findViewById(R.id.btnRewardDeveloper)
         btnExportCertificate = findViewById(R.id.btnExportCertificate)
         btnInstallSystemCert = findViewById(R.id.btnInstallSystemCert)
         btnModifyDeviceId = findViewById(R.id.btnModifyDeviceId)
@@ -300,6 +302,12 @@ class SettingsActivity : BaseActivity() {
         }
         btnExportRules.setOnClickListener {
             exportRulesToUser()
+        }
+        btnRewardDeveloper.setOnClickListener {
+            launchActivitySafely(
+                RewardActivity.createIntent(this),
+                failureMessage = "打开赞赏页失败"
+            )
         }
         btnExportCertificate.setOnClickListener {
             exportCertificateToUser()
