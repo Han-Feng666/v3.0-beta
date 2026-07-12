@@ -151,7 +151,7 @@ class PerformanceMonitorActivity : BaseActivity() {
     }
 
     private fun formatStatus(count: Int, cpuSum: Int, memSumKb: Long): String {
-        return "共 $count 个进程  CPU 总占用 $cpuSum%  内存 RSS ${formatMem(memSumKb)}"
+        return "共 $count 个进程  CPU 总占用 $cpuSum% (上限 ${Runtime.getRuntime().availableProcessors() * 100}%)  内存 RSS ${formatMem(memSumKb)}"
     }
 
     override fun onDestroy() {
@@ -198,7 +198,7 @@ class PerformanceMonitorActivity : BaseActivity() {
             val item = items[position]
             view.findViewById<TextView>(R.id.txtPid).text = item.pid.toString()
             view.findViewById<TextView>(R.id.txtName).text = item.name
-            view.findViewById<TextView>(R.id.txtCpu).text = "%.1f%%".format(item.cpuPercent.coerceAtMost(999f))
+            view.findViewById<TextView>(R.id.txtCpu).text = "%.1f%%".format(item.cpuPercent)
             view.findViewById<TextView>(R.id.txtMem).text = formatMem(item.rssKb)
             view.findViewById<android.widget.ProgressBar>(R.id.cpuBar).progress =
                 item.cpuPercent.toInt().coerceIn(0, 100)

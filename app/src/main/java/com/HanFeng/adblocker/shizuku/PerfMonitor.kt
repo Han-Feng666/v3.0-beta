@@ -23,7 +23,27 @@ object PerfMonitor {
 
     @Volatile private var lastTickSnapshot: Map<Int, Long> = emptyMap()
     @Volatile private var lastWallClockNanos: Long = 0L
+    @Volatile private var cachedUserHz: Long = 0L
+    @Volatile private var cachedCoreCount: Int = 0
     private const val PAGE_SIZE_KB = 4L
+    private const val DEFAULT_USER_HZ = 100L
+
+    private fun userHz(): Long {
+        cachedUserHz.let { if (it > 0) return it }
+        val hz = runCatching {
+            val out = runRootShell("getconf CLK_TCK 2>/dev/null", 4).output.trim()
+            out.toLongOrNull()
+        }.getOrNull() ?: DEFAULT_USER_HZ
+        cachedUserHz = hz
+        return hz
+    }
+
+    private fun coreCount(): Int {
+        cachedCoreCount.let { if (it > 0) return it }
+        val n = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        cachedCoreCount = n
+        return n
+    }
 
     /**
      * 一次性快照所有运行中进程的性能数据；CPU 占比基于与上次调用之间的节拍差分计算（初次调用全部为 0）。
@@ -67,18 +87,17 @@ object PerfMonitor {
         if (currentTicks.isEmpty()) return emptyList()
 
         val nowNanos = System.nanoTime()
-        val wallElapsedJiffies = ((nowNanos - lastWallClockNanos) / 10_000_000L).coerceAtLeast(1L)
+        val wallElapsedSeconds = ((nowNanos - lastWallClockNanos) / 1_000_000_000.0).coerceAtLeast(0.001)
         val previous = lastTickSnapshot
         val foregroundPackage = runCatching { detectForegroundPackageSafely(context) }.getOrNull()
+        val ticksPerSecond = userHz().toDouble().coerceAtLeast(1.0)
+        val totalCpuCapacity = coreCount() * 100f
 
         val results = currentTicks.entries.map { (pid, ticks) ->
             val previousTicks = previous[pid] ?: 0L
             val deltaTicks = (ticks - previousTicks).coerceAtLeast(0L)
-            val cpuPercent = if (wallElapsedJiffies == 0L) {
-                0f
-            } else {
-                ((deltaTicks.toDouble() / wallElapsedJiffies) * 100f).toFloat()
-            }
+            val ratio = deltaTicks.toDouble() / (wallElapsedSeconds * ticksPerSecond)
+            val cpuPercent = (ratio * 100f).toFloat().coerceIn(0f, totalCpuCapacity)
             val name = currentNames[pid] ?: pid.toString()
             val mem = currentVssKb[pid] ?: 0L
             val rss = currentRssKb[pid] ?: 0L
