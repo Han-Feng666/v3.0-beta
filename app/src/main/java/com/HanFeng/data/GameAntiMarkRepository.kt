@@ -15,6 +15,16 @@ object GameAntiMarkRepository {
     const val PID_FILE = "/data/adb/GameAntiMark/watcher.pid"
     const val WATCHER_SCRIPT = "/data/adb/GameAntiMark/watcher.sh"
     const val TARGET_DIR = "/mnt/vendor/persist/data"
+    const val TARGET_DIR_FALLBACK_GENERAL = "/data/vendor/persist"
+    const val TARGET_DIR_FALLBACK_MNT = "/mnt/vendor/persist"
+    const val TARGET_DIR_FALLBACK_VENDOR = "/data/vendor"
+
+    val TARGET_DIR_CANDIDATES = listOf(
+        TARGET_DIR,
+        TARGET_DIR_FALLBACK_GENERAL,
+        TARGET_DIR_FALLBACK_MNT,
+        TARGET_DIR_FALLBACK_VENDOR
+    )
 
     val DEFAULT_TARGET_PACKAGES = linkedSetOf(
         "com.activision.callofduty.shooter",

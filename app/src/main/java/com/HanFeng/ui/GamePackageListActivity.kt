@@ -122,10 +122,12 @@ class GamePackageListActivity : BaseActivity() {
             }
             if (status.running) {
                 withContext(Dispatchers.IO) {
+                    val sm8850 = GameAntiMarkManager.checkSm8850()
+                    GameAntiMarkRepository.setSm8850Detected(this@GamePackageListActivity, sm8850)
                     GameAntiMarkManager.stop()
                     GameAntiMarkManager.start(
                         this@GamePackageListActivity,
-                        sm8850Fallback = status.sm8850Detected
+                        sm8850Fallback = sm8850
                     )
                 }
             }

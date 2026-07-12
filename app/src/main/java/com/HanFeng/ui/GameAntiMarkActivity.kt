@@ -1,10 +1,10 @@
 package com.HanFeng.ui
 
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.view.View
+import android.os.Handler
+import android.os.Looper
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -23,6 +23,13 @@ class GameAntiMarkActivity : BaseActivity() {
     private lateinit var binding: ActivityGameAntiMarkBinding
     private var sm8850Detected = false
     private var watcherReady = false
+    private val handler = Handler(Looper.getMainLooper())
+    private val statusRefreshRunnable = object : Runnable {
+        override fun run() {
+            if (!isFinishing && !isDestroyed) fastRefreshStatus()
+            if (watcherReady) handler.postDelayed(this, 3000L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,13 +52,11 @@ class GameAntiMarkActivity : BaseActivity() {
                 failureMessage = "打开游戏包名列表失败"
             )
         }
-        binding.btnRandomizeIds.setOnClickListener { confirmRandomizeIds() }
         binding.btnShowLog.setOnClickListener { showWatcherLog() }
         binding.btnRestorePermission.setOnClickListener { restorePermissionManually() }
 
         binding.switchWatcher.isEnabled = false
         binding.btnPackageList.isEnabled = false
-        binding.btnRandomizeIds.isEnabled = false
         binding.btnShowLog.isEnabled = false
         binding.btnRestorePermission.isEnabled = false
 
@@ -61,6 +66,18 @@ class GameAntiMarkActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         refreshStatus()
+        handler.removeCallbacks(statusRefreshRunnable)
+        handler.postDelayed(statusRefreshRunnable, 3000L)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        handler.removeCallbacks(statusRefreshRunnable)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        handler.removeCallbacks(statusRefreshRunnable)
     }
 
     private fun refreshStatus() {
@@ -70,7 +87,6 @@ class GameAntiMarkActivity : BaseActivity() {
                 s.isSessionOpen() || s.open(15)
             }
             binding.btnPackageList.isEnabled = rootOk
-            binding.btnRandomizeIds.isEnabled = rootOk
             binding.btnShowLog.isEnabled = rootOk
             binding.btnRestorePermission.isEnabled = rootOk
             binding.switchWatcher.isEnabled = rootOk
@@ -78,6 +94,7 @@ class GameAntiMarkActivity : BaseActivity() {
 
             if (!rootOk) {
                 binding.tvStatus.text = "Root 不可用。该功能依赖 Root（Magisk/KernelSU/APatch）。"
+                handler.removeCallbacks(statusRefreshRunnable)
                 return@launch
             }
 
@@ -91,29 +108,24 @@ class GameAntiMarkActivity : BaseActivity() {
         }
     }
 
+    private fun fastRefreshStatus() {
+        lifecycleScope.launch {
+            val status = withContext(Dispatchers.IO) {
+                GameAntiMarkManager.status(this@GameAntiMarkActivity)
+            }
+            if (!isFinishing && !isDestroyed) renderStatus(status)
+        }
+    }
+
     private fun renderStatus(status: GameAntiMarkManager.WatcherStatus) {
         val text = buildString {
-            append("监听守护状态：").append(if (status.running) "运行中" else "未运行")
+            append("守护：").append(if (status.running) "运行中" else "未运行")
             if (status.pid != null) append("（PID ${status.pid}）")
             appendLine()
-            append("Root 方案：").append(SuSession.getInstance().rootSolution.name)
-            if (SuSession.getInstance().rootVersion.isNotBlank()) {
-                append(" ").append(SuSession.getInstance().rootVersion)
-            }
-            appendLine()
-            if (status.sm8850Detected) {
-                append("SoC：骁龙 8 Elite 5（SM8850）— 已检测，跳过权限修改防 TEE 损坏")
-                appendLine()
-            }
-            append("游戏包名数量：").append(
-                GameAntiMarkRepository.getTargetPackages(this@GameAntiMarkActivity).size
-            ).appendLine()
-            append("当前运行中游戏：").append(status.gamesRunning).appendLine()
-            append("已清理次数：").append(status.cleanedCount).appendLine()
-            append("/mnt/vendor/persist/data 权限：").append(status.persistPerm).appendLine()
-            append("boot_completed：").append(if (status.bootCompleted) "是" else "否").appendLine()
+            append("运行中游戏：").append(status.gamesRunning).appendLine()
+            append("已清理次数：").append(status.cleanedCount)
             if (status.lastCleanedAt.isNotBlank()) {
-                append("最近一次清理：").append(status.lastCleanedAt)
+                append(" / 最近：").append(status.lastCleanedAt)
             }
         }
         binding.tvStatus.text = text
@@ -130,7 +142,11 @@ class GameAntiMarkActivity : BaseActivity() {
             binding.switchWatcher.isEnabled = false
             val result = withContext(Dispatchers.IO) {
                 if (start) {
-                    GameAntiMarkManager.start(this@GameAntiMarkActivity, sm8850Fallback = sm8850Detected)
+                    val started = GameAntiMarkManager.start(this@GameAntiMarkActivity, sm8850Fallback = sm8850Detected)
+                    if (started) {
+                        runCatching { GameAntiMarkManager.randomizeDeviceIds(this@GameAntiMarkActivity) }
+                    }
+                    started
                 } else {
                     GameAntiMarkManager.stopAndRestore(this@GameAntiMarkActivity)
                 }
@@ -144,33 +160,9 @@ class GameAntiMarkActivity : BaseActivity() {
                     if (watcherReady) toggleWatcher(isChecked)
                 }
             } else {
-                showShortToast(if (start) "防标记守护已启动" else "防标记守护已停止")
+                showShortToast(if (start) "防标记守护已启动（已随机 AndroidID/SSAID，重启后生效）" else "防标记守护已停止")
             }
             refreshStatus()
-        }
-    }
-
-    private fun confirmRandomizeIds() {
-        StableDialog.builder(this)
-            .setTitle("随机修改 AndroidID/SSAID")
-            .setMessage("将随机生成新的 android_id 并修改所有用户对每个游戏包名的 SSAID。\n\n需要重启手机后生效。建议在确认无重要签到/激活关系后再操作。\n\n是否继续？")
-            .setPositiveButton("确认修改") { _, _ -> executeRandomizeIds() }
-            .setNegativeButton("取消", null)
-            .showSafely(this, "Show randomize ids confirm failed")
-    }
-
-    private fun executeRandomizeIds() {
-        lifecycleScope.launch {
-            binding.btnRandomizeIds.isEnabled = false
-            val (ok, msg) = withContext(Dispatchers.IO) {
-                GameAntiMarkManager.randomizeDeviceIds(this@GameAntiMarkActivity)
-            }
-            binding.btnRandomizeIds.isEnabled = true
-            StableDialog.builder(this@GameAntiMarkActivity)
-                .setTitle(if (ok) "修改完成" else "修改失败")
-                .setMessage(msg)
-                .setPositiveButton("我知道了", null)
-                .showSafely(this@GameAntiMarkActivity, "Show randomize result failed")
         }
     }
 
@@ -192,11 +184,14 @@ class GameAntiMarkActivity : BaseActivity() {
             val ok = withContext(Dispatchers.IO) {
                 val s = SuSession.getInstance()
                 if (!s.isSessionOpen() && !s.open(10)) return@withContext false
-                val r = s.execute("chmod 700 '${GameAntiMarkRepository.TARGET_DIR}' 2>/dev/null && echo OK || echo NOSUCH", 5)
+                val cmd = GameAntiMarkRepository.TARGET_DIR_CANDIDATES.joinToString(" && ") {
+                    "chmod 700 '$it' 2>/dev/null"
+                } + " && echo OK || echo NOSUCH"
+                val r = s.execute(cmd, 5)
                 r.output.trim().let { it.contains("OK") || it.contains("NOSUCH") }
             }
             LogRepository.append(this@GameAntiMarkActivity, "[GameAntiMark] manual restore permission result=$ok")
-            showShortToast(if (ok) "已恢复 /mnt/vendor/persist/data 权限为 700" else "恢复权限失败，请检查 Root")
+            showShortToast(if (ok) "已恢复 persist 目录权限为 700" else "恢复权限失败，请检查 Root")
             if (ok) refreshStatus()
         }
     }

@@ -15,19 +15,21 @@ object GameAntiMarkManager {
         val pid: String?,
         val gamesRunning: Int,
         val lastCleanedAt: String,
-        val persistPerm: String,
-        val cleanedCount: Int,
-        val bootCompleted: Boolean,
-        val sm8850Detected: Boolean
+        val cleanedCount: Int
     )
 
     fun isRunning(): Boolean = running.get()
 
     fun checkSm8850(): Boolean {
         return try {
-            val soc = suSession.execute("getprop | grep -i soc | grep -q 'SM8850' && echo MATCH || echo NOMATCH", 5)
+            val socModel = suSession.execute("getprop ro.soc.model 2>/dev/null", 5)
                 .output.trim()
-            soc.contains("MATCH")
+            val platform = suSession.execute("getprop ro.board.platform 2>/dev/null", 5)
+                .output.trim()
+            socModel.equals("SM8850", ignoreCase = true) ||
+                platform.equals("SM8850", ignoreCase = true) ||
+                socModel.equals("SM8850P", ignoreCase = true) ||
+                platform.equals("SM8850P", ignoreCase = true)
         } catch (_: Exception) {
             false
         }
@@ -52,7 +54,7 @@ object GameAntiMarkManager {
         val script = buildScript(
             targetFile = GameAntiMarkRepository.DEFAULT_TARGET_FILE_PATH,
             stateDir = GameAntiMarkRepository.STATE_DIR,
-            targetDir = GameAntiMarkRepository.TARGET_DIR,
+            targetDirs = GameAntiMarkRepository.TARGET_DIR_CANDIDATES,
             logFile = GameAntiMarkRepository.LOG_FILE,
             sm8850Flag = if (sm8850Fallback) "1" else "0",
             mrpcsList = mrpcsList
@@ -104,7 +106,9 @@ object GameAntiMarkManager {
     fun stopAndRestore(context: Context): Boolean {
         val stopped = stop()
         if (stopped) {
-            suSession.execute("chmod 700 '${GameAntiMarkRepository.TARGET_DIR}' 2>/dev/null", 3)
+            GameAntiMarkRepository.TARGET_DIR_CANDIDATES.forEach { dir ->
+                suSession.execute("chmod 700 '$dir' 2>/dev/null", 3)
+            }
             suSession.execute("rm -rf '${GameAntiMarkRepository.STATE_DIR}' 2>/dev/null", 3)
             GameAntiMarkRepository.setAutoWatcherEnabled(context, false)
             LogRepository.append(context, "[$TAG] watcher stopped, permission restored to 700")
@@ -114,7 +118,7 @@ object GameAntiMarkManager {
 
     fun status(context: Context): WatcherStatus {
         if (!suSession.isSessionOpen() && !suSession.open(8)) {
-            return WatcherStatus(false, null, 0, "", "unknown", 0, false, GameAntiMarkRepository.isSm8850Detected(context))
+            return WatcherStatus(false, null, 0, "", 0)
         }
         val pidRaw = suSession.execute("cat '${GameAntiMarkRepository.PID_FILE}' 2>/dev/null || echo NONE", 3)
             .output.trim()
@@ -128,21 +132,14 @@ object GameAntiMarkManager {
             .output.trim().toIntOrNull() ?: 0
         val cleanedCount = suSession.execute("grep -c 'CLEANED' '${GameAntiMarkRepository.LOG_FILE}' 2>/dev/null || echo 0", 3)
             .output.trim().toIntOrNull() ?: 0
-        val persistPerm = suSession.execute("stat -c '%a' '${GameAntiMarkRepository.TARGET_DIR}' 2>/dev/null || echo UNKNOWN", 3)
-            .output.trim()
         val lastCleanedAt = suSession.execute("grep 'CLEANED' '${GameAntiMarkRepository.LOG_FILE}' 2>/dev/null | tail -1 | head -c 24", 3)
             .output.trim()
-        val bootCompleted = suSession.execute("getprop sys.boot_completed", 3).output.trim() == "1"
-        val sm8850 = GameAntiMarkRepository.isSm8850Detected(context)
         return WatcherStatus(
             running = pidIsAlive,
             pid = if (pidRaw == "NONE") null else pidRaw,
             gamesRunning = gamesRunning,
             lastCleanedAt = lastCleanedAt,
-            persistPerm = persistPerm,
-            cleanedCount = cleanedCount,
-            bootCompleted = bootCompleted,
-            sm8850Detected = sm8850
+            cleanedCount = cleanedCount
         )
     }
 
@@ -205,7 +202,7 @@ object GameAntiMarkManager {
     private fun buildScript(
         targetFile: String,
         stateDir: String,
-        targetDir: String,
+        targetDirs: List<String>,
         logFile: String,
         sm8850Flag: String,
         mrpcsList: String
@@ -215,7 +212,6 @@ object GameAntiMarkManager {
         appendLine("LOG='$logFile'")
         appendLine("STATE_DIR='$stateDir'")
         appendLine("TARGET_PACKAGES_FILE='$targetFile'")
-        appendLine("TARGET_DIR='$targetDir'")
         appendLine("IS_SM8850='$sm8850Flag'")
         appendLine("MRPCS_PACKAGES='$mrpcsList'")
         appendLine("CHECK_INTERVAL=2")
@@ -258,14 +254,50 @@ object GameAntiMarkManager {
         appendLine("  done")
         appendLine("}")
         appendLine("")
-        appendLine("set_000_permissions() {")
-        appendLine("  [ \"\$IS_SM8850\" = \"1\" ] && return")
-        appendLine("  [ -d \"\$TARGET_DIR\" ] && chmod 000 \"\$TARGET_DIR\" 2>/dev/null")
+        appendLine("set_perm_000_all() {")
+        appendLine("  if [ \"\$IS_SM8850\" = \"1\" ]; then return 2; fi")
+        appendLine("  local total=0 success=0 failed_dirs=\"\"")
+        for (dir in targetDirs) {
+            appendLine("  if [ -d '$dir' ]; then")
+            appendLine("    total=\$((total + 1))")
+            appendLine("    chmod 000 '$dir' 2>/dev/null")
+            appendLine("    cur=\$(stat -c '%a' '$dir' 2>/dev/null)")
+            appendLine("    if [ \"\$cur\" = \"000\" ]; then")
+            appendLine("      success=\$((success + 1))")
+            appendLine("    else")
+            appendLine("      failed_dirs=\"\$failed_dirs '$dir'(=\$cur)\"")
+            appendLine("    fi")
+            appendLine("  fi")
+        }
+        appendLine("  PERSIST_TOTAL=\$total")
+        appendLine("  PERSIST_SUCCESS=\$success")
+        appendLine("  PERSIST_FAILED=\"\$failed_dirs\"")
+        appendLine("  if [ \"\$total\" -eq 0 ]; then return 3; fi")
+        appendLine("  if [ \"\$success\" -eq \"\$total\" ]; then return 0; fi")
+        appendLine("  return 1")
         appendLine("}")
         appendLine("")
-        appendLine("restore_to_700_permissions() {")
-        appendLine("  [ \"\$IS_SM8850\" = \"1\" ] && return")
-        appendLine("  [ -d \"\$TARGET_DIR\" ] && chmod 700 \"\$TARGET_DIR\" 2>/dev/null")
+        appendLine("restore_perm_700_all() {")
+        appendLine("  if [ \"\$IS_SM8850\" = \"1\" ]; then return 2; fi")
+        appendLine("  local total=0 success=0 failed_dirs=\"\"")
+        for (dir in targetDirs) {
+            appendLine("  if [ -d '$dir' ]; then")
+            appendLine("    total=\$((total + 1))")
+            appendLine("    chmod 700 '$dir' 2>/dev/null")
+            appendLine("    cur=\$(stat -c '%a' '$dir' 2>/dev/null)")
+            appendLine("    if [ \"\$cur\" = \"700\" ]; then")
+            appendLine("      success=\$((success + 1))")
+            appendLine("    else")
+            appendLine("      failed_dirs=\"\$failed_dirs '$dir'(=\$cur)\"")
+            appendLine("    fi")
+            appendLine("  fi")
+        }
+        appendLine("  PERSIST_TOTAL=\$total")
+        appendLine("  PERSIST_SUCCESS=\$success")
+        appendLine("  PERSIST_FAILED=\"\$failed_dirs\"")
+        appendLine("  if [ \"\$total\" -eq 0 ]; then return 3; fi")
+        appendLine("  if [ \"\$success\" -eq \"\$total\" ]; then return 0; fi")
+        appendLine("  return 1")
         appendLine("}")
         appendLine("")
         appendLine("try_cleanup_package() {")
@@ -282,10 +314,22 @@ object GameAntiMarkManager {
         appendLine("  sleep 1")
         appendLine("done")
         appendLine("")
-        appendLine("chmod 700 \"\$TARGET_DIR\" 2>/dev/null")
-        appendLine("")
         appendLine("if [ \"\$IS_SM8850\" = \"1\" ]; then")
         appendLine("  log_msg \"SM8850 detected, skipping permission changes (TEE protection mode)\"")
+        appendLine("else")
+        for (dir in targetDirs) {
+            appendLine("  if [ -d '$dir' ]; then")
+            appendLine("    chmod 700 '$dir' 2>/dev/null")
+            appendLine("    cur_mode=\$(stat -c '%a' '$dir' 2>/dev/null)")
+            appendLine("    if [ \"\$cur_mode\" != \"700\" ]; then")
+            appendLine("      log_msg \"WARN: initial chmod 700 failed for $dir, current=\$cur_mode\"")
+            appendLine("    else")
+            appendLine("      log_msg \"OK: $dir ready, mode=700\"")
+            appendLine("    fi")
+            appendLine("  else")
+            appendLine("    log_msg \"INFO: $dir does not exist on this device\"")
+            appendLine("  fi")
+        }
         appendLine("fi")
         appendLine("")
         appendLine("create_state_dir")
@@ -311,15 +355,25 @@ object GameAntiMarkManager {
         appendLine("  done < \"\$TARGET_PACKAGES_FILE\"")
         appendLine("")
         appendLine("  if [ \"\$games_were_running\" -eq 0 ] && [ \"\$games_running_now\" -gt 0 ]; then")
-        appendLine("    set_000_permissions")
-        appendLine("    log_msg \"permission set to 000 (games started)\"")
+        appendLine("    set_perm_000_all")
+        appendLine("    case \"\$?\" in")
+        appendLine("      0) log_msg \"permission set to 000 (games started), all \$PERSIST_TOTAL dirs\" ;;")
+        appendLine("      1) log_msg \"WARN: chmod 000 partial: \$PERSIST_SUCCESS/\$PERSIST_TOTAL succeeded, failed=\$PERSIST_FAILED\" ;;")
+        appendLine("      2) ;;")
+        appendLine("      3) log_msg \"WARN: no persist dir exists, cannot chmod 000\" ;;")
+        appendLine("    esac")
         appendLine("    sleep 4")
         appendLine("  fi")
         appendLine("")
         appendLine("  if [ \"\$games_were_running\" -gt 0 ] && [ \"\$games_running_now\" -eq 0 ]; then")
         appendLine("    sleep \"\$CHECK_INTERVAL\"")
-        appendLine("    restore_to_700_permissions")
-        appendLine("    log_msg \"permission restored to 700 (games stopped)\"")
+        appendLine("    restore_perm_700_all")
+        appendLine("    case \"\$?\" in")
+        appendLine("      0) log_msg \"permission restored to 700 (games stopped), all \$PERSIST_TOTAL dirs\" ;;")
+        appendLine("      1) log_msg \"WARN: chmod 700 partial: \$PERSIST_SUCCESS/\$PERSIST_TOTAL succeeded, failed=\$PERSIST_FAILED\" ;;")
+        appendLine("      2) ;;")
+        appendLine("      3) log_msg \"WARN: no persist dir exists, cannot chmod 700\" ;;")
+        appendLine("    esac")
         appendLine("  fi")
         appendLine("")
         appendLine("  games_were_running=\$games_running_now")

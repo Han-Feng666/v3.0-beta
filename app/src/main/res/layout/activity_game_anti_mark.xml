@@ -49,15 +49,6 @@
             android:orientation="vertical">
 
             <TextView
-                android:id="@+id/tvGuide"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:lineSpacingExtra="2dp"
-                android:text="腾讯游戏防设备标记清理。游戏运行时设置 /mnt/vendor/persist/data 权限 000 阻止写入标记文件；游戏划掉后台后自动清理 ano_tmp、cache、code_cache、mrpcs 文件并恢复权限。\n\n骁龙 8 Elite 5 (SM8850) 设备检测到后跳过权限修改（防 TEE 损坏），只执行文件清理。\n\nAndroidID/SSAID 修改按钮需重启生效。"
-                android:textColor="@color/hf_text_secondary"
-                android:textSize="13sp" />
-
-            <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
@@ -74,8 +65,7 @@
                 android:background="@drawable/bg_panel"
                 android:fontFamily="monospace"
                 android:lineSpacingExtra="2dp"
-                android:minHeight="120dp"
-                android:padding="12dp"
+                android:padding="10dp"
                 android:text="正在检测 Root 与系统状态..."
                 android:textColor="@color/hf_text_primary"
                 android:textSize="12sp" />
@@ -91,39 +81,16 @@
                 android:textColor="@color/hf_text_primary"
                 android:textSize="16sp" />
 
-            <LinearLayout
+            <Button
+                android:id="@+id/btnPackageList"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="44dp"
                 android:layout_marginTop="16dp"
-                android:orientation="horizontal">
-
-                <Button
-                    android:id="@+id/btnPackageList"
-                    android:layout_width="0dp"
-                    android:layout_height="44dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_button"
-                    android:backgroundTint="@null"
-                    android:text="游戏包名列表"
-                    android:textAllCaps="false"
-                    android:textColor="@color/hf_text_primary" />
-
-                <Space
-                    android:layout_width="8dp"
-                    android:layout_height="1dp" />
-
-                <Button
-                    android:id="@+id/btnRandomizeIds"
-                    android:layout_width="0dp"
-                    android:layout_height="44dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_button"
-                    android:backgroundTint="@null"
-                    android:text="随机修改 AndroidID/SSAID"
-                    android:textAllCaps="false"
-                    android:textColor="@color/hf_text_primary"
-                    android:textSize="13sp" />
-            </LinearLayout>
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:text="游戏包名列表"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -172,7 +139,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
                 android:lineSpacingExtra="2dp"
-                android:text="1. 必须划掉后台退出游戏，否则无法触发清理。\n2. 真死指纹条件：所有列出的游戏都还在后台运行，就关机刷机清数据。重启不会触发真死（开机后会自动还原权限）。\n3. 关闭监听后建议点手动恢复权限确保 /mnt/vendor/persist/data 恢复 700，否则其他系统服务可能写入失败。\n4. 骁龙 8 Elite 5 已自动跳过权限修改，仅清理文件，不会触发 TEE 损坏风险。\n5. 随机修改 AndroidID/SSAID 后必须重启手机生效。"
+                android:text="1. 必须划掉后台退出游戏，否则无法触发清理。\n2. 关闭监听后建议点手动恢复权限确保 persist 目录恢复 700。\n3. 骁龙 8 Elite 5 已自动跳过权限修改，仅清理文件。\n4. 启用监听会自动随机修改 AndroidID/SSAID，需重启手机生效。"
                 android:textColor="@color/hf_text_secondary"
                 android:textSize="12sp" />
         </LinearLayout>
