@@ -2242,17 +2242,24 @@ class AdBlockVpnService : VpnService() {
         isUdp: Boolean
     ): Boolean {
         if (httpDecryptEnabled && shouldBlockEncryptedDnsDirectFlow(info)) return true
+        if (isTcp && shouldBlockBySniWithoutMitm(info, output)) return true
         if (!httpDecryptEnabled) return false
         if (!shouldUseActiveMitmRouting()) return false
         if (isTcp) {
             if (shouldBlockHttpDecryptConnection(info)) return true
-            // SNI 级拦截：在 MITM 之前直接 RST 命中广告域名的 TLS 连接
-            if (shouldBlockBySni(info, output)) return true
             observeHttpsClientHello(info)
             observeHttpsTransparentProxyFlow(info)
             return handleHttpsProxyHandshake(info, output)
         }
         return isUdp && info.destinationPort == 443 && shouldBlockQuicFlow(info)
+    }
+
+    private fun shouldBlockBySniWithoutMitm(
+        info: com.HanFeng.model.PacketInfo,
+        output: FileOutputStream
+    ): Boolean {
+        if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return false
+        return shouldBlockBySni(info, output)
     }
 
     private fun shouldBlockBySni(
