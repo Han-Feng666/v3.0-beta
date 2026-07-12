@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
@@ -39,6 +40,7 @@ class PerformanceMonitorActivity : BaseActivity() {
     private val processAdapter = ProcessPerfAdapter(this)
     private var autoRefresh = false
     private var lastSnapshot: List<PerfMonitor.ProcessSnapshot> = emptyList()
+    @Volatile private var collectingThreadId: Long = -1L
 
     private val autoRefreshRunnable = object : Runnable {
         override fun run() {
@@ -109,10 +111,28 @@ class PerformanceMonitorActivity : BaseActivity() {
     }
 
     private fun refreshSnapshot() {
+        if (collectingThreadId != -1L) {
+            Log.w(TAG, "previous snapshot still running, skip")
+            return
+        }
         tvStatusHint.text = "正在采集性能数据..."
         Thread {
+            collectingThreadId = Thread.currentThread().id
             try {
-                val snapshot = PerfMonitor.snapshot(this)
+                val future = java.util.concurrent.FutureTask<List<PerfMonitor.ProcessSnapshot>> {
+                    PerfMonitor.snapshot(this)
+                }
+                Thread(future, "perf-snapshot").start()
+                val snapshot = try {
+                    future.get(SNAPSHOT_TIMEOUT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                } catch (te: java.util.concurrent.TimeoutException) {
+                    future.cancel(true)
+                    runOnUiThread {
+                        tvStatusHint.text = "采集超时：可能是 Root 权限弹窗未确认，或 Shizuku 服务未启动。请到设置页确认授权后重试。"
+                    }
+                    PerfMonitor.reset()
+                    return@Thread
+                }
                 lastSnapshot = snapshot
                 runOnUiThread {
                     processAdapter.submit(snapshot)
@@ -124,6 +144,8 @@ class PerformanceMonitorActivity : BaseActivity() {
                 runOnUiThread {
                     tvStatusHint.text = "采集失败：${t.message ?: t.javaClass.simpleName}"
                 }
+            } finally {
+                collectingThreadId = -1L
             }
         }.start()
     }
@@ -199,7 +221,9 @@ class PerformanceMonitorActivity : BaseActivity() {
     }
 
     companion object {
+        private const val TAG = "PerfMonitorActivity"
         private const val REFRESH_INTERVAL_MILLIS = 2000L
+        private const val SNAPSHOT_TIMEOUT_MILLIS = 12000L
 
         fun createIntent(context: Context): Intent {
             return Intent(context, PerformanceMonitorActivity::class.java)

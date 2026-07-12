@@ -4,11 +4,10 @@ import android.content.Context
 import com.HanFeng.data.ShizukuPerformanceRepository
 
 /**
- * 性能采集器：Root 路径读 /proc/_pid_/stat + /proc/_pid_/statm，
- * Shizuku 备路径仅探测前台 package 与运行中的包名列表。
+ * 性能采集器：一次 root cat 全部 /proc 下数字进程的 stat 即可拿到 PID、comm、state、utime/stime、vsize、rss，
+ * 不再单独 cat statm，避免第二次 root 调用拖慢采集；前台 App 通过 Shizuku UserService 探测，失败降级到 dumpsys。
  *
- * 由于 Android 10+ /proc/_pid_/stat 对非自身进程仅 root 可读，
- * 这里通过 SuSession 一次性 cat /proc/__/stat 收集全部进程快照。
+ * 由于 Android 10+ /proc/[pid]/stat 对非自身进程仅 root 可读，这里通过 SuSession 一次 cat 全部进程。
  */
 object PerfMonitor {
 
@@ -24,64 +23,53 @@ object PerfMonitor {
 
     @Volatile private var lastTickSnapshot: Map<Int, Long> = emptyMap()
     @Volatile private var lastWallClockNanos: Long = 0L
+    private const val PAGE_SIZE_KB = 4L
 
     /**
      * 一次性快照所有运行中进程的性能数据；CPU 占比基于与上次调用之间的节拍差分计算（初次调用全部为 0）。
      * 返回结果按 CPU 占比降序，CPU 相同则按内存 RSS 降序。
      */
     fun snapshot(context: Context): List<ProcessSnapshot> {
-        val procStatLines = runRootShell(
-            "for p in /proc/[0-9]*/stat; do " +
-                "cat \"\$p\" 2>/dev/null; " +
-                "done 2>/dev/null"
+        val procStatRaw = runRootShell(
+            "for p in /proc/[0-9]*/stat; do cat \"\$p\" 2>/dev/null; done 2>/dev/null",
+            8
         ).output
-        val procStatmLines = runRootShell(
-            "for p in /proc/[0-9]*/statm; do " +
-                "head -c 128 \"\$p\" 2>/dev/null | sed 's~^~'\$(echo \"\$p\" | sed 's~/proc/~~; s~/statm~~')' ~'; " +
-                "echo; " +
-                "done 2>/dev/null"
-        ).output
-        val pageSize = 4L
-        val statmVssKb = HashMap<Int, Long>()
-        val statmRssKb = HashMap<Int, Long>()
-        procStatmLines.lines().forEach { line ->
-            val trimmed = line.trim()
-            if (trimmed.isEmpty()) return@forEach
-            val parts = trimmed.split(' ', limit = 6)
-            val pid = parts.getOrNull(0)?.toIntOrNull() ?: return@forEach
-            val size = parts.getOrNull(1)?.toLongOrNull() ?: 0L
-            val resident = parts.getOrNull(2)?.toLongOrNull() ?: 0L
-            statmVssKb[pid] = size * pageSize
-            statmRssKb[pid] = resident * pageSize
-        }
 
         val currentTicks = HashMap<Int, Long>()
         val currentNames = HashMap<Int, String>()
         val currentStates = HashMap<Int, String>()
-        procStatLines.lines().forEach { raw ->
+        val currentVssKb = HashMap<Int, Long>()
+        val currentRssKb = HashMap<Int, Long>()
+
+        procStatRaw.lineSequence().forEach { raw ->
             val line = raw.trim()
             if (line.isEmpty()) return@forEach
             val firstParen = line.indexOf('(')
             val lastParen = line.lastIndexOf(')')
             if (firstParen < 1 || lastParen <= firstParen) return@forEach
-            val pidStr = line.substring(0, firstParen).trim()
-            val pid = pidStr.toIntOrNull() ?: return@forEach
+            val pid = line.substring(0, firstParen).trim().toIntOrNull() ?: return@forEach
             val comm = line.substring(firstParen + 1, lastParen)
             val rest = line.substring(lastParen + 1).trim().split(' ')
-            if (rest.size < 13) return@forEach
+            if (rest.size < 24) return@forEach
             val state = rest.getOrNull(0) ?: "?"
             val utimeJiffies = rest.getOrNull(11)?.toLongOrNull() ?: 0L
             val stimeJiffies = rest.getOrNull(12)?.toLongOrNull() ?: 0L
-            val totalJiffies = utimeJiffies + stimeJiffies
-            currentTicks[pid] = totalJiffies
+            val vsizeBytes = rest.getOrNull(21)?.toLongOrNull() ?: 0L
+            val rssPages = rest.getOrNull(22)?.toLongOrNull() ?: 0L
+
+            currentTicks[pid] = utimeJiffies + stimeJiffies
             currentNames[pid] = comm
             currentStates[pid] = state
+            currentVssKb[pid] = vsizeBytes / 1024L
+            currentRssKb[pid] = rssPages * PAGE_SIZE_KB
         }
+
+        if (currentTicks.isEmpty()) return emptyList()
 
         val nowNanos = System.nanoTime()
         val wallElapsedJiffies = ((nowNanos - lastWallClockNanos) / 10_000_000L).coerceAtLeast(1L)
         val previous = lastTickSnapshot
-        val foregroundPackage = detectForegroundPackageSafely(context)
+        val foregroundPackage = runCatching { detectForegroundPackageSafely(context) }.getOrNull()
 
         val results = currentTicks.entries.map { (pid, ticks) ->
             val previousTicks = previous[pid] ?: 0L
@@ -92,8 +80,8 @@ object PerfMonitor {
                 ((deltaTicks.toDouble() / wallElapsedJiffies) * 100f).toFloat()
             }
             val name = currentNames[pid] ?: pid.toString()
-            val mem = statmVssKb[pid] ?: 0L
-            val rss = statmRssKb[pid] ?: 0L
+            val mem = currentVssKb[pid] ?: 0L
+            val rss = currentRssKb[pid] ?: 0L
             val state = currentStates[pid] ?: "?"
             val foreground = name == foregroundPackage
             ProcessSnapshot(
@@ -116,7 +104,7 @@ object PerfMonitor {
 
     /** 仅返回前台 App 的快照，用于悬浮窗显示。 */
     fun snapshotForeground(context: Context): ProcessSnapshot? {
-        val pkg = detectForegroundPackageSafely(context) ?: return null
+        val pkg = runCatching { detectForegroundPackageSafely(context) }.getOrNull() ?: return null
         return snapshot(context).firstOrNull { it.name == pkg }
     }
 
@@ -131,7 +119,7 @@ object PerfMonitor {
             if (!viaShizuku.isNullOrBlank()) return viaShizuku
         } catch (_: Throwable) {}
         try {
-            val outcome = runRootShell("dumpsys activity activities 2>/dev/null")
+            val outcome = runRootShell("dumpsys activity activities 2>/dev/null", 8)
             val line = outcome.output.lineSequence().firstOrNull {
                 it.contains("mResumedActivity") || it.contains("ResumedActivity")
             } ?: return null
@@ -142,10 +130,10 @@ object PerfMonitor {
         return null
     }
 
-    private fun runRootShell(command: String, timeoutSeconds: Long = 15): ShellOutcome {
+    private fun runRootShell(command: String, timeoutSeconds: Long = 8): ShellOutcome {
         val su = SuSession.getInstance()
         if (!su.isSessionOpen()) {
-            su.open(timeoutSeconds = timeoutSeconds)
+            su.open(timeoutSeconds = timeoutSeconds.coerceAtLeast(15))
         }
         val result = su.execute(command, timeoutSeconds)
         return ShellOutcome(result.exitCode, result.output)
