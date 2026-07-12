@@ -1,48 +1,42 @@
 package com.HanFeng.ui
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
-import androidx.lifecycle.lifecycleScope
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
 import com.HanFeng.R
 import com.HanFeng.model.InstalledApp
 import com.HanFeng.adblocker.shizuku.RootHideRepository
-import com.HanFeng.adblocker.shizuku.SuSession
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class RootHideScopeFragment : Fragment() {
 
-    private val adapter = AppListAdapter(
-        checkedSelector = { it.rootHideSelected }
-    ) { app, checked ->
-        RootHideRepository.toggleScope(requireContext(), app.packageName, checked)
-        updateAppState(app.packageName, checked)
-    }
-
     private var allApps: List<InstalledApp> = emptyList()
-    private var loadJob: Job? = null
+    private var loadThread: Thread? = null
     private var loadVersion = 0
+    private val handler = Handler(Looper.getMainLooper())
     private var searchInput: EditText? = null
     private var countText: TextView? = null
+    private var appsContainer: LinearLayout? = null
+    private var currentKeyword: String = ""
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        val scrollView = ScrollView(requireContext())
         val root = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(16.dp, 8.dp, 16.dp, 16.dp)
         }
+        scrollView.addView(root)
 
         root.addView(TextView(requireContext()).apply {
             text = "选择作用域 (对哪些应用隐藏)"
@@ -81,27 +75,28 @@ class RootHideScopeFragment : Fragment() {
         })
         root.addView(btnRow)
 
-        val countText = TextView(requireContext()).apply {
+        val ct = TextView(requireContext()).apply {
             text = "已选: 0 个应用"
             textSize = 12f
             setTextColor(resources.getColor(R.color.hf_text_secondary, null))
             setPadding(0, 4.dp, 0, 4.dp)
         }
-        this.countText = countText
-        root.addView(countText)
+        this.countText = ct
+        root.addView(ct)
 
-        val appList = RecyclerView(requireContext()).apply {
-            layoutManager = LinearLayoutManager(requireContext())
-            adapter = this@RootHideScopeFragment.adapter
-            setBackgroundResource(R.drawable.bg_panel)
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        val container = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
         }
-        root.addView(appList, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT).apply { weight = 1f })
+        this.appsContainer = container
+        root.addView(container)
 
-        searchInput!!.doAfterTextChanged { applyFilter(it?.toString().orEmpty()) }
+        searchInput!!.doAfterTextChanged {
+            currentKeyword = it?.toString().orEmpty()
+            renderList()
+        }
 
         loadApps()
-        return root
+        return scrollView
     }
 
     override fun onResume() {
@@ -114,99 +109,131 @@ class RootHideScopeFragment : Fragment() {
     private fun loadApps() {
         loadVersion++
         val requestVersion = loadVersion
-        loadJob?.cancel()
+        loadThread?.interrupt()
         val ctx = context ?: return
         val pm = ctx.packageManager
         val selfPkg = ctx.packageName
-        loadJob = lifecycleScope.launch {
+        loadThread = Thread {
             try {
-                val apps = withContext(Dispatchers.IO) {
-                    val scopePackages = RootHideRepository.getScopePackages(ctx)
-                    @Suppress("DEPRECATION")
-                    val pkgFlags = android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES or
-                        android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS
+                com.HanFeng.adblocker.shizuku.SuSession.getInstance().waitForSession(30)
+                if (!SuSessionProvider.checkRoot()) {
+                    handler.post {
+                        if (requestVersion != loadVersion || isRemoving || isDetached) return@post
+                        countText?.text = "未获取 Root 权限，请返回重新打开此页面"
+                    }
+                    return@Thread
+                }
+                val scopePackages = RootHideRepository.getScopePackages(ctx)
+                @Suppress("DEPRECATION")
+                val pkgFlags = android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES or
+                    android.content.pm.PackageManager.MATCH_DISABLED_COMPONENTS
 
-                    val thirdPartyRaw = runCatching {
-                        val s = SuSession.getInstance()
-                        if (!s.isSessionOpen()) s.open(10)
-                        s.execute("pm list packages 2>/dev/null | sed 's/^package://'", 10).output
-                    }.getOrDefault("")
+                val thirdPartyRaw = SuSessionProvider.execute("pm list packages -3 2>/dev/null | sed 's/^package://'", 15)
 
-                    val allPkgs = thirdPartyRaw.lineSequence()
-                        .map { it.trim() }
-                        .filter { it.isNotBlank() && it != selfPkg }
-                        .distinct()
-                        .toList()
-
-                    val visibleList = allPkgs.mapNotNull { pkg ->
-                        val ai = runCatching { pm.getApplicationInfo(pkg, pkgFlags) }.getOrNull()
-                            ?: return@mapNotNull null
-                        InstalledApp(
-                            label = runCatching { pm.getApplicationLabel(ai).toString() }
-                                .getOrDefault(pkg),
-                            packageName = pkg,
-                            icon = null,
-                            whitelisted = false,
-                            coexistSelected = false,
-                            coexistRecommended = false,
-                            rootHideSelected = pkg in scopePackages
+                val processed = mutableListOf<InstalledApp>()
+                if (thirdPartyRaw.isNotBlank()) {
+                    for (pkg in thirdPartyRaw.trim().lines().map { it.trim() }.filter { it.isNotBlank() && it != selfPkg }.distinct()) {
+                        if (pkg.length >= 128) continue
+                        val appInfo = runCatching { pm.getApplicationInfo(pkg, pkgFlags) }.getOrNull() ?: continue
+                        val dispLabel = runCatching { pm.getApplicationLabel(appInfo).toString() }.getOrDefault(pkg)
+                        val icon = runCatching { pm.getApplicationIcon(appInfo) }.getOrNull()
+                        processed.add(
+                            InstalledApp(
+                                label = dispLabel,
+                                packageName = pkg,
+                                icon = icon,
+                                whitelisted = false,
+                                coexistSelected = false,
+                                coexistRecommended = false,
+                                rootHideSelected = pkg in scopePackages
+                            )
                         )
-                    }.sortedBy { it.label.lowercase() }
-
-                    if (visibleList.isEmpty()) {
-                        val fallback = runCatching { pm.getInstalledApplications(0) }
-                            .getOrDefault(emptyList())
-                            .filter { it.packageName != selfPkg }
-                            .map { ai ->
-                                InstalledApp(
-                                    label = runCatching { pm.getApplicationLabel(ai).toString() }
-                                        .getOrDefault(ai.packageName),
-                                    packageName = ai.packageName,
-                                    icon = null,
-                                    whitelisted = false,
-                                    coexistSelected = false,
-                                    coexistRecommended = false,
-                                    rootHideSelected = ai.packageName in scopePackages
-                                )
-                            }
-                            .sortedBy { it.label.lowercase() }
-                        fallback
-                    } else {
-                        visibleList
                     }
                 }
-                if (requestVersion != loadVersion) return@launch
-                allApps = apps
-                applyFilter(searchInput?.text?.toString().orEmpty())
-                updateCount()
-                if (apps.isEmpty()) {
-                    countText?.text = "未发现可勾选的应用。请确认已授予应用列表权限（已声明 QUERY_ALL_PACKAGES），或设备无第三方 App。"
+                if (processed.isEmpty()) {
+                    val allRaw = SuSessionProvider.execute("pm list packages 2>/dev/null | sed 's/^package://'", 15)
+                    for (pkg in allRaw.trim().lines().map { it.trim() }.filter { it.isNotBlank() && it != selfPkg }.distinct()) {
+                        if (pkg.length >= 128) continue
+                        val appInfo = runCatching { pm.getApplicationInfo(pkg, pkgFlags) }.getOrNull() ?: continue
+                        val dispLabel = runCatching { pm.getApplicationLabel(appInfo).toString() }.getOrDefault(pkg)
+                        val icon = runCatching { pm.getApplicationIcon(appInfo) }.getOrNull()
+                        processed.add(
+                            InstalledApp(
+                                label = dispLabel,
+                                packageName = pkg,
+                                icon = icon,
+                                whitelisted = false,
+                                coexistSelected = false,
+                                coexistRecommended = false,
+                                rootHideSelected = pkg in scopePackages
+                            )
+                        )
+                    }
+                }
+                val apps = processed.sortedBy { it.label.lowercase() }
+                if (requestVersion != loadVersion) return@Thread
+                handler.post {
+                    if (requestVersion != loadVersion || isRemoving || isDetached) return@post
+                    allApps = apps
+                    renderList()
+                    updateCount()
+                    if (apps.isEmpty()) {
+                        countText?.text = "未发现可勾选的应用。请确认已授予 Root 权限，或设备无第三方 App。"
+                    }
                 }
             } catch (e: Exception) {
-                if (requestVersion != loadVersion) return@launch
-                activity?.runOnUiThread {
+                if (requestVersion != loadVersion) return@Thread
+                handler.post {
+                    if (requestVersion != loadVersion || isRemoving || isDetached) return@post
                     Toast.makeText(ctx, "加载应用列表失败: ${e.message}", Toast.LENGTH_LONG).show()
                     countText?.text = "加载失败: ${e.message}"
                 }
             }
-        }
+        }.also { it.isDaemon = true; it.start() }
     }
 
-    private fun applyFilter(keyword: String) {
-        val normalized = keyword.trim().lowercase()
-        val filtered = if (normalized.isBlank()) allApps
+    private fun filteredApps(): List<InstalledApp> {
+        val normalized = currentKeyword.trim().lowercase()
+        return if (normalized.isBlank()) allApps
         else allApps.filter { it.label.lowercase().contains(normalized) || it.packageName.lowercase().contains(normalized) }
-        adapter.submit(filtered)
+    }
+
+    private fun renderList() {
+        val container = appsContainer ?: return
+        container.removeAllViews()
+        val inflater = LayoutInflater.from(requireContext())
+        val visible = filteredApps()
+        for (item in visible) {
+            val binding = com.HanFeng.databinding.ItemAppBinding.inflate(inflater, container, false)
+            binding.loadingIndicator.visibility = View.GONE
+            binding.appIcon.setImageDrawable(item.icon)
+            binding.appName.text = item.label
+            binding.packageName.text = item.packageName
+            binding.whitelistBox.setOnCheckedChangeListener(null)
+            binding.whitelistBox.isChecked = item.rootHideSelected
+            binding.whitelistBox.setOnCheckedChangeListener { _, checked ->
+                RootHideRepository.toggleScope(requireContext(), item.packageName, checked)
+                updateAppState(item.packageName, checked)
+            }
+            container.addView(binding.root)
+        }
+        if (visible.isEmpty() && allApps.isNotEmpty()) {
+            val tv = TextView(requireContext()).apply {
+                text = "搜索无结果"
+                setPadding(0, 12.dp, 0, 12.dp)
+                setTextColor(resources.getColor(R.color.hf_text_secondary, null))
+            }
+            container.addView(tv)
+        }
     }
 
     private fun updateAppState(packageName: String, checked: Boolean) {
         allApps = allApps.map { if (it.packageName != packageName) it else it.copy(rootHideSelected = checked) }
-        applyFilter(searchInput?.text?.toString().orEmpty())
         updateCount()
     }
 
     private fun toggleScope(selectAll: Boolean, invert: Boolean = false) {
-        val visible = adapter.currentList
+        val visible = filteredApps()
         if (visible.isEmpty()) return
         val updated = mutableSetOf<String>()
         visible.forEach { app ->
@@ -223,7 +250,7 @@ class RootHideScopeFragment : Fragment() {
             if (it.packageName !in visibleNames) it
             else it.copy(rootHideSelected = it.packageName in updated)
         }
-        applyFilter(searchInput?.text?.toString().orEmpty())
+        renderList()
         updateCount()
         Toast.makeText(requireContext(), if (invert) "已反选" else "已全选", Toast.LENGTH_SHORT).show()
     }
@@ -232,7 +259,6 @@ class RootHideScopeFragment : Fragment() {
         return allApps.filter { it.rootHideSelected }.map { it.packageName }.toSet()
     }
 
-    /** 允许外部（RootHideActivity）触发作用域重新加载。 */
     fun reloadFromOutside() {
         if (context == null) return
         loadApps()
@@ -244,9 +270,10 @@ class RootHideScopeFragment : Fragment() {
     }
 
     override fun onDestroyView() {
-        loadJob?.cancel()
+        loadThread?.interrupt()
         searchInput = null
         countText = null
+        appsContainer = null
         super.onDestroyView()
     }
 

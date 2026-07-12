@@ -867,3 +867,13 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 项目中需要长期轮询进程或文件状态的 Root 守护任务，遵循"JVM 仅作 launcher"模式：通过 `com.HanFeng.adblocker.shizuku.SuSession` 拼 watcher.sh 脚本写入 /data/adb/<namespace>/，再 `nohup sh` 启动后台进程，PID 写入 .pid 文件。
   - 不要在 JVM 内 Thread { while(true) { suSession.execute(...) } }，因为寒枫被系统杀掉后守护必须继续运行；JVM 重新打开 SuSession 后通过 `kill -0 $(cat pid)` 判断守护是否仍在。
   - 工作目录命名约定：/data/adb/<FeatureName>/watcher.sh、watcher.pid、watcher.log。脚本中的 `$` 必须用 Kotlin 字符串的 `\$` 转义，不要用 `$$`（shell 中是当前 PID 不是变量标识符）。
+
+[SNI 拦截与 MITM 解耦]
+- Date: 2026-07-12
+- Context: Agent 在执行"评论区/激励/翻页内容级广告未拦"排查时发现
+- Category: 排错调试
+- Instructions:
+  - `AdBlockVpnService.handleHttpDecryptPacket` 历史上在 `httpDecryptEnabled=false` 时直接 return false，导致 SNI 拦截（`shouldBlockBySni`/`SniInterceptor.evaluate`）和 QUIC SNI 拦截都没机会运行——纯 DNS 模式下只有规则库 domain 匹配生效。
+  - SNI 拦截不需要解密 HTTPS：只看 TLS ClientHello 明文 SNI 字段匹配规则后发 TCP RST，对证书绑定 App 也有效。已通过 `shouldBlockBySniWithoutMitm` 在 `httpDecryptEnabled=false` 时独立运行。
+  - `SniInterceptor.evaluate` 零 MITM 依赖：只依赖 `RuleRepository`（规则库）+ `ScoredBlockCache`（学习缓存）+ `isProtectedTrafficDomain`（业务保护），纯 DNS 模式可用。
+  - 评论区/底部卡片/翻页/激励类内容级广告（URL 路径区分，如 `api.xxx.com/comment/list`）SNI 仍拦不住——同域名不同路径，只能在 `httpDecryptEnabled=true` 时由 `HttpMitmFilter` 内容级过滤拦掉。

@@ -994,7 +994,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                                 val autoExpand = query.isNotEmpty()
                                 add(RuleListItem.Group(vendor, filteredRules.size, if (autoExpand) true else expandedSnapshot.contains(vendor)))
                                 val visibleRules = if (autoExpand) filteredRules else if (expandedSnapshot.contains(vendor)) filteredRules else emptyList()
-                                val maxVisible = 500
+                                val maxVisible = 2000
                                 if (visibleRules.size > maxVisible) {
                                     visibleRules.take(maxVisible).forEach { entry ->
                                         add(RuleListItem.Domain(entry, selectedSnapshot.contains(entry.id), currentSelectionMode))
@@ -1095,12 +1095,12 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         refreshList()
     }
 
-    private fun exitSelection() {
+    private fun exitSelection(invokeRefresh: Boolean = true) {
         selectionMode = false
         filteredSelectionMode = false
         selectedIds.clear()
         selectedRulesById.clear()
-        refreshList()
+        if (invokeRefresh) refreshList()
     }
 
     private fun toggleSelection(rule: BlockRule) {
@@ -1186,13 +1186,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         if (removedCount <= 0) {
                             Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
                             invalidateRuleListCache()
-                            refreshListSoon()
+                            refreshListSoon(0L)
                             return@launch
                         }
                         Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
                         invalidateRuleListCache()
-                        exitSelection()
-                        refreshListSoon()
+                        exitSelection(invokeRefresh = false)
+                        refreshListSoon(0L)
                         reloadVpnIfRunning(true)
                     }
                 }
@@ -1290,13 +1290,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         if (removedCount <= 0) {
                             Toast.makeText(actionContext, "未删除任何规则，请重试一次", Toast.LENGTH_SHORT).show()
                             invalidateRuleListCache()
-                            refreshListSoon()
+                            refreshListSoon(0L)
                             return@launch
                         }
                         Toast.makeText(actionContext, "已删除全部 $removedCount 条规则", Toast.LENGTH_LONG).show()
                         invalidateRuleListCache()
-                        exitSelection()
-                        refreshListSoon()
+                        exitSelection(invokeRefresh = false)
+                        refreshListSoon(0L)
                         reloadVpnIfRunning(true)
                     }
                 }
@@ -1388,14 +1388,14 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             if (removedCount <= 0) {
                 Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
                 invalidateRuleListCache()
-                refreshListSoon()
+                refreshListSoon(0L)
                 return@launch
             }
-            Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
+            exitSelection(invokeRefresh = false)
             invalidateRuleListCache()
-            exitSelection()
-            refreshListSoon()
+            refreshListSoon(0L)
             reloadVpnIfRunning(true)
+            Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1977,7 +1977,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     expandedSnapshot.contains(vendor) -> filteredRules
                     else -> emptyList()
                 }
-                visibleRules.take(500).forEach { add(it) }
+                visibleRules.take(2000).forEach { add(it) }
             }
         }
     }
