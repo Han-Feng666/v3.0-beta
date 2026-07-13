@@ -40,7 +40,7 @@ object LogRepository {
     @Volatile private var currentLogSessionId: String? = null
     @Volatile private var lastWriterFlushAt = 0L
     @Volatile private var lastFileTruncateAt = 0L
-    private const val WRITER_FLUSH_INTERVAL_MILLIS = 2_000L
+    private const val WRITER_FLUSH_INTERVAL_MILLIS = 500L
     private const val FILE_TRUNCATE_CHECK_INTERVAL_MILLIS = 120_000L
     private val noisyLogPrefixes = listOf(
         "HTTP/2 frame ",

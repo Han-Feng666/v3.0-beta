@@ -27,8 +27,8 @@ object SniInterceptor {
         val reason: String
     )
 
-    private const val SNI_CACHE_TTL_MS = 30_000L
-    private const val SNI_CACHE_MAX = 1024
+    private const val SNI_CACHE_TTL_MS = 5_000L
+    private const val SNI_CACHE_MAX = 2048
 
     private data class CachedSniDecision(
         val decision: SniBlockDecision,
@@ -70,6 +70,16 @@ object SniInterceptor {
             }
         }
 
+        // 用户自有拦截规则优先于保护域：用户明确添加的规则即使在保护域内也应拦截
+        val userOwnedMatch = RuleRepository.findMatchingRule(context, sniHost, appName = appName)
+        if (userOwnedMatch != null && !userOwnedMatch.exceptionRule && RuleRepository.isUserOwnedRule(userOwnedMatch)) {
+            val vendor = userOwnedMatch.vendor.ifBlank { RuleRepository.classifyVendorSimple(context, sniHost) ?: "" }
+            return makeDecision(true, sniHost, vendor, "rule-match:${userOwnedMatch.source.name.lowercase()}").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
+        }
+
         if (isProtectedDomain) {
             return makeDecision(false, sniHost, "", "protected-domain").also {
                 cacheDecision(sniHost, it)
@@ -99,6 +109,15 @@ object SniInterceptor {
             }
         }
 
+        // 非用户自有的命中规则（内置规则库）。保护域已被 return，此处仅剩非保护域。
+        if (userOwnedMatch != null && !userOwnedMatch.exceptionRule) {
+            val vendor = userOwnedMatch.vendor.ifBlank { RuleRepository.classifyVendorSimple(context, sniHost) ?: "" }
+            return makeDecision(true, sniHost, vendor, "rule-match:${userOwnedMatch.source.name.lowercase()}").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
+        }
+
         val vendor = RuleRepository.classifyVendor(context, sniHost)
 
         // 命中通用广告流量
@@ -112,6 +131,14 @@ object SniInterceptor {
         // 命中广告 SDK 基础设施域名
         if (RuleRepository.looksLikeAdSdkInfraDomain(sniHost, vendor)) {
             return makeDecision(true, sniHost, vendor, "ad-sdk-infra").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
+        }
+
+        // 小说 App 启发式拦截：未启用 MITM 时替小说 App 兜底识别广告 SDK SNI
+        if (RuleRepository.shouldForceNovelQuicBlock(sniHost, appName, vendor)) {
+            return makeDecision(true, sniHost, vendor, "novel-heuristic").also {
                 cacheDecision(sniHost, it)
                 recordSlowPathLatency(slowPathStartedAt)
             }

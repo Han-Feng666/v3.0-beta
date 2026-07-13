@@ -1461,7 +1461,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "tun-debug-rate",
                 message = "TUN debug rate packetsPerSecond=$packetCount bytesPerSecond=$byteCount sample=$sample",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
         }
     }
@@ -1513,7 +1513,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "learning-ip-block:${formatAddress(info.destinationAddress)}:${info.destinationPort}",
                 message = "Blocked learning-feedback IP ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} score=${learnedIpHit.score} reason=${learnedIpHit.reason}",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             return true
         }
@@ -1522,7 +1522,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "ip-cidr-block:${match.rule.id}:${formatAddress(info.destinationAddress)}:${info.destinationPort}",
                 message = "Blocked IP-CIDR flow ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} app=${match.appName} vendor=${match.rule.vendor} cidr=${match.rule.ipCidr ?: "unknown"}",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             return true
         }
@@ -1531,7 +1531,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "port-only-block:${match.rule.id}:${formatAddress(info.destinationAddress)}:${info.destinationPort}:${info.sourcePort}",
                 message = "Blocked port-only flow ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} sourcePort=${info.sourcePort} app=${match.appName} vendor=${match.rule.vendor}",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             return true
         }
@@ -1549,7 +1549,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "ad-ip-block:${target.domain}:${formatAddress(info.destinationAddress)}:${info.destinationPort}",
                 message = "Blocked ad IP flow ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} domain=${target.domain} app=${target.appName} vendor=${target.vendor} source=${target.source}",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             return true
         }
@@ -1567,7 +1567,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "dns-non-local-endpoint:${formatAddress(info.destinationAddress)}",
                 message = "Observed DNS query to non-local endpoint ip=${formatAddress(info.destinationAddress)}, fallback to local DNS handler",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
         }
         val question = DnsMessageParser.parseQuestion(info.payload) ?: return true
@@ -1658,7 +1658,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "dns-rewrite:${question.domain}:${question.qType}:${appName}",
                 message = "DNS rewrite domain=${question.domain} -> $rewriteTarget ($rewriteIp) qType=${question.qType} app=$appName vendor=$vendor",
-                minIntervalMillis = 20_000L
+                minIntervalMillis = 5_000L
             )
         } else {
             output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
@@ -1727,7 +1727,7 @@ class AdBlockVpnService : VpnService() {
         logDecisionOnce(
             key = "dns-adfree-pass:${domain}:${appName}",
             message = "Ad-free reward DNS pass domain=$domain app=$appName vendor=$vendor",
-            minIntervalMillis = 30_000L
+            minIntervalMillis = 5_000L
         )
         return true
     }
@@ -1780,7 +1780,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "dns-block:${question.domain}:${question.qType}:${appName}",
                 message = "Blocked DNS domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
-                minIntervalMillis = 20_000L
+                minIntervalMillis = 5_000L
             )
             return
         }
@@ -1791,7 +1791,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "dns-heuristic-block:${question.domain}:${question.qType}:${appName}",
                 message = "Blocked DNS by ad heuristic domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
-                minIntervalMillis = 20_000L
+                minIntervalMillis = 5_000L
             )
             return
         }
@@ -1801,7 +1801,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "dns-pass-cache:${question.domain}:${question.qType}:${appName}",
                 message = "Passed DNS domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=cache-hit",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             output.write(PacketCodec.buildUdpResponse(info, cachedResponse))
             return
@@ -1869,7 +1869,7 @@ class AdBlockVpnService : VpnService() {
         logDecisionOnce(
             key = "dns-pass:${question.domain}:${question.qType}:${appName}",
             message = "Passed DNS domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
-            minIntervalMillis = 30_000L
+            minIntervalMillis = 5_000L
         )
 
         // 检查别名目标是否需要拦截
@@ -2002,7 +2002,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "dns-block-async:${question.domain}:${question.qType}:${appName}",
                 message = "Blocked DNS (async) domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
-                minIntervalMillis = 20_000L
+                minIntervalMillis = 5_000L
             )
             return
         }
@@ -2069,7 +2069,7 @@ class AdBlockVpnService : VpnService() {
         logDecisionOnce(
             key = "dns-pass-async:${question.domain}:${question.qType}:${appName}",
             message = "Passed DNS (async) domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
-            minIntervalMillis = 30_000L
+            minIntervalMillis = 5_000L
         )
 
         if (handleBlockedDnsAliasTargets(info, question, appName, vendor, aliasTargets, output)) return
@@ -2293,7 +2293,7 @@ class AdBlockVpnService : VpnService() {
         logDecisionOnce(
             key = "sni-block:$sniHost:$destinationIp",
             message = "Blocked by SNI domain=$sniHost app=$appName vendor=${decision.vendor} reason=${decision.reason} ip=$destinationIp",
-            minIntervalMillis = 15_000L
+            minIntervalMillis = 5_000L
         )
         UserAdFeedbackManager.recordNetworkActivity(
             this,
@@ -2343,7 +2343,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "quic-encrypted-dns-ip-block:$destinationIp:${info.sourcePort}",
                 message = "Blocked QUIC/HTTP3 flow to known encrypted DNS IP ip=$destinationIp sourcePort=${info.sourcePort} via=quic-encrypted-dns-guard",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             return true
         }
@@ -2356,7 +2356,7 @@ class AdBlockVpnService : VpnService() {
                     logDecisionOnce(
                         key = "quic-ech-block:$destinationIp:${info.sourcePort}",
                         message = "Blocked QUIC flow with ECH ip=$destinationIp sourcePort=${info.sourcePort} to force TCP fallback for SNI inspection",
-                        minIntervalMillis = 30_000L
+                        minIntervalMillis = 5_000L
                     )
                     return true
                 }
@@ -2410,7 +2410,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "quic-cidr-block:$destinationIp:${info.sourcePort}",
                 message = "Blocked QUIC/HTTP3 via CIDR block list ip=$destinationIp app=$cidrAppName via=quic-cidr-ad-range",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             return true
         }
@@ -2426,7 +2426,7 @@ class AdBlockVpnService : VpnService() {
                     logDecisionOnce(
                         key = "quic-block-ad-ip-tracked:$destinationIp:${info.sourcePort}",
                         message = "Blocked QUIC/HTTP3 for known ad-target IP ip=$destinationIp domain=$adDomain app=$adAppName vendor=$adVendor via=ad-ip-tracked",
-                        minIntervalMillis = 30_000L
+                        minIntervalMillis = 5_000L
                     )
                     return true
                 }
@@ -2462,7 +2462,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "quic-block-global-mitm:$destinationIp:${info.sourcePort}",
                 message = "Blocked QUIC/HTTP3 flow ip=$destinationIp app=$appName reason=${decision.reason ?: "global-mitm-force-tcp"} route=global-mitm",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             return true
         }
@@ -2515,7 +2515,7 @@ class AdBlockVpnService : VpnService() {
         logDecisionOnce(
             key = "quic-block:$resolvedDomain:$destinationIp",
             message = "Blocked QUIC/HTTP3 flow domain=$resolvedDomain ip=$destinationIp app=$appName vendor=$vendor reason=$reason route=${route?.source ?: httpsTarget?.source ?: "unknown"} bypass=${bypassReason ?: "none"}",
-            minIntervalMillis = 30_000L
+            minIntervalMillis = 5_000L
         )
         maybeApplyMitmLearningSignal(
             MitmLearningEngine.Signal(
@@ -2893,7 +2893,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "http-pass:${target.domain}:$ip:${info.sourcePort}",
                 message = "Passed HTTP connection domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source}",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             return false
         }
@@ -2926,7 +2926,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "https-empty-sni:$destinationIp",
                 message = "Observed empty-SNI TLS ClientHello destination=$destinationIp alpn=${clientHelloInfo.offeredAlpnProtocols.joinToString(",").ifBlank { "none" }} ech=${clientHelloInfo.encryptedClientHelloOffered}",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             maybeApplyMitmLearningSignal(
                 MitmLearningEngine.Signal(
@@ -3073,7 +3073,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "https-mitm-not-ready:$sniHost",
                 message = "Skipped HTTPS MITM prewarm because CA is not installed domain=$sniHost app=$appName source=$decryptSource",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             return
         }
@@ -4335,7 +4335,7 @@ class AdBlockVpnService : VpnService() {
             logDecisionOnce(
                 key = "https-pass-syn:${target.domain}:$ip:${info.sourcePort}",
                 message = "Passed HTTPS SYN domain=${target.domain} ip=$ip app=$appName vendor=$vendor reason=${domainContext.reason} source=${target.source}",
-                minIntervalMillis = 30_000L
+                minIntervalMillis = 5_000L
             )
             return false
         }
@@ -7492,7 +7492,7 @@ class AdBlockVpnService : VpnService() {
         logDecisionOnce(
             key = "passthrough-success:$stage",
             message = "Passthrough $stage succeeded during full-capture routing",
-            minIntervalMillis = 30_000L
+            minIntervalMillis = 5_000L
         )
     }
 
