@@ -8196,11 +8196,19 @@ class AdBlockVpnService : VpnService() {
         matchedRule: BlockRule? = null
     ): Boolean {
         val resolvedRule = matchedRule ?: RuleRepository.findMatchingRule(this, domain, qType)
+        if (resolvedRule != null) return true
+        val normalized = domain.trim().lowercase()
+        if (normalized.isBlank()) return false
         val novelApp = RuleRepository.isNovelAppHint(appName)
-        if (novelApp && RuleRepository.isProtectedNovelAppDomain(domain)) return false
-        if (novelApp && RuleRepository.isNovelContentDomain(domain)) return false
-        if (isProtectedTrafficDomain(domain) && resolvedRule == null) return false
-        return resolvedRule != null
+        if (novelApp && RuleRepository.isProtectedNovelAppDomain(normalized)) return false
+        if (novelApp && RuleRepository.isNovelContentDomain(normalized)) return false
+        if (isProtectedTrafficDomain(normalized)) return false
+        if (RuleRepository.isWhitelistedDomain(normalized)) return false
+        if (RuleRepository.isSensitiveAuthDomain(normalized)) return false
+        if (novelApp && RuleRepository.shouldForceNovelQuicBlock(normalized, appName, vendor)) return true
+        if (RuleRepository.shouldTreatAsGeneralAdTraffic(normalized, vendor, appName)) return true
+        if (RuleRepository.looksLikeAdSdkInfraDomain(normalized, vendor)) return true
+        return false
     }
 
     private fun shouldSkipDecryptAliasChain(domain: String, appName: String): Boolean {
@@ -9751,9 +9759,11 @@ class AdBlockVpnService : VpnService() {
         private const val DEFAULT_TCP_WINDOW_SIZE = 65535
         private const val TCP_SEGMENT_PAYLOAD_SIZE = 1400
         private const val TCP_SNDBUF_SIZE = 128 * 1024
-        private const val HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS = 75_000L
-        private const val HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS = 45_000L
-        private const val HTTP_DECRYPT_ROUTE_BATCH_WINDOW_MILLIS = 15_000L
+        private const val HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS = 20_000L
+
+        private const val HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS = 8_000L
+
+        private const val HTTP_DECRYPT_ROUTE_BATCH_WINDOW_MILLIS = 3_000L
         private const val UNDERLYING_NETWORK_REFRESH_MIN_INTERVAL_MILLIS = 1_500L
         private const val FOREGROUND_NOTIFICATION_REFRESH_MIN_INTERVAL_MILLIS = 3_000L
         private const val OWNER_UID_FAILURE_TTL_MILLIS = 60_000L

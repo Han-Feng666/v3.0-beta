@@ -2389,6 +2389,12 @@ object HttpMitmFilter {
             return "neutralized-body-reward-unlock"
         }
         val novelReaderTarget = isNovelApp || protectedNovelTarget || aggressiveNovelTarget || isKnownAdVendor(vendor)
+        if (isNovelApp && novelSignals.readerBottomAdHits >= 1) {
+            return "neutralized-body-reader-bottom-ad"
+        }
+        if (isNovelApp && novelSignals.readerPageTurnAdHits >= 1) {
+            return "neutralized-body-reader-page-turn-ad"
+        }
         if (novelReaderTarget && novelSignals.readerBottomAdHits >= 1 &&
             (novelSignals.readerAdMaterialHits >= 1 || novelSignals.readerAdReasonHit || bodySignalScore >= 1)) {
             return "neutralized-body-reader-bottom-ad"
