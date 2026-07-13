@@ -9759,11 +9759,11 @@ class AdBlockVpnService : VpnService() {
         private const val DEFAULT_TCP_WINDOW_SIZE = 65535
         private const val TCP_SEGMENT_PAYLOAD_SIZE = 1400
         private const val TCP_SNDBUF_SIZE = 128 * 1024
-        private const val HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS = 20_000L
+        private const val HTTP_DECRYPT_ROUTE_RELOAD_MIN_INTERVAL_MILLIS = 3_000L
 
-        private const val HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS = 8_000L
+        private const val HTTP_DECRYPT_ROUTE_FORCE_MIN_INTERVAL_MILLIS = 1_500L
 
-        private const val HTTP_DECRYPT_ROUTE_BATCH_WINDOW_MILLIS = 3_000L
+        private const val HTTP_DECRYPT_ROUTE_BATCH_WINDOW_MILLIS = 800L
         private const val UNDERLYING_NETWORK_REFRESH_MIN_INTERVAL_MILLIS = 1_500L
         private const val FOREGROUND_NOTIFICATION_REFRESH_MIN_INTERVAL_MILLIS = 3_000L
         private const val OWNER_UID_FAILURE_TTL_MILLIS = 60_000L
