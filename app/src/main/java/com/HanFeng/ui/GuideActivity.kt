@@ -50,8 +50,13 @@ class GuideActivity : BaseActivity() {
         val parsed = parseGuideContent(content)
         binding.contentText.text = parsed.headerTitle
         binding.contentText.visibility = View.VISIBLE
-        binding.contentSubText.visibility = View.GONE
-        binding.contentSubText.text = ""
+        if (parsed.headerSubtitle.isNotBlank()) {
+            binding.contentSubText.visibility = View.VISIBLE
+            binding.contentSubText.text = parsed.headerSubtitle
+        } else {
+            binding.contentSubText.visibility = View.GONE
+            binding.contentSubText.text = ""
+        }
         val sections = parsed.sections
         if (sections.isEmpty()) {
             binding.sectionsContainer.visibility = View.GONE
@@ -121,8 +126,6 @@ class GuideActivity : BaseActivity() {
         private val sectionTitleRegex = Regex("^[一二三四五六七八九十]+、.+")
         private val DEFAULT_GUIDE_CONTENT =
             "APP作者：寒枫，酷安ID：寒枫颜值担当\n" +
-            "本说明覆盖首页、规则页、拦截与放行、统计页、MITM、Shizuku、可疑域名、加速器共存、Root 隐藏、rule 导入与排障流程。\n" +
-            "建议先完整看一遍首次使用、MITM 教程、Shizuku 教程、加速器共存教程、Root 隐藏教程、规则支持范围和常见问题，再按自己的机型和需求选择功能组合。\n\n" +
             "一、首次使用完整教程\n" +
             "1. 打开应用后先停留在首页，确认状态卡可正常显示。\n" +
             "2. 应用会弹窗建议关闭电池优化和允许自启动，请点击允许。\n" +
