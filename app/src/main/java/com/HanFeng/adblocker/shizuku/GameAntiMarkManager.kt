@@ -107,7 +107,7 @@ object GameAntiMarkManager {
         val stopped = stop()
         if (stopped) {
             GameAntiMarkRepository.TARGET_DIR_CANDIDATES.forEach { dir ->
-                suSession.execute("chmod 700 '$dir' 2>/dev/null", 3)
+                suSession.execute("chmod -R 700 '$dir' 2>/dev/null", 5)
             }
             suSession.execute("rm -rf '${GameAntiMarkRepository.STATE_DIR}' 2>/dev/null", 3)
             GameAntiMarkRepository.setAutoWatcherEnabled(context, false)
@@ -260,7 +260,7 @@ object GameAntiMarkManager {
         for (dir in targetDirs) {
             appendLine("  if [ -d '$dir' ]; then")
             appendLine("    total=\$((total + 1))")
-            appendLine("    chmod 000 '$dir' 2>/dev/null")
+            appendLine("    chmod -R 000 '$dir' 2>/dev/null")
             appendLine("    cur=\$(stat -c '%a' '$dir' 2>/dev/null)")
             appendLine("    if [ \"\$cur\" = \"000\" ]; then")
             appendLine("      success=\$((success + 1))")
@@ -283,7 +283,7 @@ object GameAntiMarkManager {
         for (dir in targetDirs) {
             appendLine("  if [ -d '$dir' ]; then")
             appendLine("    total=\$((total + 1))")
-            appendLine("    chmod 700 '$dir' 2>/dev/null")
+            appendLine("    chmod -R 700 '$dir' 2>/dev/null")
             appendLine("    cur=\$(stat -c '%a' '$dir' 2>/dev/null)")
             appendLine("    if [ \"\$cur\" = \"700\" ]; then")
             appendLine("      success=\$((success + 1))")
@@ -319,7 +319,7 @@ object GameAntiMarkManager {
         appendLine("else")
         for (dir in targetDirs) {
             appendLine("  if [ -d '$dir' ]; then")
-            appendLine("    chmod 700 '$dir' 2>/dev/null")
+            appendLine("    chmod -R 700 '$dir' 2>/dev/null")
             appendLine("    cur_mode=\$(stat -c '%a' '$dir' 2>/dev/null)")
             appendLine("    if [ \"\$cur_mode\" != \"700\" ]; then")
             appendLine("      log_msg \"WARN: initial chmod 700 failed for $dir, current=\$cur_mode\"")
