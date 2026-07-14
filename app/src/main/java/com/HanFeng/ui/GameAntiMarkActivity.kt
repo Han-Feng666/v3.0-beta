@@ -185,7 +185,7 @@ class GameAntiMarkActivity : BaseActivity() {
                 val s = SuSession.getInstance()
                 if (!s.isSessionOpen() && !s.open(10)) return@withContext false
                 val cmd = GameAntiMarkRepository.TARGET_DIR_CANDIDATES.joinToString(" && ") {
-                    "chmod 700 '$it' 2>/dev/null"
+                    "chmod -R 700 '$it' 2>/dev/null"
                 } + " && echo OK || echo NOSUCH"
                 val r = s.execute(cmd, 5)
                 r.output.trim().let { it.contains("OK") || it.contains("NOSUCH") }

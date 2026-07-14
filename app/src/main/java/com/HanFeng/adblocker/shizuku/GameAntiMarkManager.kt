@@ -1,6 +1,7 @@
 package com.HanFeng.adblocker.shizuku
 
 import android.content.Context
+import android.util.Log
 import com.HanFeng.data.GameAntiMarkRepository
 import com.HanFeng.data.LogRepository
 import java.util.concurrent.atomic.AtomicBoolean
@@ -39,6 +40,7 @@ object GameAntiMarkManager {
         val packages = GameAntiMarkRepository.getTargetPackages(context)
         if (packages.isEmpty()) return false
         if (!suSession.isSessionOpen() && !suSession.open(30)) return false
+        killOrphanedWatcherIfNeeded()
         if (running.get()) stop()
 
         LogRepository.append(context, "[$TAG] starting watcher with ${packages.size} packages, sm8850=$sm8850Fallback")
@@ -88,6 +90,26 @@ object GameAntiMarkManager {
             "cat > '$targetFile.tmp' << 'EOF_TARGET'\n$body\nEOF_TARGET\n" +
                 "mv -f '$targetFile.tmp' '$targetFile' && chmod 644 '$targetFile'", 5
         )
+    }
+
+    private fun killOrphanedWatcherIfNeeded() {
+        if (!suSession.isSessionOpen()) return
+        val r = suSession.execute(
+            "if [ -f '${GameAntiMarkRepository.PID_FILE}' ]; then " +
+                "OLD_PID=\$(cat '${GameAntiMarkRepository.PID_FILE}' 2>/dev/null); " +
+                "if [ -n \"\$OLD_PID\" ] && kill -0 \"\$OLD_PID\" 2>/dev/null; then " +
+                "kill \"\$OLD_PID\" 2>/dev/null; sleep 0.2; kill -9 \"\$OLD_PID\" 2>/dev/null; echo KILLED_ORPHAN; " +
+                "else " +
+                "rm -f '${GameAntiMarkRepository.PID_FILE}'; echo STALE_PID; " +
+                "fi; " +
+                "fi", 5
+        )
+        try {
+            val out = r.output.trim()
+            if (out.contains("KILLED_ORPHAN") || out.contains("STALE_PID")) {
+                Log.d(TAG, "killed orphaned watcher: $out")
+            }
+        } catch (_: Exception) {}
     }
 
     fun stop(): Boolean {

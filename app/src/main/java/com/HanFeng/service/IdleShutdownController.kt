@@ -86,11 +86,6 @@ object IdleShutdownController {
             Log.w(TAG, "stop RootHide watcher fail: ${t.message}")
         }
         try {
-            GameAntiMarkManager.stop()
-        } catch (t: Throwable) {
-            Log.w(TAG, "stop GameAntiMark watcher fail: ${t.message}")
-        }
-        try {
             HotspotInterceptor.stopDnsHijack(context)
         } catch (t: Throwable) {
             Log.w(TAG, "stop HotspotInterceptor fail: ${t.message}")
