@@ -38,22 +38,22 @@ class GuideActivity : BaseActivity() {
             binding.contentText.text = content
         }
         binding.btnBack.setOnClickListener { finish() }
+        binding.btnReward.setOnClickListener {
+            launchActivitySafely(
+                RewardActivity.createIntent(this),
+                failureMessage = "打开赞赏页失败"
+            )
+        }
     }
 
     private fun showCollapsibleGuideSections(content: String) {
         val parsed = parseGuideContent(content)
         binding.contentText.text = parsed.headerTitle
         binding.contentText.visibility = View.VISIBLE
-        if (parsed.headerSubtitle.isNotBlank()) {
-            binding.contentSubText.visibility = View.VISIBLE
-            binding.contentSubText.text = parsed.headerSubtitle
-        } else {
-            binding.contentSubText.visibility = View.GONE
-            binding.contentSubText.text = ""
-        }
+        binding.contentSubText.visibility = View.GONE
+        binding.contentSubText.text = ""
         val sections = parsed.sections
         if (sections.isEmpty()) {
-            binding.contentSubText.visibility = View.GONE
             binding.sectionsContainer.visibility = View.GONE
             binding.contentText.visibility = View.VISIBLE
             binding.contentText.text = content

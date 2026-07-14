@@ -66,6 +66,22 @@ class RootTerminalActivity : BaseActivity() {
             autoScrollEnabled = scrollY + scrollViewHeight >= childHeight - 48
         }
 
+        val showKeyboardClickListener = View.OnClickListener {
+            terminalInput.requestFocus()
+            val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+            imm.showSoftInput(terminalInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        }
+        terminalScroll.setOnClickListener(showKeyboardClickListener)
+        terminalOutput.setOnClickListener(showKeyboardClickListener)
+        terminalOutput.setOnTouchListener { _, event ->
+            if (event.action == android.view.MotionEvent.ACTION_UP) {
+                terminalInput.requestFocus()
+                val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                imm.showSoftInput(terminalInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                false
+            } else false
+        }
+
         terminalInput.setOnEditorActionListener { _, actionId, event ->
             if (actionId == EditorInfo.IME_ACTION_SEND ||
                 (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)) {
@@ -113,6 +129,11 @@ class RootTerminalActivity : BaseActivity() {
         }
 
         startShell()
+        terminalInput.requestFocus()
+        terminalInput.post {
+            val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+            imm.showSoftInput(terminalInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        }
     }
 
     private fun appendOutput(text: String) {
@@ -126,6 +147,32 @@ class RootTerminalActivity : BaseActivity() {
                 terminalScroll.post { terminalScroll.fullScroll(ScrollView.FOCUS_DOWN) }
             }
         }
+    }
+
+    private fun truncateToCharacterBoundary(bytes: ByteArray, length: Int): Int {
+        if (length <= 0) return 0
+        var idx = length - 1
+        var trailBytesNeeded = 0
+        while (idx >= 0 && (bytes[idx].toInt() and 0xC0) == 0x80) {
+            trailBytesNeeded++
+            idx--
+            if (trailBytesNeeded >= 4) break
+        }
+        if (idx < 0) {
+            return 0
+        }
+        val lead = bytes[idx].toInt() and 0xFF
+        val expectedLen = when {
+            lead and 0x80 == 0x00 -> 1
+            lead and 0xE0 == 0xC0 -> 2
+            lead and 0xF0 == 0xE0 -> 3
+            lead and 0xF8 == 0xF0 -> 4
+            else -> 1
+        }
+        if (trailBytesNeeded + 1 >= expectedLen) {
+            return length
+        }
+        return idx
     }
 
     private fun startShell() {
@@ -142,17 +189,48 @@ class RootTerminalActivity : BaseActivity() {
                 Thread {
                     try {
                         val input = proc.inputStream
-                        val buf = ByteArray(4096)
-                        var n: Int
+                        val decoder = java.nio.charset.Charset.forName("UTF-8").newDecoder()
+                            .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+                            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
+                        val byteBuf = java.nio.ByteBuffer.allocate(8192)
+                        var pendingBytes = 0
                         while (true) {
-                            n = try {
-                                input.read(buf)
+                            val n: Int
+                            try {
+                                n = if (pendingBytes > 0) {
+                                    System.arraycopy(byteBuf.array(), 8192 - pendingBytes, byteBuf.array(), 0, pendingBytes)
+                                    input.read(byteBuf.array(), pendingBytes, 8192 - pendingBytes)
+                                } else {
+                                    input.read(byteBuf.array())
+                                }
                             } catch (_: Exception) {
                                 break
                             }
                             if (n < 0) break
                             if (n == 0) continue
-                            val raw = String(buf, 0, n)
+                            val totalLen = if (pendingBytes > 0) pendingBytes + n else n
+                            if (totalLen <= 0) { pendingBytes = 0; continue }
+
+                            val safeLen = truncateToCharacterBoundary(byteBuf.array(), totalLen)
+                            pendingBytes = totalLen - safeLen
+                            if (pendingBytes > 0 && safeLen < totalLen) {
+                                System.arraycopy(byteBuf.array(), safeLen, byteBuf.array(), 8192 - pendingBytes, pendingBytes)
+                            }
+
+                            if (safeLen > 0) {
+                                byteBuf.limit(safeLen)
+                                byteBuf.position(0)
+                                val charBuf = decoder.decode(byteBuf)
+                                decoder.reset()
+                                val raw = charBuf.toString()
+                                handler.post { appendOutput(raw) }
+                            }
+                        }
+                        if (pendingBytes > 0) {
+                            byteBuf.position(0)
+                            byteBuf.limit(pendingBytes)
+                            val charBuf = decoder.decode(byteBuf)
+                            val raw = charBuf.toString()
                             handler.post { appendOutput(raw) }
                         }
                         handler.post {
