@@ -126,6 +126,7 @@ class GuideActivity : BaseActivity() {
         private val sectionTitleRegex = Regex("^[一二三四五六七八九十]+、.+")
         private val DEFAULT_GUIDE_CONTENT =
             "APP作者：寒枫，酷安ID：寒枫颜值担当\n" +
+            "反馈群：573309536\n" +
             "一、首次使用完整教程\n" +
             "1. 打开应用后先停留在首页，确认状态卡可正常显示。\n" +
             "2. 应用会弹窗建议关闭电池优化和允许自启动，请点击允许。\n" +
