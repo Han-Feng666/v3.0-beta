@@ -500,8 +500,10 @@ class AdBlockVpnService : VpnService() {
                 scope.launch {
                     runCatching {
                         val started = HotspotInterceptor.startDnsHijack(this@AdBlockVpnService)
-                        if (!started) {
-                            LogRepository.append(this@AdBlockVpnService, "Hotspot DNS hijack.failed to start on VPN ready")
+                        if (started) {
+                            FeatureSettingsRepository.setHotspotStartTime(this@AdBlockVpnService)
+                        } else {
+                            LogRepository.append(this@AdBlockVpnService, "Hotspot DNS hijack failed to start on VPN ready")
                         }
                     }.onFailure {
                         LogRepository.append(this@AdBlockVpnService, "Hotspot DNS hijack exception: ${it.message ?: it.javaClass.simpleName}")

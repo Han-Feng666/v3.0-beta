@@ -93,6 +93,9 @@ class SettingsActivity : BaseActivity() {
     private lateinit var hotspotModeLayout: LinearLayout
     private lateinit var rgHotspotMode: RadioGroup
     private lateinit var tvHotspotStatus: TextView
+    private lateinit var tvHotspotDevices: TextView
+    private lateinit var tvHotspotBlocked: TextView
+    private lateinit var tvHotspotRuntime: TextView
 
     private lateinit var btnChooseBackground: Button
     private lateinit var btnRemoveBackground: Button
@@ -174,6 +177,9 @@ class SettingsActivity : BaseActivity() {
         hotspotModeLayout = findViewById(R.id.hotspotModeLayout)
         rgHotspotMode = findViewById(R.id.rgHotspotMode)
         tvHotspotStatus = findViewById(R.id.tvHotspotStatus)
+        tvHotspotDevices = findViewById(R.id.tvHotspotDevices)
+        tvHotspotBlocked = findViewById(R.id.tvHotspotBlocked)
+        tvHotspotRuntime = findViewById(R.id.tvHotspotRuntime)
 
         btnChooseBackground = findViewById(R.id.btnChooseBackground)
         btnRemoveBackground = findViewById(R.id.btnRemoveBackground)
@@ -295,6 +301,8 @@ class SettingsActivity : BaseActivity() {
             }
             sendBroadcast(Intent(AdBlockVpnService.ACTION_RELOAD).setPackage(packageName))
         }
+
+        startHotspotStatusRefresh()
         btnCoexistSettings.setOnClickListener {
             launchActivitySafely(
                 Intent(this, WhitelistActivity::class.java).putExtra(
@@ -2157,6 +2165,63 @@ class SettingsActivity : BaseActivity() {
             )
             .setPositiveButton("确定", null)
             .showSafely(this, "Show govern result dialog failed")
+    }
+
+    private var hotspotStatusJob: Job? = null
+
+    private fun startHotspotStatusRefresh() {
+        hotspotStatusJob?.cancel()
+        hotspotStatusJob = lifecycleScope.launch {
+            while (isActive) {
+                refreshHotspotStatus()
+                delay(5_000L)
+            }
+        }
+    }
+
+    private fun refreshHotspotStatus() {
+        if (!FeatureSettingsRepository.isHotspotBlockEnabled(this)) {
+            tvHotspotDevices.text = "设备数: 0"
+            tvHotspotBlocked.text = "拦截: 0"
+            tvHotspotRuntime.text = "运行: 0分钟"
+            return
+        }
+
+        val mode = FeatureSettingsRepository.getHotspotBlockMode(this)
+        if (mode == "dns") {
+            try {
+                val status = com.HanFeng.adblocker.shizuku.HotspotInterceptor.getHotspotStatus(this)
+                tvHotspotDevices.text = "设备数: ${status.connectedDevices.size}"
+                tvHotspotBlocked.text = "拦截: ${status.blockedQueries}"
+                val startTime = FeatureSettingsRepository.getHotspotStartTime(this)
+                val minutes = if (startTime > 0) {
+                    (System.currentTimeMillis() - startTime) / 60_000
+                } else 0
+                tvHotspotRuntime.text = "运行: ${minutes}分钟"
+
+                FeatureSettingsRepository.updateHotspotDeviceCount(this, status.connectedDevices.size)
+                if (status.blockedQueries > 0) {
+                    FeatureSettingsRepository.incrementHotspotBlockedCount(this, 0)
+                }
+            } catch (e: Exception) {
+                // Silent fail for status refresh
+            }
+        } else {
+            val deviceCount = FeatureSettingsRepository.getHotspotDeviceCount(this)
+            val blockedCount = FeatureSettingsRepository.getHotspotBlockedCount(this)
+            val startTime = FeatureSettingsRepository.getHotspotStartTime(this)
+            val minutes = if (startTime > 0) {
+                (System.currentTimeMillis() - startTime) / 60_000
+            } else 0
+            tvHotspotDevices.text = "设备数: $deviceCount"
+            tvHotspotBlocked.text = "拦截: $blockedCount"
+            tvHotspotRuntime.text = "运行: ${minutes}分钟"
+        }
+    }
+
+    override fun onDestroy() {
+        hotspotStatusJob?.cancel()
+        super.onDestroy()
     }
 
     companion object {

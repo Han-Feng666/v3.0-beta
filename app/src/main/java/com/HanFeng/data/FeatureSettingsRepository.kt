@@ -25,6 +25,9 @@ object FeatureSettingsRepository {
     private const val KEY_AD_REWARD_INTERCEPT_TODAY = "ad_reward_intercept_today"
     private const val KEY_HOTSPOT_BLOCK_ENABLED = "hotspot_block_enabled"
     private const val KEY_HOTSPOT_BLOCK_MODE = "hotspot_block_mode"
+    private const val KEY_HOTSPOT_BLOCKED_COUNT = "hotspot_blocked_count"
+    private const val KEY_HOTSPOT_DEVICE_COUNT = "hotspot_device_count"
+    private const val KEY_HOTSPOT_START_TIME = "hotspot_start_time"
     private const val KEY_AUTO_INSTALL_SYSTEM_CERT = "auto_install_system_cert"
     private const val KEY_CUSTOM_BACKGROUND_PATH = "custom_background_path"
     private const val MAX_PENDING_FEEDBACK_RULES = 50
@@ -342,6 +345,56 @@ object FeatureSettingsRepository {
             .putString(KEY_HOTSPOT_BLOCK_MODE, mode)
             .apply()
         cachedHotspotBlockMode = mode
+    }
+
+    fun incrementHotspotBlockedCount(context: Context, count: Int = 1) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .apply {
+                val current = getLong(KEY_HOTSPOT_BLOCKED_COUNT, 0)
+                putLong(KEY_HOTSPOT_BLOCKED_COUNT, current + count)
+            }
+            .apply()
+    }
+
+    fun getHotspotBlockedCount(context: Context): Long {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_HOTSPOT_BLOCKED_COUNT, 0)
+    }
+
+    fun updateHotspotDeviceCount(context: Context, count: Int) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_HOTSPOT_DEVICE_COUNT, count)
+            .apply()
+    }
+
+    fun getHotspotDeviceCount(context: Context): Int {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(KEY_HOTSPOT_DEVICE_COUNT, 0)
+    }
+
+    fun setHotspotStartTime(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_HOTSPOT_START_TIME, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun getHotspotStartTime(context: Context): Long {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_HOTSPOT_START_TIME, 0)
+    }
+
+    fun resetHotspotStats(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .apply {
+                remove(KEY_HOTSPOT_BLOCKED_COUNT)
+                remove(KEY_HOTSPOT_DEVICE_COUNT)
+                remove(KEY_HOTSPOT_START_TIME)
+            }
+            .apply()
     }
 
     fun isAutoInstallSystemCertEnabled(context: Context): Boolean {
