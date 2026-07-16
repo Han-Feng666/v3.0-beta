@@ -13,6 +13,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.HanFeng.R
+import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.StatsRepository
 import com.HanFeng.databinding.FragmentStatsBinding
 import com.HanFeng.databinding.ItemRankingRowBinding
@@ -38,7 +39,7 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         _binding = FragmentStatsBinding.bind(view)
         val binding = _binding ?: return
-        view.findViewById<ImageView>(R.id.statsBackground).applyCustomAssetBackground("custom/stats_background")
+        applyBackgroundImage(view.findViewById(R.id.statsBackground))
         val initialTopPadding = binding.statsScroll.paddingTop
         val initialBottomPadding = binding.statsScroll.paddingBottom
         ViewCompat.setOnApplyWindowInsetsListener(binding.statsScroll) { content, insets ->
@@ -243,6 +244,16 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
             1 -> medalSilver ?: loadCustomAssetDrawable(ctx, "custom/medal_silver")?.also { medalSilver = it }
             2 -> medalBronze ?: loadCustomAssetDrawable(ctx, "custom/medal_bronze")?.also { medalBronze = it }
             else -> null
+        }
+    }
+
+    private fun applyBackgroundImage(imageView: ImageView) {
+        val ctx = imageView.context.applicationContext
+        val customPath = FeatureSettingsRepository.getCustomBackgroundPath(ctx)
+        if (!customPath.isNullOrEmpty()) {
+            imageView.applyCustomFileBackground(customPath)
+        } else {
+            imageView.applyCustomAssetBackground("custom/background")
         }
     }
 }

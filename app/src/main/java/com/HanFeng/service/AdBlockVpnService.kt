@@ -486,6 +486,14 @@ class AdBlockVpnService : VpnService() {
                 whitelistCount = WhitelistRepository.getPackages(this@AdBlockVpnService).size,
                 dynamicDecryptRouteCount = HttpsDecryptRouteRepository.getRoutes(this@AdBlockVpnService).size
             )
+
+            // 自动安装证书到系统 CA 目录
+            if (httpDecryptEnabled && FeatureSettingsRepository.isAutoInstallSystemCertEnabled(this@AdBlockVpnService)) {
+                scope.launch {
+                    autoInstallSystemCertificate()
+                }
+            }
+
             if (FeatureSettingsRepository.isHotspotBlockEnabled(this@AdBlockVpnService) &&
                 FeatureSettingsRepository.getHotspotBlockMode(this@AdBlockVpnService) == "dns"
             ) {
@@ -493,7 +501,7 @@ class AdBlockVpnService : VpnService() {
                     runCatching {
                         val started = HotspotInterceptor.startDnsHijack(this@AdBlockVpnService)
                         if (!started) {
-                            LogRepository.append(this@AdBlockVpnService, "Hotspot DNS hijack failed to start on VPN ready")
+                            LogRepository.append(this@AdBlockVpnService, "Hotspot DNS hijack.failed to start on VPN ready")
                         }
                     }.onFailure {
                         LogRepository.append(this@AdBlockVpnService, "Hotspot DNS hijack exception: ${it.message ?: it.javaClass.simpleName}")
@@ -1682,20 +1690,101 @@ class AdBlockVpnService : VpnService() {
         "reward_grant", "rewardgrant", "grant_reward", "grantreward",
         "reward_claim", "rewardclaim", "claim_reward", "claimreward",
         "rewarded_complete", "rewardedcomplete", "rewarded_finish", "rewardedfinish",
-        "incentive_complete", "incentivecomplete", "inspire_complete", "inspirecomplete"
+        "incentive_complete", "incentivecomplete", "inspire_complete", "inspirecomplete",
+        "s2s_callback", "s2scallback", "server_callback", "servercallback",
+        "postback_reward", "postbackreward", "server_to_server", "servertoserver",
+        "reward_notify", "rewardnotify", "reward_verify_callback", "rewardverifycallback",
+        "ad_complete_callback", "adcompletecallback", "video_complete", "videocomplete",
+        "reward_video_complete", "rewardvideocomplete", "incentive_video", "incentivevideo",
+        "offer_complete", "offercomplete", "offer_wall", "offerwall",
+        "task_complete", "taskcomplete", "task_reward", "taskreward",
+        "survey_complete", "surveycomplete", "survey_reward", "surveyreward",
+        "install_callback", "installcallback", "click_callback", "clickcallback",
+        "conversion_callback", "conversioncallback", "attribution_callback", "attributioncallback",
+        "event_callback", "eventcallback", "log_event", "logevent",
+        "reward_event", "rewardevent", "earn_event", "earnevent",
+        "coin_reward", "coinreward", "cash_reward", "cashreward",
+        "point_reward", "poin treward", "score_reward", "scorereward",
+        "diamond_reward", "diamondreward", "gold_reward", "goldreward",
+        "gift_reward", "giftreward", "bonus_reward", "bonusreward",
+        "prize_grant", "prizegrant", "lottery_reward", "lotteryreward",
+        "spin_reward", "spinreward", "wheel_reward", "wheelreward",
+        "daily_reward", "dailyreward", "checkin_reward", "checkinreward",
+        "login_reward", "loginreward", "share_reward", "sharereward",
+        "invite_reward", "invitereward", "referral_reward", "referralreward",
+        "level_reward", "levelreward", "achievement_reward", "achievementreward",
+        "milestone_reward", "milestonereward", "combo_reward", "comboreward",
+        "incentive_complete", "incentivecomplete", "inspire_complete", "inspirecomplete",
+        "s2s_verified", "s2sverified", "server_verified", "serververified",
+        "postback_success", "postbacksuccess", "callback_success", "callbacksuccess",
+        "install_verified", "installverified", "click_verified", "clickverified",
+        "conversion_verified", "conversionverified", "attribution_verified", "attributionverified",
+        "task_complete", "taskcomplete", "survey_complete", "surveycomplete",
+        "offer_complete", "offercomplete", "milestone_complete", "milestonecomplete",
+        "daily_complete", "dailycomplete", "checkin_complete", "checkincomplete",
+        "sign_complete", "signcomplete", "share_complete", "sharecomplete",
+        "invite_complete", "invitecomplete", "referral_complete", "referralcomplete",
+        "spin_complete", "spincomplete", "wheel_complete", "wheelcomplete",
+        "lottery_complete", "lotterycomplete", "draw_complete", "drawcomplete",
+        "redpacket_complete", "redpacketcomplete", "hongbao_complete", "hongbaocomplete",
+        "level_complete", "levelcomplete", "achievement_complete", "achievementcomplete",
+        "combo_complete", "combocomplete", "chest_opened", "chestopened",
+        "box_opened", "boxopened", "pack_opened", "packopened",
+        "loot_received", "lootreceived", "card_received", "cardreceived",
+        "ticket_received", "ticketreceived", "key_received", "keyreceived",
+        "token_received", "tokenreceived", "badge_received", "badgereceived",
+        "energy_full", "energyfull", "stamina_full", "staminafull",
+        "lives_full", "livesfull", "hearts_full", "heartsfull",
+        "hp_full", "hpfull", "exp_complete", "expcomplete",
+        "experience_complete", "experiencecomplete", "xp_received", "xpreceived"
     )
 
     private val adFreeRewardVendorTokens = listOf(
-        "pangolin", "pangle", "snssdk",
-        "gdt", "guangdiantong",
-        "tanx", "kuaishou",
-        "sigmob", "mintegral", "vungle", "unity3d",
+        "pangolin", "pangle", "snssdk", "bytedance", "bytecdn", "byteimg",
+        "gdt", "guangdiantong", "tencentad", "qqad", "wechatad",
+        "tanx", "alimama", "alibaba", "taobao", "tmall",
+        "kuaishou", "kwai", "nebula",
+        "sigmob", "mintegral", "vungle", "unity3d", "unity-ads",
         "ironsrc", "applovin", "chartboost", "inmobi",
-        "admob", "doubleclick", "googleadservices",
+        "admob", "doubleclick", "googleadservices", "googleadmob",
         "topon", "tradplus", "adscope", "beizi",
         "youmi", "adcolony", "ogury", "smaato", "tapjoy",
         "mopub", "fyber", "inneractive", "moloco", "bidmachine",
-        "startapp", "pubnative", "rayjump", "appsflyer", "adjust", "singular"
+        "startapp", "pubnative", "rayjump", "appsflyer", "adjust", "singular",
+        "kochava", "branch", "tenjin", "skadnetwork",
+        "facebook", "audience_network", "meta", "fbad",
+        "baidu", "baidumob", "baidumobads", "bdmob",
+        "huawei", "huaweiads", "hms", "hicloud",
+        "xiaomi", "xiaomiad", "miuiad", "mimob",
+        "oppo", "oppoads", "heytap", "nearme",
+        "vivo", "vivo_ad", "vivoad", "jovi",
+        "samsung", "samsungads", "galaxy",
+        "lg", "lgad", "sony", "sonyad",
+        "motorola", "nokia", "oneplus", "realme", "oppo",
+        "admob", "firebase", "crashlytics", "analytics",
+        "amplitude", "mixpanel", "flurry", "bugsnay", "newrelic",
+        "braze", "clevertap", "moengage", "leanplum",
+        "onesignal", "airship", "urban", "pushwoosh",
+        "countly", "localytics", "apsalar", "taplytics",
+        "beead", "bee-ad", "yousu", "yousuad",
+        "adview", "adviewcn", "domob", "domobcn",
+        "guozhen", "guozhenad", "airpus", "airpusad",
+        "jiatuan", "jiatuanad", "wubi", "wubiad",
+        "chuangyi", "chuangyiad", "feiyu", "feiyuad",
+        "yixuan", "yixuanad", "youmeng", "ymob",
+        "dianru", "drmob", "guoan", "gaad",
+        "admaster", "mdotm", "wqmobile", "wqmob",
+        "mads", "madhouse", "miit", "miitbeian",
+        "cnzz", "cnad", "allyes", "alimama",
+        "tanx", "tanx.com", "csbew", "csbew.com",
+        "jmads", "jpush", "jiguang", "aurora",
+        "getui", "igexin", "gepush", "unipush",
+        "umeng", "umengad", "umengads",
+        "友盟", "友盟广告", "友盟+",
+        "穿山甲", "优量汇", "百青藤",
+        "快手广告", "磁力引擎", "磁力万象",
+        "华为广告", "小米广告", "OPPO广告", "vivo广告",
+        "三星广告", "魅族广告", "一加广告", "realme广告"
     )
 
     private fun looksLikeAdFreeRewardDomain(domain: String): Boolean {
@@ -1708,7 +1797,21 @@ class AdBlockVpnService : VpnService() {
         val rewardKeywords = listOf(
             "reward", "verify", "callback", "unlock", "confirm",
             "complete", "completed", "finish", "finished", "grant", "claim",
-            "incentive", "inspire", "earned", "bonus"
+            "incentive", "inspire", "earned", "bonus",
+            "coin", "cash", "point", "score", "diamond", "gold",
+            "gift", "prize", "lottery", "spin", "wheel",
+            "daily", "checkin", "login", "share", "invite",
+            "referral", "level", "achievement", "milestone", "combo",
+            "s2s", "postback", "server_to_server", "verified",
+            "task", "survey", "offer", "install", "click",
+            "conversion", "attribution", "milestone",
+            "chest", "box", "pack", "loot", "card",
+            "ticket", "key", "token", "badge",
+            "energy", "stamina", "lives", "hearts", "hp",
+            "exp", "experience", "xp",
+            "redpacket", "hongbao", "angpao", "lucky",
+            "draw", "scratch", "raffle",
+            "sign", "mission", "quest", "challenge", "event"
         )
         val hitCount = rewardKeywords.count { lower.contains(it) }
         return hitCount >= 2
@@ -8292,14 +8395,14 @@ class AdBlockVpnService : VpnService() {
             "sdk", "material", "creative"
         )
         val domainPrefix = normalizedDomain.substringBefore('.')
-        val matchedSubdomain = adSubdomainPatterns.find { 
-            domainPrefix.startsWith(it) || domainPrefix == it || domainPrefix.startsWith("$it-") 
+        val matchedSubdomain = adSubdomainPatterns.find {
+            domainPrefix.startsWith(it) || domainPrefix == it || domainPrefix.startsWith("$it-")
         }
         if (matchedSubdomain != null) {
             score += 3
             reasons += "subdomain:$matchedSubdomain"
         }
-        
+
         // 2. 域名关键词（权重：2 分）
         val adKeywords = listOf("ads", "banner", "promo", "track", "tracking", "sdk", "material", "creative")
         val matchedKeyword = adKeywords.find { normalizedDomain.contains(it) }
@@ -8307,7 +8410,7 @@ class AdBlockVpnService : VpnService() {
             score += 2
             reasons += "keyword:$matchedKeyword"
         }
-        
+
         // 3. 已知广告 SDK 域名模式（权重：4 分）
         val sdkPatterns = listOf(
             "pangolin", "pangle", "gromore", "csj", "cjs", "oceanengine",
@@ -8320,7 +8423,7 @@ class AdBlockVpnService : VpnService() {
             score += 4
             reasons += "sdk:$matchedSdk"
         }
-        
+
         // 4. 路径式域名特征（权重：2 分）
         val pathLikePatterns = listOf("/ad/", "/ads/", "/banner/", "/promo/", "/tracking/")
         val matchedPath = pathLikePatterns.find { normalizedDomain.contains(it) }
@@ -8328,8 +8431,47 @@ class AdBlockVpnService : VpnService() {
             score += 2
             reasons += "path:$matchedPath"
         }
-        
-        // 5. App 类型加成（小说/视频/社区 App 的可疑域名更可信）
+
+        // 5. 域名长度异常（权重：2 分）
+        val domainWithoutTld = normalizedDomain.substringBeforeLast('.')
+        if (domainWithoutTld.length > 30) {
+            score += 2
+            reasons += "long-domain:${domainWithoutTld.length}"
+        }
+
+        // 6. 随机字符模式检测（权重：3 分）
+        if (looksLikeRandomString(domainWithoutTld)) {
+            score += 3
+            reasons += "random-pattern"
+        }
+
+        // 7. 数字后缀模式（权重：2 分）
+        if (hasNumericSuffixPattern(domainWithoutTld)) {
+            score += 2
+            reasons += "numeric-suffix"
+        }
+
+        // 8. 多级子域名广告模式（权重：3 分）
+        val subdomainCount = normalizedDomain.split('.').size - 2
+        if (subdomainCount >= 3) {
+            val allParts = normalizedDomain.split('.')
+            val hasAdPart = allParts.any { part ->
+                adSubdomainPatterns.any { pattern -> part.startsWith(pattern) || part == pattern }
+            }
+            if (hasAdPart) {
+                score += 3
+                reasons += "multi-subdomain-ad"
+            }
+        }
+
+        // 9. 连字符分隔广告模式（权重：2 分）
+        if (normalizedDomain.contains("-ad-") || normalizedDomain.contains("-ads-") ||
+            normalizedDomain.contains("-track-") || normalizedDomain.contains("-banner-")) {
+            score += 2
+            reasons += "hyphen-ad-pattern"
+        }
+
+        // 10. App 类型加成（小说/视频/社区 App 的可疑域名更可信）
         if (novelApp && score >= 2) {
             score += 2
             reasons += "novel-app-boost"
@@ -8338,16 +8480,103 @@ class AdBlockVpnService : VpnService() {
             score += 1
             reasons += "aggressive-app-boost"
         }
-        
-        // 6. 供应商信号加成（未知供应商 + 可疑域名 = 更可疑）
+
+        // 11. 供应商信号加成（未知供应商 + 可疑域名 = 更可疑）
         if (vendor == "其它 (Other)" && score >= 3) {
             score += 1
             reasons += "unknown-vendor-boost"
         }
-        
+
+        // 12. TLD 异常检测（权重：2 分）
+        val tld = normalizedDomain.substringAfterLast('.', "")
+        val unusualTlds = setOf("xyz", "top", "club", "work", "click", "link", "info", "biz", "cc", "tk", "ml", "ga", "cf", "gq")
+        if (tld in unusualTlds && domainWithoutTld.length > 15) {
+            score += 2
+            reasons += "unusual-tld:$tld"
+        }
+
+        // 13. 连续数字模式（权重：2 分）
+        if (hasConsecutiveDigitPattern(domainWithoutTld)) {
+            score += 2
+            reasons += "consecutive-digits"
+        }
+
+        // 14. 重复字符模式（权重：2 分）
+        if (hasRepeatedCharPattern(domainWithoutTld)) {
+            score += 2
+            reasons += "repeated-chars"
+        }
+
+        // 15. 拼音广告模式（权重：3 分）
+        if (looksLikePinyinAdDomain(domainWithoutTld)) {
+            score += 3
+            reasons += "pinyin-ad-pattern"
+        }
+
+        // 16. 元音比例异常（权重：2 分）
+        if (hasAbnormalVowelRatio(domainWithoutTld)) {
+            score += 2
+            reasons += "abnormal-vowel-ratio"
+        }
+
+        // 17. 特殊字符模式（权重：2 分）
+        if (hasSpecialCharPattern(domainWithoutTld)) {
+            score += 2
+            reasons += "special-char-pattern"
+        }
+
+        // 18. 域名熵值检测（权重：3 分）
+        if (hasHighEntropy(domainWithoutTld)) {
+            score += 3
+            reasons += "high-entropy"
+        }
+
+        // 19. 广告SDK变体模式（权重：4 分）
+        val sdkVariantMatch = looksLikeAdSdkVariant(domainWithoutTld)
+        if (sdkVariantMatch != null) {
+            score += 4
+            reasons += "sdk-variant:$sdkVariantMatch"
+        }
+
+        // 20. 动态域名模式（权重：3 分）
+        if (looksLikeDynamicAdDomain(normalizedDomain)) {
+            score += 3
+            reasons += "dynamic-ad-domain"
+        }
+
+        // 21. CDN广告模式（权重：2 分）
+        if (looksLikeCdnAdDomain(normalizedDomain)) {
+            score += 2
+            reasons += "cdn-ad-pattern"
+        }
+
+        // 22. API广告模式（权重：2 分）
+        if (looksLikeApiAdDomain(normalizedDomain)) {
+            score += 2
+            reasons += "api-ad-pattern"
+        }
+
+        // 23. 数据上报模式（权重：3 分）
+        if (looksLikeDataReportDomain(normalizedDomain)) {
+            score += 3
+            reasons += "data-report-pattern"
+        }
+
+        // 24. 混淆域名模式（权重：3 分）
+        if (looksLikeObfuscatedDomain(domainWithoutTld)) {
+            score += 3
+            reasons += "obfuscated-domain"
+        }
+
+        // 25. 短域名+数字模式（权重：2 分）
+        if (looksLikeShortNumDomain(domainWithoutTld)) {
+            score += 2
+            reasons += "short-num-domain"
+        }
+
         // 评分达到阈值才拦截
-        val threshold = if (novelApp) 3 else 5
-        
+        val threshold = if (novelApp) 3 else 4
+
         return if (score >= threshold) {
             // 创建一个虚拟规则用于标记（使用 RuleSource.REFERENCE 标记为智能识别）
             BlockRule(
@@ -8360,6 +8589,203 @@ class AdBlockVpnService : VpnService() {
         } else {
             null
         }
+    }
+
+    private fun looksLikeRandomString(domain: String): Boolean {
+        if (domain.length < 8) return false
+        val consonants = domain.count { it.isLetter() && it !in "aeiouAEIOU" }
+        val digits = domain.count { it.isDigit() }
+        val totalLetters = domain.count { it.isLetter() }
+        if (totalLetters == 0) return false
+        val consonantRatio = consonants.toDouble() / totalLetters
+        val digitRatio = digits.toDouble() / domain.length
+        return (consonantRatio > 0.7 && digitRatio > 0.2) ||
+               (digitRatio > 0.4 && domain.length > 12)
+    }
+
+    private fun hasNumericSuffixPattern(domain: String): Boolean {
+        if (domain.length < 6) return false
+        val trailingDigits = domain.takeLastWhile { it.isDigit() }
+        return trailingDigits.length >= 3 && trailingDigits.length < domain.length / 2
+    }
+
+    private fun hasConsecutiveDigitPattern(domain: String): Boolean {
+        if (domain.length < 8) return false
+        var consecutive = 0
+        var maxConsecutive = 0
+        for (char in domain) {
+            if (char.isDigit()) {
+                consecutive++
+                maxConsecutive = maxOf(maxConsecutive, consecutive)
+            } else {
+                consecutive = 0
+            }
+        }
+        return maxConsecutive >= 4
+    }
+
+    private fun hasRepeatedCharPattern(domain: String): Boolean {
+        if (domain.length < 8) return false
+        var consecutive = 0
+        var maxConsecutive = 0
+        var prevChar: Char? = null
+        for (char in domain) {
+            if (char == prevChar) {
+                consecutive++
+                maxConsecutive = maxOf(maxConsecutive, consecutive)
+            } else {
+                consecutive = 1
+            }
+            prevChar = char
+        }
+        return maxConsecutive >= 3
+    }
+
+    private fun looksLikePinyinAdDomain(domain: String): Boolean {
+        val pinyinAdPatterns = listOf(
+            "guanggao", "guangg", "ggao", "tuijian", "tuijian",
+            "tiao", "banner", "hengfu", "kaiban", "chaping",
+            "info", "tui", "ad", "ads", "advert", "promo",
+            "xiazai", "download", "click", "clicks", "dianji",
+            "liuliang", "traffic", "zhuanfa", "fenxiang",
+            "huodong", "activity", "tehui", "tejia", "youhui",
+            "lingqu", "领取", "mianfei", "免费", "song", "送"
+        )
+        val lower = domain.lowercase()
+        return pinyinAdPatterns.any { lower.contains(it) }
+    }
+
+    private fun hasAbnormalVowelRatio(domain: String): Boolean {
+        if (domain.length < 10) return false
+        val vowels = domain.count { it in "aeiouAEIOU" }
+        val ratio = vowels.toDouble() / domain.length
+        return ratio < 0.1 || ratio > 0.5
+    }
+
+    private fun hasSpecialCharPattern(domain: String): Boolean {
+        if (domain.length < 8) return false
+        val specialChars = domain.count { it == '-' || it == '_' }
+        return specialChars >= 3 || (specialChars >= 2 && domain.length < 20)
+    }
+
+    private fun hasHighEntropy(domain: String): Boolean {
+        if (domain.length < 8) return false
+        val freq = mutableMapOf<Char, Int>()
+        for (char in domain) {
+            freq[char] = (freq[char] ?: 0) + 1
+        }
+        var entropy = 0.0
+        val len = domain.length.toDouble()
+        for (count in freq.values) {
+            val p = count / len
+            entropy -= p * kotlin.math.ln(p) / kotlin.math.ln(2.0)
+        }
+        return entropy > 3.5 && domain.length > 12
+    }
+
+    private fun looksLikeAdSdkVariant(domain: String): String? {
+        val sdkVariants = listOf(
+            "pangle" to listOf("pangle", "pangolin", "panle", "pangl", "pngl", "p-n-g-l"),
+            "gdt" to listOf("gdt", "g-d-t", "gdtqq", "qqgdt"),
+            "sigmob" to listOf("sigmob", "sig-mob", "sgmb", "sgmob"),
+            "mintegral" to listOf("mintegral", "m-integral", "mntgrl", "mngtl"),
+            "applovin" to listOf("applovin", "app-lovin", "applvn", "ap-lv"),
+            "ironsource" to listOf("ironsource", "iron-source", "ironsrc", "irnsrc"),
+            "unityads" to listOf("unityads", "unity-ads", "unity3d", "unty3d"),
+            "vungle" to listOf("vungle", "vungle", "vngl", "v-ngl"),
+            "admob" to listOf("admob", "ad-mob", "admobgoogle", "googeadmob"),
+            "youmi" to listOf("youmi", "you-mi", "ymiad", "ymob"),
+            "adwo" to listOf("adwo", "ad-wo", "adwocom", "adwo-cn"),
+            "domob" to listOf("domob", "do-mob", "domobcn", "domob-ad"),
+            "wqmobile" to listOf("wqmobile", "wq-mobile", "wqmob", "wq-mob"),
+            "mads" to listOf("mads", "m-ads", "madscn", "m-ad"),
+            "tanx" to listOf("tanx", "tan-x", "tanxcom", "tanx-ad"),
+            "alimama" to listOf("alimama", "ali-mama", "almama", "ali-m"),
+            "umeng" to listOf("umeng", "u-meng", "umengad", "um-ad"),
+            "baidumob" to listOf("baidumob", "baidu-mob", "bdmob", "bd-mob"),
+            "huaweiads" to listOf("huaweiads", "huawei-ads", "hwads", "hw-ads"),
+            "xiaomiad" to listOf("xiaomiad", "xiaomi-ad", "miad", "mi-ad"),
+            "oppoads" to listOf("oppoads", "oppo-ads", "oppoad", "oppo-ad"),
+            "vivoad" to listOf("vivoad", "vivo-ad", "vivoads", "vivo-ads"),
+            "kswad" to listOf("kswad", "ks-wad", "kswads", "ks-wads"),
+            "gromore" to listOf("gromore", "gro-more", "grmore", "gro-mr"),
+            "csj" to listOf("csj", "c-s-j", "csjapi", "c-s-j-api"),
+            "oceanengine" to listOf("oceanengine", "ocean-engine", "oceaneng", "ocneng"),
+            "bytedance" to listOf("bytedance", "byte-dance", "byted", "byte-d"),
+            "snssdk" to listOf("snssdk", "sns-sdk", "snssdkapi", "sns-sdk-api")
+        )
+        val lower = domain.lowercase()
+        for ((name, variants) in sdkVariants) {
+            if (variants.any { lower.contains(it) }) return name
+        }
+        return null
+    }
+
+    private fun looksLikeDynamicAdDomain(domain: String): Boolean {
+        val lower = domain.lowercase()
+        val dynamicPatterns = listOf(
+            "dynamic", "dyn", "realtime", "real-time", "rtb", "rtb-",
+            "programmatic", "prog", "autoopt", "auto-opt", "smartad",
+            "smart-ad", "adaptive", "adapt", "dynamicad", "dynamic-ad"
+        )
+        return dynamicPatterns.any { lower.contains(it) }
+    }
+
+    private fun looksLikeCdnAdDomain(domain: String): Boolean {
+        val lower = domain.lowercase()
+        val cdnPatterns = listOf(
+            "cdnad", "cdn-ad", "adcdn", "ad-cdn",
+            "staticad", "static-ad", "adstatic", "ad-static",
+            "imgad", "img-ad", "adimg", "ad-img",
+            "picad", "pic-ad", "adpic", "ad-pic",
+            "mediaad", "media-ad", "admedia", "ad-media",
+            "contentad", "content-ad", "adcontent", "ad-content"
+        )
+        return cdnPatterns.any { lower.contains(it) }
+    }
+
+    private fun looksLikeApiAdDomain(domain: String): Boolean {
+        val lower = domain.lowercase()
+        val apiPatterns = listOf(
+            "apiad", "api-ad", "adapi", "ad-api",
+            "apigateway", "api-gateway", "gatewayad", "gateway-ad",
+            "apiproxy", "api-proxy", "proxyad", "proxy-ad",
+            "apirequest", "api-request", "requestad", "request-ad"
+        )
+        return apiPatterns.any { lower.contains(it) }
+    }
+
+    private fun looksLikeDataReportDomain(domain: String): Boolean {
+        val lower = domain.lowercase()
+        val reportPatterns = listOf(
+            "datareport", "data-report", "reportdata", "report-data",
+            "datatrack", "data-track", "trackdata", "track-data",
+            "datalog", "data-log", "logdata", "log-data",
+            "datacollect", "data-collect", "collectdata", "collect-data",
+            "dataupload", "data-upload", "uploaddate", "upload-data",
+            "eventlog", "event-log", "logevent", "log-event",
+            "behaviorlog", "behavior-log", "userlog", "user-log",
+            "actionlog", "action-log", "clicklog", "click-log",
+            "viewlog", "view-log", "impresslog", "impress-log"
+        )
+        return reportPatterns.any { lower.contains(it) }
+    }
+
+    private fun looksLikeObfuscatedDomain(domain: String): Boolean {
+        if (domain.length < 10) return false
+        val consonantClusters = Regex("[bcdfghjklmnpqrstvwxyz]{4,}")
+        if (consonantClusters.find(domain) != null) return true
+        val digitClusters = Regex("[0-9]{5,}")
+        if (digitClusters.find(domain) != null) return true
+        val alternatingPattern = Regex("([a-z][0-9]){4,}")
+        if (alternatingPattern.find(domain) != null) return true
+        return false
+    }
+
+    private fun looksLikeShortNumDomain(domain: String): Boolean {
+        if (domain.length < 4 || domain.length > 8) return false
+        val digitCount = domain.count { it.isDigit() }
+        return digitCount >= domain.length / 2
     }
 
     private fun generalAdTrafficRule(domain: String, appName: String, vendor: String): BlockRule? {
@@ -9108,6 +9534,16 @@ class AdBlockVpnService : VpnService() {
         if (RuleRepository.isWhitelistedDomain(normalizedDomain)) return false
         if (RuleRepository.isSensitiveAuthDomain(normalizedDomain)) return false
         if (isProtectedTrafficDomain(normalizedDomain)) return false
+        if (looksLikeAdSdkVariant(normalizedDomain) != null) return true
+        if (looksLikeDynamicAdDomain(normalizedDomain)) return true
+        if (looksLikeCdnAdDomain(normalizedDomain)) return true
+        if (looksLikeApiAdDomain(normalizedDomain)) return true
+        if (looksLikeDataReportDomain(normalizedDomain)) return true
+        if (looksLikeObfuscatedDomain(normalizedDomain)) return true
+        if (looksLikeShortNumDomain(normalizedDomain)) return true
+        if (hasAbnormalVowelRatio(normalizedDomain)) return true
+        if (hasSpecialCharPattern(normalizedDomain)) return true
+        if (hasHighEntropy(normalizedDomain)) return true
         return RuleRepository.looksLikeAdSdkInfraDomain(normalizedDomain, vendor) ||
             RuleRepository.shouldForcePushRecommendInspection(normalizedDomain, appName, vendor)
     }
@@ -9735,6 +10171,39 @@ class AdBlockVpnService : VpnService() {
             }
         }
         return mode
+    }
+
+    /**
+     * 自动安装证书到系统 CA 目录
+     * 仅在用户开启"自动安装系统证书"开关且 MITM 已启用时调用
+     */
+    private fun autoInstallSystemCertificate() {
+        try {
+            if (!com.HanFeng.adblocker.shizuku.SystemCertInstaller.isRootAvailable()) {
+                LogRepository.append(this, "Auto cert install skipped: Root not available")
+                return
+            }
+
+            val installer = com.HanFeng.adblocker.shizuku.SystemCertInstaller(this)
+            val status = installer.checkCurrentInstallStatus()
+            if (status is com.HanFeng.adblocker.shizuku.SystemCertInstaller.CertInstallStatus.INSTALLED) {
+                LogRepository.append(this, "Auto cert install skipped: already installed at ${status.location}")
+                return
+            }
+
+            LogRepository.append(this, "Auto cert install started...")
+            val result = installer.installToSystem()
+            when (result) {
+                is com.HanFeng.adblocker.shizuku.SystemCertInstaller.InstallResult.Success -> {
+                    LogRepository.append(this, "Auto cert install success: method=${result.method}, hash=${result.hashName}")
+                }
+                is com.HanFeng.adblocker.shizuku.SystemCertInstaller.InstallResult.Failure -> {
+                    LogRepository.append(this, "Auto cert install failed: ${result.reason}")
+                }
+            }
+        } catch (e: Exception) {
+            LogRepository.append(this, "Auto cert install exception: ${e.message}")
+        }
     }
 
     companion object {

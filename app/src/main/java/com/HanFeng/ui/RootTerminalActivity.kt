@@ -1,5 +1,8 @@
 package com.HanFeng.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -7,15 +10,19 @@ import android.text.method.ScrollingMovementMethod
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageButton
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.HanFeng.R
 import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class RootTerminalActivity : BaseActivity() {
 
@@ -24,6 +31,15 @@ class RootTerminalActivity : BaseActivity() {
     private lateinit var terminalScroll: ScrollView
     private lateinit var tvStatus: TextView
     private lateinit var tvPrompt: TextView
+    private lateinit var btnFontSize: ImageButton
+    private lateinit var btnClear: ImageButton
+    private lateinit var btnCopy: ImageButton
+    private lateinit var btnTab: Button
+    private lateinit var btnUp: Button
+    private lateinit var btnDown: Button
+    private lateinit var btnCtrlC: Button
+    private lateinit var btnCtrlZ: Button
+    private lateinit var btnCtrlD: Button
 
     private val isRunning = AtomicBoolean(false)
     private val handler = Handler(Looper.getMainLooper())
@@ -36,6 +52,10 @@ class RootTerminalActivity : BaseActivity() {
 
     private val outputLock = Any()
     private val outputBuilder = StringBuilder()
+    private val fontSizeLevels = listOf(10f, 11f, 12f, 13f, 14f, 15f, 16f)
+    private val fontSizeIndex = AtomicInteger(2)
+
+    private var pastePending = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,6 +67,15 @@ class RootTerminalActivity : BaseActivity() {
         terminalScroll = findViewById(R.id.terminalScroll)
         tvStatus = findViewById(R.id.tvTerminalStatus)
         tvPrompt = findViewById(R.id.tvPrompt)
+        btnFontSize = findViewById(R.id.btnFontSize)
+        btnClear = findViewById(R.id.btnClear)
+        btnCopy = findViewById(R.id.btnCopy)
+        btnTab = findViewById(R.id.btnTab)
+        btnUp = findViewById(R.id.btnUp)
+        btnDown = findViewById(R.id.btnDown)
+        btnCtrlC = findViewById(R.id.btnCtrlC)
+        btnCtrlZ = findViewById(R.id.btnCtrlZ)
+        btnCtrlD = findViewById(R.id.btnCtrlD)
 
         val rootView = findViewById<View>(android.R.id.content)
         ViewCompat.setOnApplyWindowInsetsListener(rootView) { view, insets ->
@@ -58,6 +87,8 @@ class RootTerminalActivity : BaseActivity() {
         terminalOutput.movementMethod = ScrollingMovementMethod()
         initialScriptPath = intent.getStringExtra("script_path")
 
+        applyFontSize()
+
         terminalScroll.viewTreeObserver.addOnScrollChangedListener {
             val child = terminalScroll.getChildAt(0) ?: return@addOnScrollChangedListener
             val scrollY = terminalScroll.scrollY
@@ -68,16 +99,14 @@ class RootTerminalActivity : BaseActivity() {
 
         val showKeyboardClickListener = View.OnClickListener {
             terminalInput.requestFocus()
-            val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-            imm.showSoftInput(terminalInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+            showKeyboard()
         }
         terminalScroll.setOnClickListener(showKeyboardClickListener)
         terminalOutput.setOnClickListener(showKeyboardClickListener)
         terminalOutput.setOnTouchListener { _, event ->
             if (event.action == android.view.MotionEvent.ACTION_UP) {
                 terminalInput.requestFocus()
-                val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-                imm.showSoftInput(terminalInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                showKeyboard()
                 false
             } else false
         }
@@ -87,11 +116,7 @@ class RootTerminalActivity : BaseActivity() {
                 (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)) {
                 val text = terminalInput.text.toString().trimEnd('\r', '\n')
                 if (text.isNotEmpty()) {
-                    if (commandHistory.isEmpty() || commandHistory.last() != text) {
-                        commandHistory.add(text)
-                        if (commandHistory.size > 100) commandHistory.removeAt(0)
-                    }
-                    historyIndex = commandHistory.size
+                    addToHistory(text)
                     sendCommand(text)
                     terminalInput.text?.clear()
                 }
@@ -101,46 +126,147 @@ class RootTerminalActivity : BaseActivity() {
 
         terminalInput.setOnKeyListener { _, keyCode, event ->
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP && event.action == KeyEvent.ACTION_DOWN) {
-                if (historyIndex > 0) {
-                    historyIndex--
-                    terminalInput.setText(commandHistory.getOrNull(historyIndex) ?: "")
-                    terminalInput.setSelection(terminalInput.text.length)
-                }
+                navigateHistory(-1)
                 true
             } else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && event.action == KeyEvent.ACTION_DOWN) {
-                if (historyIndex < commandHistory.size - 1) {
-                    historyIndex++
-                    terminalInput.setText(commandHistory.getOrNull(historyIndex) ?: "")
-                    terminalInput.setSelection(terminalInput.text.length)
-                } else {
-                    historyIndex = commandHistory.size
-                    terminalInput.text?.clear()
-                }
+                navigateHistory(1)
                 true
             } else {
                 false
             }
         }
 
+        terminalInput.setOnLongClickListener {
+            pasteFromClipboard()
+            false
+        }
+
         findViewById<View>(R.id.terminalTitleBar).setOnLongClickListener {
             synchronized(outputLock) { outputBuilder.clear() }
             terminalOutput.text = ""
+            Toast.makeText(this, "输出已清空", Toast.LENGTH_SHORT).show()
             true
+        }
+
+        btnFontSize.setOnClickListener {
+            cycleFontSize()
+        }
+
+        btnClear.setOnClickListener {
+            synchronized(outputLock) { outputBuilder.clear() }
+            terminalOutput.text = ""
+            Toast.makeText(this, "输出已清空", Toast.LENGTH_SHORT).show()
+        }
+
+        btnCopy.setOnClickListener {
+            copyOutputToClipboard()
+        }
+
+        btnTab.setOnClickListener {
+            sendRaw("\t")
+        }
+
+        btnUp.setOnClickListener {
+            navigateHistory(-1)
+        }
+
+        btnDown.setOnClickListener {
+            navigateHistory(1)
+        }
+
+        btnCtrlC.setOnClickListener {
+            sendRaw("\u0003")
+        }
+
+        btnCtrlZ.setOnClickListener {
+            sendRaw("\u001A")
+        }
+
+        btnCtrlD.setOnClickListener {
+            sendRaw("\u0004")
         }
 
         startShell()
         terminalInput.requestFocus()
         terminalInput.post {
-            val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-            imm.showSoftInput(terminalInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+            showKeyboard()
         }
+    }
+
+    private fun applyFontSize() {
+        val size = fontSizeLevels[fontSizeIndex.get()]
+        terminalOutput.textSize = size
+        terminalInput.textSize = size
+        tvPrompt.textSize = size
+    }
+
+    private fun cycleFontSize() {
+        val next = (fontSizeIndex.get() + 1) % fontSizeLevels.size
+        fontSizeIndex.set(next)
+        applyFontSize()
+        Toast.makeText(this, "字体大小: ${fontSizeLevels[next]}sp", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun copyOutputToClipboard() {
+        val text = terminalOutput.text.toString()
+        if (text.isBlank()) {
+            Toast.makeText(this, "没有可复制的内容", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("终端输出", text))
+        Toast.makeText(this, "已复制到剪贴板", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun pasteFromClipboard() {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        if (clipboard.hasPrimaryClip()) {
+            val item = clipboard.primaryClip?.getItemAt(0)
+            val text = item?.text?.toString()
+            if (!text.isNullOrBlank()) {
+                val cleanText = text.replace("\n", " ").replace("\r", "")
+                terminalInput.setText(cleanText)
+                terminalInput.setSelection(terminalInput.text.length)
+                Toast.makeText(this, "已粘贴", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(this, "剪贴板为空", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun navigateHistory(direction: Int) {
+        if (commandHistory.isEmpty()) return
+        val newIndex = historyIndex + direction
+        if (newIndex < 0 || newIndex > commandHistory.size) return
+        historyIndex = newIndex
+        if (newIndex == commandHistory.size) {
+            terminalInput.text?.clear()
+        } else {
+            val cmd = commandHistory[newIndex]
+            terminalInput.setText(cmd)
+            terminalInput.setSelection(cmd.length)
+        }
+    }
+
+    private fun addToHistory(cmd: String) {
+        if (commandHistory.isEmpty() || commandHistory.last() != cmd) {
+            commandHistory.add(cmd)
+            if (commandHistory.size > 200) commandHistory.removeAt(0)
+        }
+        historyIndex = commandHistory.size
+    }
+
+    private fun showKeyboard() {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+        imm.showSoftInput(terminalInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
     }
 
     private fun appendOutput(text: String) {
         synchronized(outputLock) {
             outputBuilder.append(text)
-            if (outputBuilder.length > 256 * 1024) {
-                outputBuilder.delete(0, outputBuilder.length - 256 * 1024)
+            if (outputBuilder.length > 512 * 1024) {
+                val startIdx = outputBuilder.length - 256 * 1024
+                outputBuilder.delete(0, startIdx)
             }
             terminalOutput.text = outputBuilder.toString()
             if (autoScrollEnabled) {
@@ -158,9 +284,7 @@ class RootTerminalActivity : BaseActivity() {
             idx--
             if (trailBytesNeeded >= 4) break
         }
-        if (idx < 0) {
-            return 0
-        }
+        if (idx < 0) return 0
         val lead = bytes[idx].toInt() and 0xFF
         val expectedLen = when {
             lead and 0x80 == 0x00 -> 1
@@ -169,9 +293,7 @@ class RootTerminalActivity : BaseActivity() {
             lead and 0xF8 == 0xF0 -> 4
             else -> 1
         }
-        if (trailBytesNeeded + 1 >= expectedLen) {
-            return length
-        }
+        if (trailBytesNeeded + 1 >= expectedLen) return length
         return idx
     }
 
@@ -277,6 +399,16 @@ class RootTerminalActivity : BaseActivity() {
     private fun sendCommand(cmd: String) {
         appendOutput("# $cmd\n")
         writeRaw("$cmd\n")
+    }
+
+    private fun sendRaw(data: String) {
+        try {
+            val stdin = shellStdin ?: return
+            stdin.write(data.toByteArray())
+            stdin.flush()
+        } catch (_: Exception) {
+            isRunning.set(false)
+        }
     }
 
     private fun writeRaw(data: String) {

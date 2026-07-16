@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.view.View
 import android.widget.EditText
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.RadioGroup
 import android.widget.Switch
@@ -29,6 +30,7 @@ import com.HanFeng.data.AppSettingsRepository
 import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.core.network.RegexCache
 import com.HanFeng.data.HttpsMitmRepository
+import java.io.File
 import com.HanFeng.data.LogRepository
 import com.HanFeng.data.RuleRepositoryExport
 import com.HanFeng.data.ShizukuAdControlCatalog
@@ -85,11 +87,16 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnBackgroundRestrict: Button
     private lateinit var btnRootScript: Button
     private lateinit var btnRootHide: Button
+    private lateinit var cbAutoInstallSystemCert: CheckBox
 
     private lateinit var switchHotspotBlock: Switch
     private lateinit var hotspotModeLayout: LinearLayout
     private lateinit var rgHotspotMode: RadioGroup
     private lateinit var tvHotspotStatus: TextView
+
+    private lateinit var btnChooseBackground: Button
+    private lateinit var btnRemoveBackground: Button
+    private lateinit var textCustomBgPreview: TextView
     
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode != ShizukuRepository.REQUEST_CODE) return@OnRequestPermissionResultListener
@@ -161,11 +168,16 @@ class SettingsActivity : BaseActivity() {
         btnBackgroundRestrict = findViewById(R.id.btnBackgroundRestrict)
         btnRootScript = findViewById(R.id.btnRootScript)
         btnRootHide = findViewById(R.id.btnRootHide)
+        cbAutoInstallSystemCert = findViewById(R.id.cbAutoInstallSystemCert)
 
         switchHotspotBlock = findViewById(R.id.switchHotspotBlock)
         hotspotModeLayout = findViewById(R.id.hotspotModeLayout)
         rgHotspotMode = findViewById(R.id.rgHotspotMode)
         tvHotspotStatus = findViewById(R.id.tvHotspotStatus)
+
+        btnChooseBackground = findViewById(R.id.btnChooseBackground)
+        btnRemoveBackground = findViewById(R.id.btnRemoveBackground)
+        textCustomBgPreview = findViewById(R.id.textCustomBgPreview)
 
         val initialTopPadding = settingsRoot.paddingTop
         val initialBottomPadding = settingsRoot.paddingBottom
@@ -228,6 +240,15 @@ class SettingsActivity : BaseActivity() {
         switchAdFreeReward.setOnCheckedChangeListener { _, isChecked ->
             FeatureSettingsRepository.setAdFreeRewardEnabled(this, isChecked)
         }
+
+        refreshCustomBackgroundPreview()
+        btnChooseBackground.setOnClickListener {
+            chooseBackgroundImage()
+        }
+        btnRemoveBackground.setOnClickListener {
+            removeCustomBackground()
+        }
+
         btnManageCustomTrackingParams.setOnClickListener {
             showCustomParamsDialog()
         }
@@ -306,6 +327,9 @@ class SettingsActivity : BaseActivity() {
         }
         btnInstallSystemCert.setOnClickListener {
             installCertificateToSystem()
+        }
+        cbAutoInstallSystemCert.setOnClickListener {
+            FeatureSettingsRepository.setAutoInstallSystemCertEnabled(this, cbAutoInstallSystemCert.isChecked)
         }
         btnModifyDeviceId.setOnClickListener {
             showModifyDeviceIdDialog()
@@ -818,7 +842,7 @@ class SettingsActivity : BaseActivity() {
         }
         StableDialog.builder(this)
             .setTitle("安装证书到系统")
-            .setMessage("将 MITM CA 证书安装到系统信任库。\n\n支持的安装方式：\n- 直接写入 /system（需可读写系统分区）\n- Magisk 模块（需安装 Magisk/KernelSU）\n- bind mount 挂载覆盖\n- Conscrypt 模块（Android 14+）\n\n安装成功后可拦截更多 HTTPS 广告。部分设备需重启后生效。\n\n是否继续？")
+            .setMessage("将 MITM CA 证书安装到系统信任库。\n\n安装方式：\n- Magisk 模块（推荐）：重启后自动生效，无需重新安装\n- bind mount：当前会话生效，重启后失效\n- 系统写入：直接写入系统分区\n\n安装成功后可拦截更多 HTTPS 广告。\n\n是否继续？")
             .setPositiveButton("安装") { _, _ -> performSystemCertInstall() }
             .setNegativeButton("取消", null)
             .showSafely(this, "confirm-system-cert-install")
@@ -832,10 +856,14 @@ class SettingsActivity : BaseActivity() {
                 withContext(Dispatchers.Main) {
                     when (result) {
                         is com.HanFeng.adblocker.shizuku.SystemCertInstaller.InstallResult.Success -> {
-                            val rebootHint = if (result.needsReboot) "\n\n建议重启设备使证书完全生效。" else "\n\n证书刷新信号已发送，无需重启。"
+                            val persistentHint = if (result.persistent) {
+                                "\n\n此安装方式会在重启后自动生效，无需重新安装。"
+                            } else {
+                                "\n\n此安装方式在重启后会失效，需要重新安装。建议使用 Magisk 模块方式。"
+                            }
                             StableDialog.builder(this@SettingsActivity)
                                 .setTitle("安装成功")
-                                .setMessage("证书已通过 ${result.method} 方式安装到系统。\n证书 hash: ${result.hashName}$rebootHint")
+                                .setMessage("证书已通过 ${result.method} 方式安装到系统。\n证书 hash: ${result.hashName}$persistentHint")
                                 .setPositiveButton("确定", null)
                                 .showSafely(this@SettingsActivity, "system-cert-install-success")
                             refreshSystemCertStatus()
@@ -881,6 +909,9 @@ class SettingsActivity : BaseActivity() {
                 btnInstallSystemCert.text = text
             }
         }
+
+        // 刷新自动安装证书开关状态
+        cbAutoInstallSystemCert.isChecked = FeatureSettingsRepository.isAutoInstallSystemCertEnabled(this)
     }
 
     private fun showModifyDeviceIdDialog() {
@@ -2131,5 +2162,54 @@ class SettingsActivity : BaseActivity() {
     companion object {
         private const val SHIZUKU_STATUS_REFRESH_INTERVAL_MILLIS = 3_000L
     }
-    
+
+    private val backgroundPickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri ?: return@registerForActivityResult
+        val appContext = applicationContext
+        lifecycleScope.launch {
+            try {
+                val inputStream = contentResolver.openInputStream(uri)
+                    ?: throw IllegalStateException("无法打开选择的图片")
+                val bgDir = File(appContext.filesDir, "backgrounds")
+                if (!bgDir.exists()) bgDir.mkdirs()
+                val bgFile = File(bgDir, "custom_background.jpg")
+                withContext(Dispatchers.IO) {
+                    inputStream.use { input ->
+                        bgFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                }
+                FeatureSettingsRepository.setCustomBackgroundPath(appContext, bgFile.absolutePath)
+                refreshCustomBackgroundPreview()
+                showShortToast("背景图已设置，三个界面将同步应用")
+            } catch (e: Exception) {
+                showShortToast("设置背景图失败：${e.message}")
+            }
+        }
+    }
+
+    private fun chooseBackgroundImage() {
+        backgroundPickerLauncher.launch("image/*")
+    }
+
+    private fun removeCustomBackground() {
+        val appContext = applicationContext
+        FeatureSettingsRepository.setCustomBackgroundPath(appContext, null)
+        val bgFile = File(appContext.filesDir, "backgrounds/custom_background.jpg")
+        if (bgFile.exists()) bgFile.delete()
+        refreshCustomBackgroundPreview()
+        showShortToast("已移除自定义背景图")
+    }
+
+    private fun refreshCustomBackgroundPreview() {
+        val path = FeatureSettingsRepository.getCustomBackgroundPath(this)
+        if (!path.isNullOrEmpty()) {
+            textCustomBgPreview.text = "已设置自定义背景图"
+            btnRemoveBackground.visibility = View.VISIBLE
+        } else {
+            textCustomBgPreview.text = "未设置自定义背景图"
+            btnRemoveBackground.visibility = View.GONE
+        }
+    }
 }

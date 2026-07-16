@@ -15,6 +15,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
+import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -35,6 +36,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import com.HanFeng.R
+import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.LogRepository
 import com.HanFeng.data.RemoteRuleSourceRepository
 import com.HanFeng.data.RuleRepository
@@ -85,14 +87,17 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private data class ProgressDialogHandle(
         val dialog: AlertDialog,
-        val textView: TextView
+        val textView: TextView,
+        val cancelButton: Button? = null,
+        val silentButton: Button? = null,
+        @Volatile var isCancelled: Boolean = false
     )
 
     private fun showShortToast(message: String) {
         context?.let { Toast.makeText(it, message, Toast.LENGTH_SHORT).show() }
     }
 
-    private fun showProgressDialog(title: String, initialMessage: String): ProgressDialogHandle? {
+    private fun showProgressDialog(title: String, initialMessage: String, showCancel: Boolean = false, onCancel: (() -> Unit)? = null, showSilent: Boolean = false, onSilent: (() -> Unit)? = null): ProgressDialogHandle? {
         val dialogContext = safeDialogActivity() ?: return null
         val container = LinearLayout(dialogContext).apply {
             orientation = LinearLayout.VERTICAL
@@ -110,13 +115,44 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             gravity = android.view.Gravity.CENTER_HORIZONTAL
         })
         container.addView(textView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        var cancelButton: Button? = null
+        if (showCancel && onCancel != null) {
+            cancelButton = Button(dialogContext).apply {
+                text = "取消"
+                setTextColor(ContextCompat.getColor(dialogContext, R.color.hf_text_primary))
+                setPadding(24, 16, 24, 16)
+                setOnClickListener {
+                    onCancel()
+                }
+            }
+            container.addView(cancelButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = 16
+            })
+        }
+
+        var silentButton: Button? = null
+        if (showSilent && onSilent != null) {
+            silentButton = Button(dialogContext).apply {
+                text = "静默导入（后台等待）"
+                setTextColor(ContextCompat.getColor(dialogContext, R.color.hf_text_primary))
+                setPadding(24, 16, 24, 16)
+                setOnClickListener {
+                    onSilent()
+                }
+            }
+            container.addView(silentButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = 8
+            })
+        }
+
         val dialog = createDialogBuilder(dialogContext)
             .setTitle(title)
             .setView(container)
             .create()
         dialog.setCancelable(false)
         dialog.showSafely(dialogContext, "Show progress dialog failed") ?: return null
-        return ProgressDialogHandle(dialog, textView)
+        return ProgressDialogHandle(dialog, textView, cancelButton, silentButton)
     }
 
     private fun updateProgressDialog(handle: ProgressDialogHandle?, message: String) {
@@ -224,7 +260,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         mainActivity = activity as? MainActivity
         _binding = FragmentRulesBinding.bind(view)
-        view.findViewById<ImageView>(R.id.rulesBackground).applyCustomAssetBackground("custom/rules_background")
+        applyBackgroundImage(view.findViewById(R.id.rulesBackground))
         val initialTopPadding = binding.rulesContent.paddingTop
         val initialBottomPadding = binding.rulesContent.paddingBottom
         ViewCompat.setOnApplyWindowInsetsListener(binding.rulesContent) { content, insets ->
@@ -1575,7 +1611,14 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val ctx = safeContext() ?: return
         val appContext = ctx.applicationContext
         LogRepository.append(appContext, "Import rule file requested: uri=$uri")
-        val progress = showProgressDialog("导入规则", "正在打开规则文件...")
+        var progress: ProgressDialogHandle? = null
+        progress = showProgressDialog("导入规则", "正在打开规则文件...", showCancel = true, onCancel = {
+            progress?.isCancelled = true
+        }, showSilent = true, onSilent = {
+            progress?.dialog?.dismiss()
+            progress = null
+            showShortToast("已在后台静默导入，请稍候查看结果")
+        })
         // progress 为 null 时静默继续（Activity 状态不适合弹窗），导入仍正常执行
         viewLifecycleOwner.lifecycleScope.launch {
             runCatching {
@@ -1662,11 +1705,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             withContext(Dispatchers.IO) {
                 val stream = appContext.contentResolver.openInputStream(sourceUri)
                     ?: throw IllegalStateException("无法打开规则文件")
-                RuleRepository.importRulesStreaming(appContext, stream, allowWhitelistDomains = true) { detail ->
+                RuleRepository.importRulesStreaming(appContext, stream, allowWhitelistDomains = true, onProgress = { detail ->
                     viewLifecycleOwner.lifecycleScope.launch {
                         updateProgressDialog(progress, detail)
                     }
-                }
+                }, isCancelled = {
+                    progress?.isCancelled ?: false
+                })
             }
         }.onFailure { error ->
             dismissProgressDialog(progress)
@@ -1684,6 +1729,15 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             }
             return
         }.getOrThrow()
+        if (progress?.isCancelled == true) {
+            dismissProgressDialog(progress)
+            if (isAdded) {
+                safeContext()?.let { ctx ->
+                    Toast.makeText(ctx, "已取消导入", Toast.LENGTH_SHORT).show()
+                }
+            }
+            return
+        }
         updateProgressDialog(progress, "正在刷新规则列表...")
         if (!isAdded || _binding == null) return
         LogRepository.append(appContext, "Large rule file imported from $sourceLabel, importedResult=$imported")
@@ -2071,6 +2125,16 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     onCheckedChanged(rule.id, checked)
                 }
             }
+        }
+    }
+
+    private fun applyBackgroundImage(imageView: ImageView) {
+        val ctx = imageView.context.applicationContext
+        val customPath = FeatureSettingsRepository.getCustomBackgroundPath(ctx)
+        if (!customPath.isNullOrEmpty()) {
+            imageView.applyCustomFileBackground(customPath)
+        } else {
+            imageView.applyCustomAssetBackground("custom/background")
         }
     }
 }

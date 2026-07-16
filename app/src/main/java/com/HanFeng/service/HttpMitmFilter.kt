@@ -138,7 +138,13 @@ object HttpMitmFilter {
         "timeline_sponsor", "timeline_commercial", "stream_sponsor", "stream_commercial", "feed_sponsor", "feed_commercial"
         , "is_ad", "ad_type", "ad_source", "ad_scene", "ad_style", "ad_position", "ad_label",
         "reader_bottom_card", "reader_insert_card", "page_ad_card", "chapter_ad_card", "turn_page_card",
-        "comment_ad_card", "reply_ad_card", "feed_ad_card", "sponsor_feed", "commercial_feed"
+        "comment_ad_card", "reply_ad_card", "feed_ad_card", "sponsor_feed", "commercial_feed",
+        "commentsponsorcard", "replysponsorcard", "floorsponsorcard", "commentnativead", "replynativead",
+        "commentcommercialcard", "replycommercialcard", "commentoperationcard", "replyoperationcard",
+        "entitytemplate", "entitytype", "businesstype", "displaytype", "operationcard",
+        "promotioninfo", "promoinfo", "commercialinfo", "sponsorinfo", "nativead",
+        "readerbottomcard", "readerinsertcard", "pageadcard", "chapteradcard", "turnpagecard",
+        "pageturnad", "turnpagead", "flippagead", "pagefooterad", "chapterfooterad", "bottomfloatad"
     )
     private val strongResponseAdKeywords = listOf(
         "advertisement",
@@ -321,7 +327,10 @@ object HttpMitmFilter {
         "/pause/ad", "/player/ad", "/chapter/unlock/ad", "/reader/free_read", "/reward/popup",
         "/open_screen/cache", "/splash/cache", "/startup/cache", "/launch/cache", "/opening/ad",
         "/comment/guide/ad", "/comment/hot/ad", "/reply/promote", "/floor/insert/ad",
-        "/reader/bottom/ad", "/reader/page/ad", "/page/turn/ad", "/turn/page/ad", "/flip/page/ad", "/chapter/next/ad", "/reading/page/insert", "/chapter/page/ad"
+        "/reader/bottom/ad", "/reader/page/ad", "/page/turn/ad", "/turn/page/ad", "/flip/page/ad", "/chapter/next/ad", "/reading/page/insert", "/chapter/page/ad",
+        "/reader/bottom-card", "/reader/bottom_card", "/reader/footer/ad", "/reader/float/ad",
+        "/page/footer/ad", "/page/end/ad", "/chapter/end/ad", "/chapter/tail/ad",
+        "/comment/sponsor", "/reply/sponsor", "/comment/native", "/reply/native", "/comment/commercial", "/reply/commercial"
     )
     private val suspiciousHeaderKeywords = listOf(
         "advert", "banner", "splash", "reward", "promo", "promotion", "track", "tracker", "interstitial", "popup", "openad",
@@ -330,13 +339,17 @@ object HttpMitmFilter {
         "feed_card", "information_flow", "commentad", "floorad", "bottom_banner", "floating_banner", "pause_ad",
         "ad_resource", "ad_material", "ad_dispatch", "ad_scene", "ad_position", "insert_ad", "midroll", "preroll", "postroll",
         "reader_banner", "chapter_reward", "watch_ad_unlock", "unlock_by_ad", "bottom_banner", "startup_banner",
-        "reader_bottom_ad", "page_turn_ad", "turn_page_ad", "flip_page_ad", "page_insert_ad", "open_screen_cache", "open_screen_material", "comment_promote_card"
+        "reader_bottom_ad", "page_turn_ad", "turn_page_ad", "flip_page_ad", "page_insert_ad", "open_screen_cache", "open_screen_material", "comment_promote_card",
+        "readerbottomcard", "pageturnad", "turnpagead", "flippagead", "bottomfloatad",
+        "commentsponsorcard", "replysponsorcard", "commentnativead", "replynativead", "commentcommercialcard"
     )
     private val strongHeaderKeywords = listOf(
         "ad_dispatch", "ad_material", "ad_resource", "watch_ad_unlock", "unlock_by_ad", "reward_unlock",
         "chapter_unlock_ad", "open_screen_ad", "startup_ad", "launch_ad", "interstitial_ad",
         "feed_insert_ad", "timeline_insert_ad", "stream_card_ad", "comment_insert_ad", "floor_insert_ad",
-        "preroll_ad", "midroll_ad", "postroll_ad", "pause_ad", "player_ad"
+        "preroll_ad", "midroll_ad", "postroll_ad", "pause_ad", "player_ad",
+        "readerbottomcard", "pageturnad", "turnpagead", "flippagead", "bottomfloatad",
+        "commentsponsorcard", "replysponsorcard", "commentnativead", "replynativead", "commentcommercialcard"
     )
     private val domesticAdSdkKeywords = listOf(
         "pangolin", "pangle", "gromore", "csj", "gdt", "guangdiantong", "sigmob", "mobvista",
@@ -349,7 +362,10 @@ object HttpMitmFilter {
         "magneticengine", "kuaibusiness", "qtadx", "ubix", "ubixad", "ubixio", "ubixai", "ubiadx",
         "zghd", "zhghd", "hxltad", "adintl", "qxm", "qxmad", "qxmads", "52qumao",
         "bidmachine", "liftoff", "smaato", "pubmatic", "openx", "moloco", "fyber",
-        "digitalturbine", "dt_exchange", "ogury", "maio", "reklamup", "yandexads", "mytarget"
+        "digitalturbine", "dt_exchange", "ogury", "maio", "reklamup", "yandexads", "mytarget",
+        "klevin", "adukwai", "kwaiad", "kwaiads", "tradplusad", "tpads", "tpbid",
+        "anythink", "anythinktech", "toponad", "adsigmob", "sigmobad", "beiziad",
+        "adscopead", "qumengad", "ubixioe", "ubixio", "admobile", "adx-data", "adxdata"
     )
     private val pangleAndGdtHostSignals = listOf(
         "pangolin-sdk-toutiao", "pangle", "pangolin", "gromore", "csj", "oceanengine",
@@ -592,11 +608,17 @@ object HttpMitmFilter {
         "\"creative_data\"", "\"render_data\"", "\"template_data\"", "\"asset_list\"", "\"ad_assets\"",
         "\"ecpm_floor\"", "\"floor_price\"", "\"ad_floor_price\"", "\"auction_result\"",
         "\"is_ad\"", "\"isAd\"", "\"ad_type\"", "\"adType\"", "\"ad_source\"", "\"adSource\"", "\"ad_scene\"", "\"adScene\"",
-        "\"ad_position\"", "\"adPosition\"", "\"ad_label\"", "\"adLabel\"", "\"entity_type\"", "\"entityType\"",
-        "\"entity_template\"", "\"entityTemplate\"", "\"entity_data\"", "\"entityData\"",
+        "\"ad_position\"", "\"adPosition\"", "\"adposition\"", "\"ad_label\"", "\"adLabel\"", "\"adlabel\"", "\"entity_type\"", "\"entityType\"", "\"entitytype\"",
+        "\"entity_template\"", "\"entityTemplate\"", "\"entitytemplate\"", "\"entity_data\"", "\"entityData\"", "\"entitydata\"",
         "\"reader_bottom_card\"", "\"reader_insert_card\"", "\"page_ad_card\"", "\"chapter_ad_card\"", "\"turn_page_card\"",
         "\"comment_ad_card\"", "\"reply_ad_card\"", "\"feed_ad_card\"", "\"sponsor_feed\"", "\"commercial_feed\"",
-        "\"comment_entity_ad\"", "\"reply_entity_ad\"", "\"sponsor_info\"", "\"commercial_info\""
+        "\"comment_entity_ad\"", "\"reply_entity_ad\"", "\"sponsor_info\"", "\"commercial_info\"",
+        "\"commentsponsorcard\"", "\"replysponsorcard\"", "\"floorsponsorcard\"", "\"commentnativead\"", "\"replynativead\"",
+        "\"commentcommercialcard\"", "\"replycommercialcard\"", "\"commentoperationcard\"", "\"replyoperationcard\"",
+        "\"operationcard\"", "\"promotioninfo\"", "\"promoinfo\"", "\"commercialinfo\"", "\"sponsorinfo\"", "\"nativead\"",
+        "\"businesstype\"", "\"displaytype\"", "\"materialstyle\"", "\"cardtype\"", "\"promotiontype\"",
+        "\"readerbottomcard\"", "\"readerinsertcard\"", "\"pageadcard\"", "\"chapteradcard\"", "\"turnpagecard\"",
+        "\"pageturnad\"", "\"turnpagead\"", "\"flippagead\"", "\"pagefooterad\"", "\"chapterfooterad\"", "\"bottomfloatad\""
     )
     private val novelAdFieldTokens = listOf(
         "\"book_id\"", "\"book_name\"", "\"chapter_id\"", "\"chapter_name\"", "\"reader_type\"",
@@ -609,6 +631,9 @@ object HttpMitmFilter {
         "\"bonus_reward\"", "\"welfare_task\"", "\"task_status\"", "\"task_progress\"", "\"bottom_ad\"",
         "\"bottom_banner\"", "\"reader_banner\"", "\"reader_bottom_banner\"", "\"reader_bottom_ad\"", "\"chapter_ad\"", "\"chapter_ad_info\"",
         "\"chapter_ad_list\"", "\"reading_interstitial\"", "\"reading_insert_ad\"", "\"reading_page_ad\"", "\"chapter_page_ad\"", "\"page_turn_ad\"", "\"turn_page_ad\"", "\"flip_page_ad\"", "\"page_insert_ad\"", "\"chapter_next_ad\"", "\"watch_ad_unlock\"", "\"unlock_by_ad\"",
+        "\"readerbottomcard\"", "\"readerinsertcard\"", "\"readerfooterad\"", "\"readerfloatad\"", "\"bottomfloatad\"",
+        "\"pagefooterad\"", "\"chapterfooterad\"", "\"pageendad\"", "\"chapterendad\"", "\"pagetailad\"", "\"chaptertailad\"",
+        "\"pageturncard\"", "\"turnpagecard\"", "\"flippagecard\"", "\"pageturnad\"", "\"turnpagead\"", "\"flippagead\"",
         "\"reader_ad_popup\"", "\"reader_reward_popup\"", "\"chapter_offerwall\"", "\"novel_task_center\"", "\"novel_welfare_center\"",
         "\"incentive_video\"", "\"inspire_card\"", "\"free_read_popup\"", "\"chapter_card_ad\"", "\"reader_float_ad\"",
         "\"page_footer_ad\"", "\"chapter_footer_ad\"", "\"reader_footer_ad\"", "\"bottom_float_ad\"", "\"page_swipe_ad\"",
@@ -748,7 +773,94 @@ object HttpMitmFilter {
         "\"handleRewardedVideo\"", "\"s2s_reward\"", "\"server_reward\"",
         "\"reward_complete\"", "\"rewardcomplete\"", "\"reward_success\"", "\"rewardsuccess\"",
         "\"reward_finish\"", "\"rewardfinish\"", "\"grant_reward\"", "\"grantreward\"",
-        "\"claim_reward\"", "\"claimreward\"", "\"incentive_complete\"", "\"inspire_complete\""
+        "\"claim_reward\"", "\"claimreward\"", "\"incentive_complete\"", "\"inspire_complete\"",
+        "\"reward_type\"", "\"reward_data\"", "\"reward_info\"", "\"reward_item\"",
+        "\"coin_reward\"", "\"cash_reward\"", "\"point_reward\"", "\"score_reward\"",
+        "\"diamond_reward\"", "\"gold_reward\"", "\"gift_reward\"", "\"bonus_reward\"",
+        "\"prize_grant\"", "\"lottery_reward\"", "\"spin_reward\"", "\"wheel_reward\"",
+        "\"daily_reward\"", "\"checkin_reward\"", "\"login_reward\"", "\"share_reward\"",
+        "\"invite_reward\"", "\"referral_reward\"", "\"level_reward\"", "\"achievement_reward\"",
+        "\"milestone_reward\"", "\"combo_reward\"", "\"task_reward\"", "\"survey_reward\"",
+        "\"offer_reward\"", "\"offerwall\"", "\"offer_complete\"",
+        "\"s2s_callback\"", "\"server_callback\"", "\"postback_reward\"",
+        "\"reward_notify\"", "\"ad_complete_callback\"", "\"video_complete\"",
+        "\"reward_video_complete\"", "\"incentive_video\"",
+        "\"conversion_callback\"", "\"attribution_callback\"", "\"event_callback\"",
+        "\"reward_event\"", "\"earn_event\"",
+        "\"isended\"", "\"is_ended\"", "\"isended\":true", "\"is_ended\":true",
+        "\"rewarded\":true", "\"rewarded\": true",
+        "\"completed\":true", "\"completed\": true", "\"complete\":true", "\"complete\": true",
+        "\"finished\":true", "\"finished\": true", "\"success\":true", "\"success\": true",
+        "\"reward_granted\":true", "\"reward_granted\": true", "\"rewardearned\":true",
+        "\"rewardcollected\":true", "\"reward_collected\":true",
+        "\"ad_watched\":true", "\"ad_watched\": true", "\"video_watched\":true",
+        "\"offer_completed\":true", "\"task_completed\":true",
+        "\"survey_completed\":true", "\"install_verified\":true",
+        "\"click_tracked\":true", "\"conversion_tracked\":true",
+        "\"earn\":{", "\"earned\":{", "\"earning\":{",
+        "\"reward\":{\"", "\"reward\":{", "\"rewards\":{\"", "\"rewards\":{",
+        "\"incentive\":{\"", "\"bonus\":{\"", "\"prize\":{\"",
+        "\"coin\":{\"", "\"cash\":{\"", "\"point\":{\"", "\"score\":{\"",
+        "\"diamond\":{\"", "\"gold\":{\"", "\"gift\":{\"",
+        "\"level_up\":true", "\"level_complete\":true", "\"achievement_unlocked\":true",
+        "\"milestone_reached\":true", "\"combo_achieved\":true",
+        "\"incentive_video_complete\":true", "\"incentive_ad_complete\":true",
+        "\"s2s_verified\":true", "\"server_verified\":true",
+        "\"postback_success\":true", "\"callback_success\":true",
+        "\"install_verified\":true", "\"click_verified\":true",
+        "\"conversion_verified\":true", "\"attribution_verified\":true",
+        "\"task_complete\":true", "\"survey_complete\":true",
+        "\"offer_complete\":true", "\"milestone_complete\":true",
+        "\"daily_complete\":true", "\"checkin_complete\":true",
+        "\"sign_complete\":true", "\"share_complete\":true",
+        "\"invite_complete\":true", "\"referral_complete\":true",
+        "\"spin_complete\":true", "\"wheel_complete\":true",
+        "\"lottery_complete\":true", "\"draw_complete\":true",
+        "\"redpacket_complete\":true", "\"hongbao_complete\":true",
+        "\"level_complete\":true", "\"achievement_complete\":true",
+        "\"combo_complete\":true", "\"energy_full\":true",
+        "\"stamina_full\":true", "\"lives_full\":true",
+        "\"hearts_full\":true", "\"hp_full\":true",
+        "\"exp_complete\":true", "\"experience_complete\":true",
+        "\"chapter_unlocked\":true", "\"chapter_unlocked\": true",
+        "\"content_unlocked\":true", "\"content_unlocked\": true",
+        "\"feature_unlocked\":true", "\"feature_unlocked\": true",
+        "\"level_unlocked\":true", "\"level_unlocked\": true",
+        "\"episode_unlocked\":true", "\"episode_unlocked\": true",
+        "\"video_unlocked\":true", "\"video_unlocked\": true",
+        "\"skip_wait\":true", "\"skip_wait\": true",
+        "\"wait_skipped\":true", "\"wait_skipped\": true",
+        "\"speed_up\":true", "\"speed_up\": true",
+        "\"speedup\":true", "\"speedup\": true",
+        "\"accelerated\":true", "\"accelerated\": true",
+"\"extra_move\":true", "\"extra_move\": true",
+        "\"extra_moves\":true", "\"extra_moves\": true",
+        "\"extra_time\":true", "\"extra_time\": true",
+        "\"extra_moves_granted\":true", "\"extra_time_granted\":true",
+        "\"lottery_chance\":true", "\"spin_chance\":true",
+        "\"continue_game\":true", "\"continue_game\": true",
+        "\"game_continue\":true", "\"game_continue\": true",
+        "\"revived\":true", "\"revived\": true",
+        "\"resurrected\":true", "\"resurrected\": true",
+        "\"double_reward\":true", "\"double_reward\": true",
+        "\"reward_doubled\":true", "\"reward_doubled\": true",
+        "\"free_trial\":true", "\"free_trial\": true",
+        "\"trial_activated\":true", "\"vip_activated\":true",
+        "\"vip_granted\":true", "\"vip_time_granted\":true",
+        "\"coupon_granted\":true", "\"coupon_received\":true",
+        "\"voucher_granted\":true", "\"voucher_received\":true",
+        "\"discount_granted\":true", "\"discount_received\":true",
+        "\"redpacket_granted\":true", "\"hongbao_granted\":true",
+        "\"cashback_granted\":true", "\"refund_granted\":true",
+        "\"mystery_box\":true", "\"mystery_chest\":true",
+        "\"loot_box\":true", "\"supply_crate\":true",
+        "\"equipment_granted\":true", "\"weapon_granted\":true",
+        "\"armor_granted\":true", "\"skill_granted\":true",
+        "\"ability_granted\":true", "\"power_granted\":true",
+        "\"buff_granted\":true", "\"boost_granted\":true",
+        "\"enhancement_granted\":true", "\"upgrade_granted\":true",
+        "\"evolution_complete\":true", "\"awakening_complete\":true",
+        "\"transcendence_complete\":true", "\"limit_break\":true"
     )
     private val vastAdBodyTokens = listOf(
         "<vast", "vast version=", "\"vast\"", "<ad id=", "<inline>",
@@ -776,14 +888,145 @@ object HttpMitmFilter {
         "\"rewarded\":true", "\"rewarded\": true",
         "\"completed\":true", "\"completed\": true", "\"complete\":true", "\"complete\": true",
         "\"finished\":true", "\"finished\": true", "\"success\":true", "\"success\": true",
-        "\"isended\":true", "\"isended\": true", "\"is_ended\":true", "\"is_ended\": true"
+        "\"isended\":true", "\"isended\": true", "\"is_ended\":true", "\"is_ended\": true",
+        "\"reward_type\"", "\"reward_name\"", "\"reward_item\"", "\"reward_info\"",
+        "\"coin_reward\"", "\"cash_reward\"", "\"point_reward\"", "\"score_reward\"",
+        "\"diamond_reward\"", "\"gold_reward\"", "\"gift_reward\"", "\"bonus_reward\"",
+        "\"prize_grant\"", "\"lottery_reward\"", "\"spin_reward\"", "\"wheel_reward\"",
+        "\"daily_reward\"", "\"checkin_reward\"", "\"login_reward\"", "\"share_reward\"",
+        "\"invite_reward\"", "\"referral_reward\"", "\"level_reward\"", "\"achievement_reward\"",
+        "\"milestone_reward\"", "\"combo_reward\"", "\"task_reward\"", "\"survey_reward\"",
+        "\"offer_reward\"", "\"offerwall\"", "\"offer_complete\"",
+        "\"s2s_callback\"", "\"server_callback\"", "\"postback_reward\"",
+        "\"reward_notify\"", "\"ad_complete_callback\"", "\"video_complete\"",
+        "\"reward_video_complete\"", "\"incentive_video\"",
+        "\"conversion_callback\"", "\"attribution_callback\"", "\"event_callback\"",
+        "\"reward_event\"", "\"earn_event\"",
+        "\"ad_watched\":true", "\"ad_watched\": true", "\"video_watched\":true",
+        "\"offer_completed\":true", "\"task_completed\":true",
+        "\"survey_completed\":true", "\"install_verified\":true",
+        "\"click_tracked\":true", "\"conversion_tracked\":true",
+        "\"earn\":{", "\"earned\":{", "\"earning\":{",
+        "\"reward\":{\"", "\"reward\":{", "\"rewards\":{\"", "\"rewards\":{",
+        "\"incentive\":{\"", "\"bonus\":{\"", "\"prize\":{\"",
+        "\"coin\":{\"", "\"cash\":{\"", "\"point\":{\"", "\"score\":{\"",
+        "\"diamond\":{\"", "\"gold\":{\"", "\"gift\":{\"",
+        "\"level_up\":true", "\"level_complete\":true", "\"achievement_unlocked\":true",
+        "\"milestone_reached\":true", "\"combo_achieved\":true",
+        "\"currency\":{", "\"balance\":", "\"wallet\":{",
+        "\"inventory\":{\"", "\"item_granted\":true", "\"item_received\":true",
+        "\"chest_opened\":true", "\"chest_received\":true",
+        "\"box_opened\":true", "\"box_received\":true",
+        "\"pack_opened\":true", "\"pack_received\":true",
+        "\"loot_received\":true", "\"loot_granted\":true",
+        "\"card_received\":true", "\"card_granted\":true",
+        "\"ticket_received\":true", "\"ticket_granted\":true",
+        "\"key_received\":true", "\"key_granted\":true",
+        "\"token_received\":true", "\"token_granted\":true",
+        "\"badge_received\":true", "\"badge_granted\":true",
+        "\"energy_received\":true", "\"energy_granted\":true",
+        "\"stamina_received\":true", "\"stamina_granted\":true",
+        "\"life_received\":true", "\"life_granted\":true",
+        "\"heart_received\":true", "\"heart_granted\":true",
+        "\"hp_received\":true", "\"hp_granted\":true",
+        "\"exp_received\":true", "\"exp_granted\":true",
+        "\"experience_received\":true", "\"experience_granted\":true",
+        "\"level_received\":true", "\"level_granted\":true",
+        "\"xp_received\":true", "\"xp_granted\":true"
     )
     private val rewardCompletionBodyTokens = listOf(
         "\"code\":0", "\"errcode\":0", "\"status\":0", "\"success\":true", "\"success\": true",
         "\"completed\":true", "\"completed\": true", "\"complete\":true", "\"complete\": true",
         "\"finished\":true", "\"finished\": true", "\"isended\":true", "\"isended\": true",
         "\"is_ended\":true", "\"is_ended\": true", "\"rewarded\":true", "\"rewarded\": true",
-        "\"reward_granted\":true", "\"reward_granted\": true", "\"rewardearned\":true"
+        "\"reward_granted\":true", "\"reward_granted\": true", "\"rewardearned\":true",
+        "\"rewardcollected\":true", "\"reward_collected\":true",
+        "\"ad_watched\":true", "\"ad_watched\": true", "\"video_watched\":true",
+        "\"offer_completed\":true", "\"task_completed\":true",
+        "\"survey_completed\":true", "\"install_verified\":true",
+        "\"click_tracked\":true", "\"conversion_tracked\":true",
+        "\"earn\":{", "\"earned\":{", "\"earning\":{",
+        "\"reward\":{\"", "\"reward\":{", "\"rewards\":{\"", "\"rewards\":{",
+        "\"incentive\":{\"", "\"bonus\":{\"", "\"prize\":{\"",
+        "\"coin\":{\"", "\"cash\":{\"", "\"point\":{\"", "\"score\":{\"",
+        "\"diamond\":{\"", "\"gold\":{\"", "\"gift\":{\"",
+        "\"level_up\":true", "\"level_complete\":true", "\"achievement_unlocked\":true",
+        "\"milestone_reached\":true", "\"combo_achieved\":true",
+        "\"currency\":{", "\"balance\":", "\"wallet\":{",
+        "\"inventory\":{\"", "\"item_granted\":true", "\"item_received\":true",
+        "\"result\":\"success\"", "\"result\":\"ok\"", "\"result\":\"completed\"",
+        "\"message\":\"success\"", "\"message\":\"reward_granted\"", "\"message\":\"reward_earned\"",
+        "\"data\":{\"success\":true", "\"data\":{\"code\":0", "\"data\":{\"status\":\"success\"",
+        "\"response\":\"success\"", "\"response\":\"ok\"", "\"response\":\"completed\"",
+        "\"verified\":true", "\"verified\": true", "\"verification\":\"success\"",
+        "\"attribution\":\"success\"", "\"tracking\":\"success\"", "\"conversion\":\"success\"",
+        "\"incentive_complete\":true", "\"incentive_complete\": true",
+        "\"incentive_video_complete\":true", "\"inspire_complete\":true",
+        "\"s2s_verified\":true", "\"server_verified\":true",
+        "\"postback_success\":true", "\"callback_success\":true",
+        "\"install_verified\":true", "\"click_verified\":true",
+        "\"conversion_verified\":true", "\"attribution_verified\":true",
+        "\"task_complete\":true", "\"task_complete\": true",
+        "\"survey_complete\":true", "\"survey_complete\": true",
+        "\"offer_complete\":true", "\"offer_complete\": true",
+        "\"milestone_complete\":true", "\"daily_complete\":true",
+        "\"checkin_complete\":true", "\"sign_complete\":true",
+        "\"share_complete\":true", "\"invite_complete\":true",
+        "\"referral_complete\":true", "\"spin_complete\":true",
+        "\"wheel_complete\":true", "\"lottery_complete\":true",
+        "\"draw_complete\":true", "\"redpacket_complete\":true",
+        "\"level_complete\":true", "\"achievement_complete\":true",
+        "\"combo_complete\":true", "\"chest_opened\":true",
+        "\"box_opened\":true", "\"pack_opened\":true",
+        "\"loot_received\":true", "\"card_received\":true",
+        "\"ticket_received\":true", "\"key_received\":true",
+        "\"token_received\":true", "\"badge_received\":true",
+        "\"energy_full\":true", "\"stamina_full\":true",
+        "\"lives_full\":true", "\"hearts_full\":true",
+        "\"hp_full\":true", "\"exp_complete\":true",
+        "\"experience_complete\":true", "\"level_up_complete\":true",
+        "\"chapter_unlocked\":true", "\"chapter_unlocked\": true",
+        "\"content_unlocked\":true", "\"content_unlocked\": true",
+        "\"feature_unlocked\":true", "\"feature_unlocked\": true",
+        "\"level_unlocked\":true", "\"level_unlocked\": true",
+        "\"episode_unlocked\":true", "\"episode_unlocked\": true",
+        "\"video_unlocked\":true", "\"video_unlocked\": true",
+        "\"skip_wait\":true", "\"skip_wait\": true",
+        "\"wait_skipped\":true", "\"wait_skipped\": true",
+        "\"speed_up\":true", "\"speed_up\": true",
+        "\"speedup\":true", "\"speedup\": true",
+        "\"accelerated\":true", "\"accelerated\": true",
+        "\"extra_move\":true", "\"extra_move\": true",
+        "\"extra_moves\":true", "\"extra_moves\": true",
+        "\"extra_time\":true", "\"extra_time\": true",
+        "\"lottery_chance\":true", "\"spin_chance\":true",
+        "\"continue_game\":true", "\"continue_game\": true",
+        "\"game_continue\":true", "\"game_continue\": true",
+        "\"revived\":true", "\"revived\": true",
+        "\"resurrected\":true", "\"resurrected\": true",
+        "\"double_reward\":true", "\"double_reward\": true",
+        "\"reward_doubled\":true", "\"reward_doubled\": true",
+        "\"free_trial\":true", "\"free_trial\": true",
+        "\"trial_activated\":true", "\"vip_activated\":true",
+        "\"vip_granted\":true", "\"vip_time_granted\":true",
+        "\"coupon_granted\":true", "\"coupon_received\":true",
+        "\"voucher_granted\":true", "\"voucher_received\":true",
+        "\"discount_granted\":true", "\"discount_received\":true",
+        "\"redpacket_granted\":true", "\"hongbao_granted\":true",
+        "\"cashback_granted\":true", "\"refund_granted\":true",
+        "\"mystery_box\":true", "\"mystery_chest\":true",
+        "\"loot_box\":true", "\"supply_crate\":true",
+        "\"equipment_granted\":true", "\"weapon_granted\":true",
+        "\"armor_granted\":true", "\"skill_granted\":true",
+        "\"ability_granted\":true", "\"power_granted\":true",
+        "\"buff_granted\":true", "\"boost_granted\":true",
+        "\"enhancement_granted\":true", "\"upgrade_granted\":true",
+        "\"evolution_complete\":true", "\"awakening_complete\":true",
+        "\"transcendence_complete\":true", "\"limit_break\":true",
+        "\"novel_chapter_unlocked\":true", "\"novel_content_unlocked\":true",
+        "\"reading_unlocked\":true", "\"vip_reading\":true",
+        "\"premium_chapter\":true", "\"paid_chapter_free\":true",
+        "\"ad_free_reading\":true", "\"free_chapter_unlock\":true"
     )
     private val sdkJsonTemplateFingerprints = listOf(
         SdkJsonFingerprint("GDT", listOf("\"ret\"", "\"data\"", "\"placement_id\"", "\"traceid\""), minMatch = 3),
@@ -1711,6 +1954,7 @@ object HttpMitmFilter {
             lowerType.contains("xml") ||
             lowerType.contains("html")
         if (!textLike || body.isEmpty()) return null
+
         val redirectBodyBytes = buildRedirectReplacementBody(lowerType, directives.redirectResource)
         if (redirectBodyBytes != null) {
             return Http2BodyRewriteResult(
@@ -1719,6 +1963,20 @@ object HttpMitmFilter {
                 reason = "redirect-resource-applied"
             )
         }
+
+        if (lowerType.contains("json") && body.contains("reward", ignoreCase = true)) {
+            val sdk = AdRewardInterceptor.identifyRewardSdk("", "", body)
+            if (sdk != null) {
+                val rewardType = AdRewardInterceptor.detectRewardTypeFromBody(body)
+                val fakeResponse = AdRewardInterceptor.generateFakeAdCompleteResponse(sdk, rewardType)
+                return Http2BodyRewriteResult(
+                    body = fakeResponse.toByteArray(StandardCharsets.UTF_8),
+                    contentType = "application/json",
+                    reason = "neutralized-reward-callback:${sdk.name}"
+                )
+            }
+        }
+
         val scrubbedBody = scrubHtmlAdArtifacts(lowerType, body)
         val replacedBody = applyReplaceRules(lowerType, scrubbedBody, directives.replaceRules)
         var rewrittenBody = replacedBody ?: scrubbedBody
@@ -2051,6 +2309,17 @@ object HttpMitmFilter {
         bodyReasons: Set<String>,
         commentSignals: CommentAdBodySignals
     ): String? {
+        val context = environment.context
+        if (FeatureSettingsRepository.isAdFreeRewardEnabled(context)) {
+            val genericRewardHit = tryDetectGenericRewardCallback(
+                host = environment.host,
+                bodySignalScore = bodySignalScore,
+                novelSignals = novelSignals
+            )
+            if (genericRewardHit != null) {
+                return genericRewardHit
+            }
+        }
         inspectBodyClusterBranch(
             clusterSignals = clusterSignals,
             bodySignalScore = bodySignalScore
@@ -2072,6 +2341,33 @@ object HttpMitmFilter {
         )?.let { return it }
         inspectNovelAdBodyBranch(decisionContext = bodyDecisionContext)?.let { return it }
         return inspectGeneralAdBodyBranch(decisionContext = bodyDecisionContext)
+    }
+
+    private fun tryDetectGenericRewardCallback(
+        host: String,
+        bodySignalScore: Int,
+        novelSignals: NovelBodySignals
+    ): String? {
+        val lowerHost = host.lowercase()
+
+        val isRewardDomain = AdRewardInterceptor.isRewardAdDomain(lowerHost)
+        val hasRewardField = novelSignals.rewardUnlockHits > 0 ||
+            novelSignals.rewardCompletionHits > 0 ||
+            novelSignals.vastAdHit ||
+            novelSignals.gameRewardAdHit
+
+        if (isRewardDomain || hasRewardField) {
+            if (bodySignalScore >= 1 || hasRewardField) {
+                val sdk = AdRewardInterceptor.identifyRewardSdk(lowerHost, "", "")
+                if (sdk != null) {
+                    FeatureSettingsRepository.recordAdRewardIntercept(TlsMitmSessionManager.getContextOrNull() ?: return null)
+                    return "neutralized-generic-reward-callback:${sdk.name}"
+                }
+                return "neutralized-generic-reward-callback:detected"
+            }
+        }
+
+        return null
     }
 
     private fun resolveHttp1HeaderEnvironment(
@@ -3535,8 +3831,10 @@ object HttpMitmFilter {
         val lowerType = contentType.lowercase()
         if (reason.contains("reward", ignoreCase = true)) {
             val sdk = AdRewardInterceptor.identifyRewardSdk(domain, path, originalBody)
-            if (sdk != null && sdk != AdRewardInterceptor.RewardSdk.GENERIC) {
-                val fakeResponse = AdRewardInterceptor.generateFakeAdCompleteResponse(sdk)
+            if (sdk != null) {
+                val rewardType = AdRewardInterceptor.detectRewardTypeFromPath(path)
+                    .let { if (it == AdRewardInterceptor.RewardType.COIN) AdRewardInterceptor.detectRewardTypeFromBody(originalBody) else it }
+                val fakeResponse = AdRewardInterceptor.generateFakeAdCompleteResponse(sdk, rewardType)
                 return fakeResponse.toByteArray(StandardCharsets.UTF_8)
             }
             return when {

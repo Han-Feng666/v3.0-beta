@@ -959,7 +959,8 @@ object RuleRepository {
         inputStream: InputStream,
         source: RuleSource = RuleSource.IMPORTED,
         allowWhitelistDomains: Boolean = false,
-        onProgress: ((String) -> Unit)? = null
+        onProgress: ((String) -> Unit)? = null,
+        isCancelled: () -> Boolean = { false }
     ): Int {
         val startTime = System.currentTimeMillis()
         prepareForRuleImport(context, "local rule file streaming import")
@@ -979,6 +980,10 @@ object RuleRepository {
                 var lastProgressAt = 0L
                 inputStream.bufferedReader().useLines { lines ->
                     lines.forEach lineLoop@{ rawLine ->
+                        if (isCancelled()) {
+                            LogRepository.append(context, "ImportRulesStreaming cancelled by user at line $lineCount")
+                            return@useLines
+                        }
                         lineCount += 1
                         if (shouldStopStreamingImport(context, addedCount, MAX_STREAM_IMPORT_NEW_RULES)) return@useLines
                         if (rawLine.length > MAX_IMPORT_LINE_CHARS) return@lineLoop
@@ -995,7 +1000,7 @@ object RuleRepository {
                             }
                         }
                         val now = System.currentTimeMillis()
-                        if (lineCount % 2000 == 0 || now - lastProgressAt >= 750L) {
+                        if (lineCount % 1000 == 0 || now - lastProgressAt >= 500L) {
                             lastProgressAt = now
                             onProgress?.invoke("正在解析并导入规则...\n已读取 ${lineCount} 行，识别 ${parsedRuleCount} 条，新增 ${addedCount} 条")
                         }
@@ -1316,6 +1321,13 @@ object RuleRepository {
             return sanitizeDomain(normalizeDomainToken(domainPart))
         }
 
+        if (directDomainLine.startsWith(".")) {
+            val domainPart = directDomainLine.substring(1).trim()
+            if (domainPart.contains(".") && !domainPart.startsWith(".") && !domainPart.contains("*")) {
+                return sanitizeDomain(normalizeDomainToken(domainPart))
+            }
+        }
+
         val parts = directDomainLine.split(splitWhitespaceRegex).filter { it.isNotBlank() }
         if (parts.size >= 2) {
             val ip = parts[0]
@@ -1327,19 +1339,57 @@ object RuleRepository {
         listOf("address=/", "server=/", "local=/").firstOrNull { prefix ->
             directDomainLine.startsWith(prefix, ignoreCase = true)
         }?.let { prefix ->
-            return sanitizeDomain(normalizeDomainToken(directDomainLine.substring(prefix.length).substringBefore('/').trim()))
+            val after = directDomainLine.substring(prefix.length).trim()
+            val domain = if (after.startsWith("/")) {
+                after.substring(1).substringBefore('/').trim()
+            } else {
+                after.substringBefore('/').trim()
+            }
+            return sanitizeDomain(normalizeDomainToken(domain))
         }
 
         if (directDomainLine.startsWith("bogus-nxdomain=", ignoreCase = true)) {
             return sanitizeDomain(normalizeDomainToken(directDomainLine.substringAfter('=').trim()))
         }
 
+        if (directDomainLine.startsWith("domain-rules", ignoreCase = true)) {
+            val domain = directDomainLine
+                .substringAfter("domain-rules")
+                .substringAfter('=')
+                .trim()
+                .removeSurrounding("\"")
+                .removeSurrounding("'")
+            return sanitizeDomain(normalizeDomainToken(domain))
+        }
+
         val commaParts = directDomainLine.split(',').map { it.trim() }
         if (commaParts.size >= 2) {
             val type = commaParts[0].uppercase(Locale.US)
-            if (type in setOf("DOMAIN", "DOMAIN-SUFFIX", "HOST", "HOST-SUFFIX")) {
+            if (type in setOf("DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "HOST", "HOST-SUFFIX", "HOST-KEYWORD", "IP-CIDR", "IP-CIDR6")) {
+                if (type == "IP-CIDR" || type == "IP-CIDR6") return null
+                if (type == "DOMAIN-KEYWORD" || type == "HOST-KEYWORD") return null
                 return sanitizeDomain(normalizeDomainToken(commaParts[1]))
             }
+        }
+
+        val spaceParts = directDomainLine.split(Regex("\\s+")).map { it.trim() }
+        if (spaceParts.size >= 2) {
+            val type = spaceParts[0].uppercase(Locale.US)
+            if (type in setOf("DOMAIN", "DOMAIN-SUFFIX", "HOST", "HOST-SUFFIX")) {
+                return sanitizeDomain(normalizeDomainToken(spaceParts[1]))
+            }
+        }
+
+        if (directDomainLine.contains("domain=") || directDomainLine.contains("host=")) {
+            val domain = directDomainLine
+                .substringAfter("domain=")
+                .substringAfter("host=")
+                .substringBefore(',')
+                .substringBefore(' ')
+                .trim()
+                .removeSurrounding("\"")
+                .removeSurrounding("'")
+            return sanitizeDomain(normalizeDomainToken(domain))
         }
 
         return sanitizeDomain(normalizeDomainToken(directDomainLine))

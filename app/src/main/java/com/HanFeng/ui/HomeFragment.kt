@@ -39,7 +39,7 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         val activity = activity as? MainActivity ?: return
-        view.findViewById<ImageView>(R.id.homeBackground).applyCustomAssetBackground("custom/home_background")
+        applyBackgroundImage(view.findViewById(R.id.homeBackground))
         val homeContent = view.findViewById<View>(R.id.homeContent)
         val toggle = view.findViewById<Button>(R.id.btnToggle)
         val initialTopPadding = homeContent.paddingTop
@@ -260,5 +260,15 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
 
     companion object {
         private const val SHIZUKU_STATUS_CACHE_MILLIS = 5_000L
+    }
+
+    private fun applyBackgroundImage(imageView: ImageView) {
+        val ctx = imageView.context.applicationContext
+        val customPath = FeatureSettingsRepository.getCustomBackgroundPath(ctx)
+        if (!customPath.isNullOrEmpty()) {
+            imageView.applyCustomFileBackground(customPath)
+        } else {
+            imageView.applyCustomAssetBackground("custom/background")
+        }
     }
 }
