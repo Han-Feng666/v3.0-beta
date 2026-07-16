@@ -260,6 +260,8 @@ object RuleRepository {
     // CNAME rules: domain → BlockRule (for alias target matching in DNS resolution)
     @Volatile private var cachedCnameRuleIndex: Map<String, BlockRule>? = null
     @Volatile private var lastUnknownVendorSamplesPersistAt: Long = 0L
+    // Bloom Filter for fast domain pre-screening
+    @Volatile private var cachedBloomFilter: BloomFilter? = null
 
     private data class SimpleDomainIndex(
         val blocked: Set<String>,
@@ -663,9 +665,26 @@ object RuleRepository {
             cachedIpCidrRules = ipCidrRules
             cachedPortOnlyRules = portOnlyRules
             cachedCnameRuleIndex = cnameRules.associateBy { it.domain }
-            cachedCompiledRegexRules = emptyMap()
             cachedRuleCount = ruleCount
             cachedWhitelistHits.clear()
+
+            // 创建 Bloom Filter 用于快速预筛选
+            val allBlockedDomains = (blocked - exceptions) + userOwnedBlocked
+            if (allBlockedDomains.isNotEmpty()) {
+                cachedBloomFilter = BloomFilter.create(allBlockedDomains.size, 0.001)
+                allBlockedDomains.forEach { cachedBloomFilter?.put(it) }
+            }
+
+            // 预编译正则表达式
+            val compiledRegexMap = mutableMapOf<String, java.util.regex.Pattern>()
+            regexRules.forEach { rule ->
+                rule.regexPattern?.let { pattern ->
+                    runCatching {
+                        compiledRegexMap[pattern] = java.util.regex.Pattern.compile(pattern)
+                    }
+                }
+            }
+            cachedCompiledRegexRules = compiledRegexMap
         }
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
@@ -2408,6 +2427,14 @@ object RuleRepository {
     ): BlockRule? {
         val normalized = sanitizeDomain(domain) ?: return null
         val candidates = buildDomainCandidates(normalized).toList()
+
+        // Bloom Filter 预筛选：快速排除肯定不在规则中的域名
+        val bloomFilter = cachedBloomFilter
+        if (bloomFilter != null) {
+            val mightBeBlocked = candidates.any { bloomFilter.mightContain(it) }
+            if (!mightBeBlocked) return null
+        }
+
         val simpleIndex = getSimpleDomainIndex(context)
         getRuleMap(context)  // triggers buildAppRuleIndex
         val hasException = candidates.any { it in simpleIndex.exceptions }
