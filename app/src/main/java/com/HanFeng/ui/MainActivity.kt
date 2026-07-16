@@ -131,7 +131,7 @@ class MainActivity : BaseActivity() {
     }
 
     override fun onDestroy() {
-        Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
+        runCatching { Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener) }
         super.onDestroy()
     }
 

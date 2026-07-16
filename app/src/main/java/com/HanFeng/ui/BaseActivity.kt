@@ -22,6 +22,8 @@ open class BaseActivity : AppCompatActivity() {
     companion object {
         private val hideBackgroundHandler = Handler(Looper.getMainLooper())
         private var startedActivityCount = 0
+        private var lastAppliedHideBackground: Boolean? = null
+        private var lastAppliedHideBackgroundAt: Long = 0L
     }
 
     protected data class ShizukuReadyState(
@@ -37,6 +39,8 @@ open class BaseActivity : AppCompatActivity() {
     }
 
     protected fun applyHideBackgroundPolicy(enabled: Boolean) {
+        lastAppliedHideBackground = enabled
+        lastAppliedHideBackgroundAt = System.currentTimeMillis()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             runCatching {
                 val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -57,6 +61,13 @@ open class BaseActivity : AppCompatActivity() {
         }
     }
 
+    private fun applyHideBackgroundPolicyIfNeeded(enabled: Boolean) {
+        val now = System.currentTimeMillis()
+        val lastEnabled = lastAppliedHideBackground
+        if (lastEnabled == enabled && now - lastAppliedHideBackgroundAt < 5_000L) return
+        applyHideBackgroundPolicy(enabled)
+    }
+
     private fun removeTaskFromRecentsIfHidden() {
         if (!AppSettingsRepository.isHideBackgroundEnabled(this)) return
         applyHideBackgroundPolicy(true)
@@ -75,8 +86,7 @@ open class BaseActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val hideBackgroundEnabled = AppSettingsRepository.isHideBackgroundEnabled(this)
-        LogRepository.append(this, "BaseActivity onCreate: hideBackgroundEnabled=$hideBackgroundEnabled")
-        applyHideBackgroundPolicy(hideBackgroundEnabled)
+        applyHideBackgroundPolicyIfNeeded(hideBackgroundEnabled)
     }
 
     override fun onStart() {
@@ -88,8 +98,7 @@ open class BaseActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         val hideBackgroundEnabled = AppSettingsRepository.isHideBackgroundEnabled(this)
-        LogRepository.append(this, "BaseActivity onResume: hideBackgroundEnabled=$hideBackgroundEnabled")
-        applyHideBackgroundPolicy(hideBackgroundEnabled)
+        applyHideBackgroundPolicyIfNeeded(hideBackgroundEnabled)
     }
 
     override fun onStop() {
@@ -100,7 +109,7 @@ open class BaseActivity : AppCompatActivity() {
             if (startedActivityCount == 0) {
                 removeTaskFromRecentsIfHidden()
             }
-        }, 450L)
+        }, 1_200L)
     }
 
     protected fun showShortToast(message: String) {
