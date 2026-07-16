@@ -172,7 +172,13 @@ class RootHideManager {
         for (pkg in pkgs) {
             val r = runRootShell("magisk --denylist rm '$pkg' 2>/dev/null && echo OK || echo FAIL", 5)
             if (!r.output.contains("OK")) {
-                val ksuR = runRootShell("ksud magiskhide remove '$pkg' 2>/dev/null && echo OK || echo FAIL", 5)
+                // 尝试多种 KSU 路径
+                val ksuR = runRootShell(
+                    "ksud magiskhide remove '$pkg' 2>/dev/null && echo OK || " +
+                    "/data/adb/ksud magiskhide remove '$pkg' 2>/dev/null && echo OK || " +
+                    "/data/adb/ksu/bin/ksud magiskhide remove '$pkg' 2>/dev/null && echo OK || echo FAIL",
+                    5
+                )
                 if (!ksuR.output.contains("OK")) allOk = false
             }
             magiskDenyListPackages.remove(pkg)
@@ -321,7 +327,12 @@ class RootHideManager {
         val escapedPkg = packageName.replace("'", "'\\''")
         // 同时尝试 Magisk 与 KernelSU 的实例
         val mg = runRootShell("magisk --denylist rm '$escapedPkg' 2>/dev/null && echo MG_OK || echo MG_FAIL")
-        val ks = runRootShell("ksud magiskhide rm '$escapedPkg' 2>/dev/null && echo KS_OK || echo KS_FAIL")
+        // 尝试多种 KSU 路径
+        val ks = runRootShell(
+            "ksud magiskhide rm '$escapedPkg' 2>/dev/null && echo KS_OK || " +
+            "/data/adb/ksud magiskhide rm '$escapedPkg' 2>/dev/null && echo KS_OK || " +
+            "/data/adb/ksu/bin/ksud magiskhide rm '$escapedPkg' 2>/dev/null && echo KS_OK || echo KS_FAIL"
+        )
         return mg.output.contains("MG_OK") || ks.output.contains("KS_OK")
     }
 
@@ -388,7 +399,14 @@ class RootHideManager {
         // KernelSU 的 su 一般提供 ksud CLI 与 MagiskDenyList 兼容接口，
         // 探测一次 ksud 是否存在，后续复用缓存
         val ksuOk = cachedKsudAvailable ?: run {
-            val detectResult = runRootShell("command -v ksud >/dev/null 2>&1 && echo KSUD_OK || echo KSUD_NONE")
+            // 尝试多个可能的 ksud 路径
+            val detectResult = runRootShell(
+                "if command -v ksud >/dev/null 2>&1; then echo KSUD_OK; " +
+                "elif [ -x /data/adb/ksud ]; then echo KSUD_OK; " +
+                "elif [ -x /data/adb/ksu/bin/ksud ]; then echo KSUD_OK; " +
+                "else echo KSUD_NONE; fi",
+                5
+            )
             val ok = detectResult.output.contains("KSUD_OK")
             cachedKsudAvailable = ok
             ok
@@ -396,15 +414,41 @@ class RootHideManager {
         if (!ksuOk) return null
 
         val escapedPkg = packageName.replace("'", "'\\''")
-        // KSU 1.0+ 的 hide 子命令（与 MagiskDenyList 行为类似）
-        val enableResult = runRootShell("ksud magiskhide enable 2>/dev/null ; ksud magiskhide add '$escapedPkg' 2>/dev/null && echo KSU_ADD_OK || echo KSU_ADD_FAIL")
-        return when {
-            enableResult.output.contains("KSU_ADD_OK") -> HideResult(
-                true, packageName, "ksu_magiskhide", "已加入 KernelSU MagiskHide"
-            )
-            else -> HideResult(false, packageName, "ksu_magiskhide",
-                "KSU 隐藏添加失败: ${enableResult.output.take(200)}")
+
+        // 尝试多种 KernelSU 隐藏命令，兼容不同版本
+        val commands = listOf(
+            // KSU 1.0+ 的 magiskhide 子命令
+            "ksud magiskhide enable 2>/dev/null; ksud magiskhide add '$escapedPkg' 2>/dev/null",
+            // 完整路径尝试
+            "/data/adb/ksud magiskhide enable 2>/dev/null; /data/adb/ksud magiskhide add '$escapedPkg' 2>/dev/null",
+            "/data/adb/ksu/bin/ksud magiskhide enable 2>/dev/null; /data/adb/ksu/bin/ksud magiskhide add '$escapedPkg' 2>/dev/null",
+            // KSU 旧版本的 hide 子命令
+            "ksud hide add '$escapedPkg' 2>/dev/null",
+            // KSU 通过 su 执行
+            "su -c 'ksud magiskhide add $escapedPkg' 2>/dev/null"
+        )
+
+        for (cmd in commands) {
+            val result = runRootShell(cmd, 5)
+            if (result.exitCode == 0 || result.output.contains("KSU_ADD_OK")) {
+                return HideResult(true, packageName, "ksu_magiskhide", "已加入 KernelSU MagiskHide")
+            }
+            // 检查是否成功添加到列表
+            if (result.exitCode == 0) {
+                // 验证是否真的添加成功
+                val verifyResult = runRootShell(
+                    "ksud magiskhide ls 2>/dev/null | grep -q '$escapedPkg' && echo FOUND || " +
+                    "/data/adb/ksud magiskhide ls 2>/dev/null | grep -q '$escapedPkg' && echo FOUND || echo NOT_FOUND",
+                    5
+                )
+                if (verifyResult.output.contains("FOUND")) {
+                    return HideResult(true, packageName, "ksu_magiskhide", "已加入 KernelSU MagiskHide")
+                }
+            }
         }
+
+        return HideResult(false, packageName, "ksu_magiskhide",
+            "KSU 隐藏添加失败，请确认 KernelSU 版本支持 magiskhide 功能")
     }
 
     private fun tryMagiskDenyList(packageName: String): HideResult? {
