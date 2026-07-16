@@ -568,6 +568,28 @@ class RootHideManager {
         return runRootShell("test -e '$path' 2>/dev/null && echo YES || echo NO").output.trim() == "YES"
     }
 
+    /**
+     * 在隔离的 PID namespace 中执行脚本
+     * 脚本的所有进程对其他 App（包括系统 App）不可见
+     *
+     * @param scriptPath 要执行的脚本路径
+     * @return 新命名空间中主进程的 PID，失败返回 null
+     */
+    fun executeHiddenScript(scriptPath: String): Int? {
+        return KernelProcessHider().executeHiddenScript(scriptPath)
+    }
+
+    /**
+     * 在隔离的 PID namespace 中执行命令
+     * 命令的所有子进程对其他 App（包括系统 App）不可见
+     *
+     * @param command 要执行的命令
+     * @return 新命名空间中主进程的 PID，失败返回 null
+     */
+    fun executeHiddenCommand(command: String): Int? {
+        return KernelProcessHider().executeHiddenCommand(command)
+    }
+
     private fun runRootShell(command: String, timeoutSeconds: Long = 30): ShellResult {
         if (!suSession.isSessionOpen()) {
             suSession.open(timeoutSeconds = timeoutSeconds)

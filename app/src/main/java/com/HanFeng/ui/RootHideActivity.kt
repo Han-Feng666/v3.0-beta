@@ -3,7 +3,6 @@ package com.HanFeng.ui
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.Button
-import android.widget.EditText
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
@@ -17,7 +16,6 @@ import androidx.viewpager2.widget.ViewPager2
 import com.HanFeng.R
 import com.google.android.material.tabs.TabLayout
 import com.google.android.material.tabs.TabLayoutMediator
-import com.HanFeng.adblocker.shizuku.KernelProcessHider
 import com.HanFeng.adblocker.shizuku.PropDisguiseManager
 import com.HanFeng.adblocker.shizuku.RootHideAppWatcher
 import com.HanFeng.adblocker.shizuku.RootHideManager
@@ -79,36 +77,8 @@ class RootHideActivity : BaseActivity() {
         switchAutoWatcher.setOnCheckedChangeListener { _, checked ->
             handleAutoWatcherToggle(checked)
         }
-        findViewById<Button>(R.id.btnExecuteHidden).setOnClickListener { executeHiddenScript() }
 
         checkRootStatus()
-    }
-
-    private fun executeHiddenScript() {
-        val scriptPath = findViewById<EditText>(R.id.etScriptPath).text.toString().trim()
-        if (scriptPath.isEmpty()) {
-            Toast.makeText(this, "请输入脚本路径", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        Thread {
-            runOnUiThread {
-                tvResult.text = "正在隔离环境中执行脚本..."
-            }
-
-            val hider = KernelProcessHider()
-            val newPid = hider.executeHiddenScript(scriptPath)
-
-            runOnUiThread {
-                if (newPid != null) {
-                    tvResult.text = "脚本已在隔离环境中执行\nPID: $newPid\n该进程的所有子进程对其他 App 不可见"
-                    Toast.makeText(this, "脚本执行成功，PID=$newPid", Toast.LENGTH_SHORT).show()
-                } else {
-                    tvResult.text = "脚本执行失败\n请确认：\n1. 脚本文件存在\n2. 已授予 Root 权限\n3. 设备支持 unshare 命令"
-                    Toast.makeText(this, "脚本执行失败", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }.start()
     }
 
     private fun checkRootStatus() {
