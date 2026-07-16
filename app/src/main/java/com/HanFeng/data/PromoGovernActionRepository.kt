@@ -6,51 +6,106 @@ import android.content.pm.PackageManager
 object PromoGovernActionRepository {
     private const val SMART_COMPONENT_DISABLE_LIMIT = 6
 
-    fun smartGovern(context: Context, target: PromoGovernTarget): String {
+    enum class GovernStrategy {
+        LIGHT,
+        STANDARD,
+        AGGRESSIVE
+    }
+
+    fun smartGovern(context: Context, target: PromoGovernTarget, strategy: GovernStrategy = GovernStrategy.STANDARD): String {
         PromoGovernSnapshotRepository.savePackageSnapshot(context, target, notificationTouched = true)
         val status = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
-        val componentResult = disableSmartPromoComponents(context, target)
-        val lightGoverned = ShizukuAdControlRepository.blockPackageNotifications(context, target.packageName)
-        if (lightGoverned) {
-            return buildSmartGovernSuccessMessage(
-                base = "治理成功，当前已关闭推送广告能力",
-                componentResult = componentResult
-            )
+
+        val componentLimit = when (strategy) {
+            GovernStrategy.LIGHT -> 3
+            GovernStrategy.STANDARD -> 6
+            GovernStrategy.AGGRESSIVE -> 10
         }
 
-        if (!isDisabledState(status.enabledState)) {
-            ShizukuAdControlRepository.disablePackage(context, target.packageName)
-            val disabledStatus = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
-            if (isDisabledState(disabledStatus.enabledState)) {
-                return buildSmartGovernSuccessMessage(
-                    base = "治理成功，当前已冻结",
-                    componentResult = componentResult
-                )
-            }
-        }
+        val componentResult = disableSmartPromoComponents(context, target, componentLimit)
 
-        val refreshed = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
-        if (!refreshed.suspended) {
-            val suspendRequested = ShizukuAdControlRepository.suspendPackage(context, target.packageName)
-            val suspendStatus = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
-            if (suspendRequested && suspendStatus.suspended) {
-                return buildSmartGovernSuccessMessage(
-                    base = "冻结未生效，已自动回退为暂停",
-                    componentResult = componentResult
-                )
+        return when (strategy) {
+            GovernStrategy.LIGHT -> {
+                val lightGoverned = ShizukuAdControlRepository.blockPackageNotifications(context, target.packageName)
+                if (lightGoverned) {
+                    buildSmartGovernSuccessMessage(
+                        base = "轻量治理成功，已关闭推送广告",
+                        componentResult = componentResult
+                    )
+                } else {
+                    "轻量治理：关闭通知失败，请确认系统支持"
+                }
             }
-        }
-        return if (componentResult.successCount > 0) {
-            "治理部分成功，已冻结 ${componentResult.successCount} 个推广组件；推送、冻结和暂停未完全生效"
-        } else {
-            "治理失败，请确认系统支持冻结或暂停"
+            GovernStrategy.STANDARD -> {
+                val lightGoverned = ShizukuAdControlRepository.blockPackageNotifications(context, target.packageName)
+                if (lightGoverned) {
+                    buildSmartGovernSuccessMessage(
+                        base = "标准治理成功，已关闭推送广告",
+                        componentResult = componentResult
+                    )
+                }
+                if (!isDisabledState(status.enabledState)) {
+                    ShizukuAdControlRepository.disablePackage(context, target.packageName)
+                    val disabledStatus = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
+                    if (isDisabledState(disabledStatus.enabledState)) {
+                        return buildSmartGovernSuccessMessage(
+                            base = "标准治理成功，已冻结",
+                            componentResult = componentResult
+                        )
+                    }
+                }
+                val refreshed = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
+                if (!refreshed.suspended) {
+                    val suspendRequested = ShizukuAdControlRepository.suspendPackage(context, target.packageName)
+                    val suspendStatus = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
+                    if (suspendRequested && suspendStatus.suspended) {
+                        return buildSmartGovernSuccessMessage(
+                            base = "标准治理：冻结未生效，已回退为暂停",
+                            componentResult = componentResult
+                        )
+                    }
+                }
+                if (componentResult.successCount > 0) {
+                    "标准治理部分成功，已冻结 ${componentResult.successCount} 个组件"
+                } else {
+                    "标准治理失败，请确认系统支持"
+                }
+            }
+            GovernStrategy.AGGRESSIVE -> {
+                ShizukuAdControlRepository.blockPackageNotifications(context, target.packageName)
+                if (!isDisabledState(status.enabledState)) {
+                    ShizukuAdControlRepository.disablePackage(context, target.packageName)
+                    val disabledStatus = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
+                    if (isDisabledState(disabledStatus.enabledState)) {
+                        return buildSmartGovernSuccessMessage(
+                            base = "激进治理成功，已冻结并关闭通知",
+                            componentResult = componentResult
+                        )
+                    }
+                }
+                if (!status.suspended) {
+                    ShizukuAdControlRepository.suspendPackage(context, target.packageName)
+                    val suspendStatus = ShizukuAdControlRepository.queryPackageStatus(context, target.packageName)
+                    if (suspendStatus.suspended) {
+                        return buildSmartGovernSuccessMessage(
+                            base = "激进治理成功，已暂停",
+                            componentResult = componentResult
+                        )
+                    }
+                }
+                if (componentResult.successCount > 0) {
+                    "激进治理部分成功，已处理 ${componentResult.successCount} 个组件"
+                } else {
+                    "激进治理失败，请确认系统支持"
+                }
+            }
         }
     }
 
-    private fun disableSmartPromoComponents(context: Context, target: PromoGovernTarget): SmartComponentGovernResult {
+    private fun disableSmartPromoComponents(context: Context, target: PromoGovernTarget, limit: Int = SMART_COMPONENT_DISABLE_LIMIT): SmartComponentGovernResult {
         val candidates = PromoGovernComponentRepository.discoverCandidates(context, target.packageName)
             .filter(::isSmartGovernSafeComponent)
-            .take(SMART_COMPONENT_DISABLE_LIMIT)
+            .take(limit)
         if (candidates.isEmpty()) return SmartComponentGovernResult(0, 0)
         var successCount = 0
         candidates.forEach { candidate ->
@@ -90,6 +145,60 @@ object PromoGovernActionRepository {
         val successCount: Int,
         val attemptedCount: Int
     )
+
+    data class GovernStatistics(
+        val totalGoverned: Int,
+        val notificationBlocked: Int,
+        val packagesDisabled: Int,
+        val packagesSuspended: Int,
+        val componentsDisabled: Int,
+        val restored: Int,
+        val lastGovernTime: Long,
+        val categoryStats: Map<String, Int>
+    )
+
+    fun getGovernStatistics(context: Context): GovernStatistics {
+        val snapshot = PromoGovernSnapshotRepository.latest(context)
+        val governedPackages = PromoGovernSnapshotRepository.getGovernedPackages(context)
+        val prefs = context.getSharedPreferences("promo_govern_stats", Context.MODE_PRIVATE)
+        return GovernStatistics(
+            totalGoverned = prefs.getInt("total_governed", 0),
+            notificationBlocked = prefs.getInt("notification_blocked", 0),
+            packagesDisabled = prefs.getInt("packages_disabled", 0),
+            packagesSuspended = prefs.getInt("packages_suspended", 0),
+            componentsDisabled = prefs.getInt("components_disabled", 0),
+            restored = prefs.getInt("restored", 0),
+            lastGovernTime = prefs.getLong("last_govern_time", 0),
+            categoryStats = governedPackages.associateWith { pkg ->
+                val status = ShizukuAdControlRepository.queryPackageStatus(context, pkg)
+                if (isDisabledState(status.enabledState)) 1 else if (status.suspended) 2 else if (!status.notificationsEnabled) 3 else 0
+            }
+        )
+    }
+
+    fun recordGovernAction(context: Context, action: String, packageName: String) {
+        val prefs = context.getSharedPreferences("promo_govern_stats", Context.MODE_PRIVATE)
+        val editor = prefs.edit()
+        when (action) {
+            "notification_blocked" -> editor.putInt("notification_blocked", prefs.getInt("notification_blocked", 0) + 1)
+            "package_disabled" -> editor.putInt("packages_disabled", prefs.getInt("packages_disabled", 0) + 1)
+            "package_suspended" -> editor.putInt("packages_suspended", prefs.getInt("packages_suspended", 0) + 1)
+            "component_disabled" -> editor.putInt("components_disabled", prefs.getInt("components_disabled", 0) + 1)
+            "restored" -> editor.putInt("restored", prefs.getInt("restored", 0) + 1)
+            "governed" -> {
+                editor.putInt("total_governed", prefs.getInt("total_governed", 0) + 1)
+                editor.putLong("last_govern_time", System.currentTimeMillis())
+            }
+        }
+        editor.apply()
+    }
+
+    fun resetStatistics(context: Context) {
+        context.getSharedPreferences("promo_govern_stats", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .apply()
+    }
 
     fun setNotificationsBlocked(context: Context, target: PromoGovernTarget, blocked: Boolean): String {
         if (blocked) PromoGovernSnapshotRepository.savePackageSnapshot(context, target, notificationTouched = true)
