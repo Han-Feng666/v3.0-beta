@@ -11,9 +11,7 @@
 
 | 文件名 | 用途 | 推荐尺寸 |
 |--------|------|----------|
-| `home_background` | 首页背景图 | 1080x1920 |
-| `stats_background` | 统计页背景图 | 1080x1920 |
-| `rules_background` | 规则页背景图 | 1080x1920 |
+| `background` | 首页/统计/规则页通用背景图 | 1080x1920 |
 | `medal_gold` | 金牌图标 | 256x256 |
 | `medal_silver` | 银牌图标 | 256x256 |
 | `medal_bronze` | 铜牌图标 | 256x256 |
