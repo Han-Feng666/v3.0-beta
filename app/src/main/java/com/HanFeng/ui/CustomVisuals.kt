@@ -10,19 +10,23 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.lang.ref.WeakReference
 
 private val supportedImageExtensions = listOf("png", "jpg", "jpeg", "webp")
 private val customVisualsScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 private const val CUSTOM_VISUALS_JOB_TAG_KEY = -1008611
+private const val CUSTOM_VISUALS_CONTEXT_TAG_KEY = -1008612
 
 fun ImageView.applyCustomAssetBackground(assetBaseName: String) {
-    (getTag(CUSTOM_VISUALS_JOB_TAG_KEY) as? Job)?.cancel()
+    cancelCustomVisualsJob(this)
     val appContext = context.applicationContext
+    setTag(CUSTOM_VISUALS_CONTEXT_TAG_KEY, WeakReference(appContext))
     val job = customVisualsScope.launch {
         val customDrawable = withContext(Dispatchers.IO) {
             loadCustomAssetDrawable(appContext, assetBaseName)
         } ?: return@launch
-        if (context.applicationContext == appContext) {
+        val ctxRef = getTag(CUSTOM_VISUALS_CONTEXT_TAG_KEY) as? WeakReference<*>
+        if (ctxRef?.get() == appContext) {
             setImageDrawable(customDrawable)
         }
     }
@@ -30,17 +34,25 @@ fun ImageView.applyCustomAssetBackground(assetBaseName: String) {
 }
 
 fun ImageView.applyCustomFileBackground(filePath: String?) {
-    (getTag(CUSTOM_VISUALS_JOB_TAG_KEY) as? Job)?.cancel()
+    cancelCustomVisualsJob(this)
     val appContext = context.applicationContext
+    setTag(CUSTOM_VISUALS_CONTEXT_TAG_KEY, WeakReference(appContext))
     val job = customVisualsScope.launch {
         val customDrawable = withContext(Dispatchers.IO) {
             if (filePath != null) loadCustomFileDrawable(appContext, filePath) else null
         } ?: return@launch
-        if (context.applicationContext == appContext) {
+        val ctxRef = getTag(CUSTOM_VISUALS_CONTEXT_TAG_KEY) as? WeakReference<*>
+        if (ctxRef?.get() == appContext) {
             setImageDrawable(customDrawable)
         }
     }
     setTag(CUSTOM_VISUALS_JOB_TAG_KEY, job)
+}
+
+private fun cancelCustomVisualsJob(view: ImageView) {
+    (view.getTag(CUSTOM_VISUALS_JOB_TAG_KEY) as? Job)?.cancel()
+    view.setTag(CUSTOM_VISUALS_JOB_TAG_KEY, null)
+    view.setTag(CUSTOM_VISUALS_CONTEXT_TAG_KEY, null)
 }
 
 fun loadCustomAssetDrawable(context: Context, assetBaseName: String): Drawable? {

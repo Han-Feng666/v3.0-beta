@@ -406,17 +406,44 @@ private class SuspiciousDomainAdapter(
     private val selectedDomains = mutableSetOf<String>()
 
     fun submit(samples: List<SuspiciousDomainItem>, selected: Set<String>) {
+        val oldItems = items.toList()
+        val oldSelected = selectedDomains.toSet()
+
         items.clear()
         items += samples
         selectedDomains.clear()
         selectedDomains += selected
-        notifyDataSetChanged()
+
+        if (oldItems.isEmpty()) {
+            notifyDataSetChanged()
+            return
+        }
+
+        val diffResult = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize() = oldItems.size
+            override fun getNewListSize() = items.size
+            override fun areItemsTheSame(oldPos: Int, newPos: Int) =
+                oldItems[oldPos].domain == items[newPos].domain
+            override fun areContentsTheSame(oldPos: Int, newPos: Int): Boolean {
+                val old = oldItems[oldPos]
+                val new = items[newPos]
+                return old == new && oldSelected == selectedDomains
+            }
+        }, detectMoves = false)
+
+        diffResult.dispatchUpdatesTo(this)
     }
 
     fun setSelection(selected: Set<String>) {
+        val oldSelected = selectedDomains.toSet()
         selectedDomains.clear()
         selectedDomains += selected
-        notifyDataSetChanged()
+
+        if (oldSelected == selectedDomains) return
+
+        items.forEachIndexed { index, item ->
+            notifyItemChanged(index, SELECTION_PAYLOAD)
+        }
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
@@ -428,6 +455,18 @@ private class SuspiciousDomainAdapter(
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) = holder.bind(items[position])
 
+    override fun onBindViewHolder(holder: ViewHolder, position: Int, payloads: MutableList<Any>) {
+        if (payloads.isNotEmpty() && payloads[0] == SELECTION_PAYLOAD) {
+            holder.bindSelection(selectedDomains.contains(items[position].domain), !items[position].alreadyAdded)
+        } else {
+            onBindViewHolder(holder, position)
+        }
+    }
+
+    companion object {
+        private const val SELECTION_PAYLOAD = "selection"
+    }
+
     inner class ViewHolder(private val binding: ItemSuspiciousDomainBinding) : RecyclerView.ViewHolder(binding.root) {
         fun bind(item: SuspiciousDomainItem) {
             binding.domainText.text = item.domain
@@ -436,36 +475,30 @@ private class SuspiciousDomainAdapter(
             val novelPart = if (item.novelHits > 0) "  ·  小说专项 ${item.novelHits} 次" else ""
             val confidencePart = if (item.highConfidence) "  ·  推荐 ${item.confidenceScore} 分" else "  ·  参考 ${item.confidenceScore} 分"
             binding.statusText.text = (if (item.alreadyAdded) "状态：已添加规则" else "状态：未添加规则") + "  ·  厂商：${item.vendor}  ·  累计出现 ${item.count} 次$novelPart$confidencePart"
+            bindSelection(selectedDomains.contains(item.domain), !item.alreadyAdded)
+        }
+
+        fun bindSelection(isSelected: Boolean, enabled: Boolean) {
             binding.selectBox.setOnCheckedChangeListener(null)
-            binding.selectBox.isChecked = selectedDomains.contains(item.domain)
-            binding.selectBox.isEnabled = !item.alreadyAdded
-            binding.selectBox.setOnCheckedChangeListener { _, checked -> onToggle(item, checked) }
-            binding.root.setOnClickListener {
-                if (!item.alreadyAdded) {
-                    binding.selectBox.toggle()
+            binding.selectBox.isChecked = isSelected
+            binding.selectBox.isEnabled = enabled
+            binding.selectBox.setOnCheckedChangeListener { _, checked ->
+                val pos = bindingAdapterPosition
+                if (pos >= 0) {
+                    onToggle((bindingAdapter as SuspiciousDomainAdapter).items[pos], checked)
                 }
-            }
-            binding.root.setOnLongClickListener {
-                onLongPress(item)
-                true
-            }
-            binding.actionButton.text = if (item.alreadyAdded) "已添加" else "单条添加"
-            binding.actionButton.isEnabled = !item.alreadyAdded
-            binding.actionButton.alpha = if (item.alreadyAdded) 0.6f else 1f
-            binding.actionButton.setOnClickListener {
-                if (!item.alreadyAdded) {
-                    onActions(item)
-                }
-            }
-            binding.actionButton.setOnLongClickListener {
-                onLongPress(item)
-                true
             }
         }
 
-        private fun formatItemTimestamp(timestamp: Long): String {
-            if (timestamp <= 0L) return "未知"
-            return SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(timestamp))
+        companion object {
+            private val timestampFormat = ThreadLocal<SimpleDateFormat>().apply {
+                set(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US))
+            }
+
+            private fun formatItemTimestamp(timestamp: Long): String {
+                if (timestamp <= 0L) return "未知"
+                return timestampFormat.get()!!.format(Date(timestamp))
+            }
         }
     }
 }
