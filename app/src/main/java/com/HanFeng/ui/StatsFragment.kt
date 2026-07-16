@@ -128,7 +128,6 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
         addStatCard(binding, "请求总数", dashboard.requestTotal.toString())
         addStatCard(binding, "响应总数", dashboard.responseTotal.toString())
         addStatCard(binding, "累计节省流量", formatBytes(dashboard.bytesSaved))
-        addLatencyCards(binding)
 
         binding.leftColumn.removeAllViews()
         binding.rightColumn.removeAllViews()
@@ -138,13 +137,6 @@ class StatsFragment : Fragment(R.layout.fragment_stats) {
         addRankingCard(binding.rightColumn, "应用拦截排行", RankingType.APP_BLOCKED, rankings.appBlocked)
         addRankingCard(binding.rightColumn, "应用请求排行", RankingType.APP_REQUEST, rankings.appRequest)
         addRankingCard(binding.rightColumn, "应用响应排行", RankingType.APP_RESPONSE, rankings.appResponse)
-    }
-
-    private fun addLatencyCards(binding: FragmentStatsBinding) {
-        val dns = StatsRepository.getLatencySnapshot(StatsRepository.LatencyMetric.DNS)
-        val sni = StatsRepository.getLatencySnapshot(StatsRepository.LatencyMetric.SNI)
-        addStatCard(binding, "DNS 解析 P95", if (dns.isEmpty) "—" else "${dns.p95}ms")
-        addStatCard(binding, "SNI 决策 P95", if (sni.isEmpty) "—" else "${sni.p95}ms")
     }
 
     private fun formatBytes(bytes: Long): String {
