@@ -53,6 +53,86 @@ class KernelProcessHider {
         return HideResult.Failure("All kernel-level hiding methods failed", triedMethods)
     }
 
+    /**
+     * 在隔离的 PID namespace 中执行脚本，脚本的所有子进程对其他 App 不可见
+     *
+     * @param scriptPath 要执行的脚本路径
+     * @return 新命名空间中主进程的 PID，失败返回 null
+     */
+    fun executeHiddenScript(scriptPath: String): Int? {
+        return try {
+            // 检查 unshare 是否可用
+            val checkResult = runRootShell("command -v unshare > /dev/null 2>&1 && echo OK || echo FAIL", 5)
+            if (checkResult.output.trim() != "OK") {
+                Log.e(TAG, "unshare command not available")
+                return null
+            }
+
+            // 在新的 PID namespace 中执行脚本
+            // --pid: 创建新的 PID 命名空间
+            // --fork: fork 子进程
+            // --mount-proc: 挂载新的 proc 文件系统
+            val result = runRootShell(
+                "NEW_PID=\$(unshare --pid --fork --mount-proc sh -c \"exec sh $scriptPath\" & echo \$!)",
+                10
+            )
+
+            if (result.exitCode == 0) {
+                // 提取新进程的 PID
+                val pidMatch = Regex("NEW_PID=(\\d+)").find(result.output)
+                val newPid = pidMatch?.groupValues?.get(1)?.toIntOrNull()
+                if (newPid != null && newPid > 0) {
+                    Log.d(TAG, "Script executed in isolated namespace, PID=$newPid")
+                    // 注册到隐藏列表
+                    registerHiddenPid(newPid)
+                    return newPid
+                }
+            }
+
+            Log.e(TAG, "Failed to execute script in isolated namespace: ${result.output}")
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "executeHiddenScript failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 在隔离的 PID namespace 中执行命令，命令的所有子进程对其他 App 不可见
+     *
+     * @param command 要执行的命令
+     * @return 新命名空间中主进程的 PID，失败返回 null
+     */
+    fun executeHiddenCommand(command: String): Int? {
+        return try {
+            val checkResult = runRootShell("command -v unshare > /dev/null 2>&1 && echo OK || echo FAIL", 5)
+            if (checkResult.output.trim() != "OK") {
+                return null
+            }
+
+            val escapedCmd = command.replace("'", "'\\''")
+            val result = runRootShell(
+                "NEW_PID=\$(unshare --pid --fork --mount-proc sh -c '$escapedCmd' & echo \$!)",
+                10
+            )
+
+            if (result.exitCode == 0) {
+                val pidMatch = Regex("NEW_PID=(\\d+)").find(result.output)
+                val newPid = pidMatch?.groupValues?.get(1)?.toIntOrNull()
+                if (newPid != null && newPid > 0) {
+                    Log.d(TAG, "Command executed in isolated namespace, PID=$newPid")
+                    registerHiddenPid(newPid)
+                    return newPid
+                }
+            }
+
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "executeHiddenCommand failed: ${e.message}")
+            null
+        }
+    }
+
     private fun hideViaPidNamespace(pid: Int, scriptPath: String): Boolean {
         return try {
             val result = runRootShell(
