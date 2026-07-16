@@ -27,8 +27,8 @@ object SniInterceptor {
         val reason: String
     )
 
-    private const val SNI_CACHE_TTL_MS = 5_000L
-    private const val SNI_CACHE_MAX = 2048
+    private const val SNI_CACHE_TTL_MS = 30_000L
+    private const val SNI_CACHE_MAX = 4096
 
     private data class CachedSniDecision(
         val decision: SniBlockDecision,

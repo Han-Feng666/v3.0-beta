@@ -23,8 +23,8 @@ object HttpMitmFilter {
     private const val MAX_DECODED_BODY_BYTES = 512 * 1024
     
     // 正则表达式缓存（P1 优化）
-    private val compiledReplaceRules = object : LinkedHashMap<String, Regex>(512, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Regex>?): Boolean = size > 512
+    private val compiledReplaceRules = object : LinkedHashMap<String, Regex>(MAX_COMPILED_REGEX_CACHE, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Regex>?): Boolean = size > MAX_COMPILED_REGEX_CACHE
     }
     private val compiledReplaceRulesLock = Any()
     private const val MAX_COMPILED_REGEX_CACHE = 1024

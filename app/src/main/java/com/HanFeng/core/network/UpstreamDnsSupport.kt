@@ -12,8 +12,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 object UpstreamDnsSupport {
-    private const val DNS_RACE_CONCURRENCY = 3
-    private const val DNS_RACE_TIMEOUT_MS = 1500L
+    private const val DNS_RACE_CONCURRENCY = 5
+    private const val DNS_RACE_TIMEOUT_MS = 800L
+    private const val DNS_FIRST_ATTEMPT_TIMEOUT_MS = 200
+    private const val DNS_RETRY_TIMEOUT_MS = 400
 
     private val dnsRaceExecutor = Executors.newFixedThreadPool(DNS_RACE_CONCURRENCY) { runnable ->
         Thread(runnable).apply {
@@ -80,7 +82,7 @@ object UpstreamDnsSupport {
                     if (done.get()) return@submit
                     val socket = acquireSocket(server) ?: return@repeat
                     runCatching {
-                        socket.soTimeout = if (attempt == 0) 400 else 800
+                        socket.soTimeout = if (attempt == 0) DNS_FIRST_ATTEMPT_TIMEOUT_MS else DNS_RETRY_TIMEOUT_MS
                         socket.connect(server, 53)
                         socket.send(DatagramPacket(payload, payload.size))
                         val recvBuf = dnsRecvBuffer.get()

@@ -541,13 +541,13 @@ object RuleRepository {
     }
     
     // DNS 拦截决策缓存（减少重复计算）
-    private val dnsBlockDecisionCache = object : LinkedHashMap<String, Pair<Boolean, Long>>(256, 0.75f, true) {
+    private val dnsBlockDecisionCache = object : LinkedHashMap<String, Pair<Boolean, Long>>(1024, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Boolean, Long>>?): Boolean {
-            return size > 512
+            return size > 2048
         }
     }
     private val dnsBlockDecisionLock = Any()
-    private const val DECISION_TTL_MS = 5000L // 5 秒缓存
+    private const val DECISION_TTL_MS = 10000L // 10 秒缓存
 
     fun prewarmCaches(context: Context) {
         if (cachedSimpleDomainIndex != null) return

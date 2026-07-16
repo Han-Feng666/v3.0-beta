@@ -8,6 +8,7 @@ import java.util.LinkedHashMap
 object DnsRuntimeSupport {
     private const val MIN_CACHE_TTL_MILLIS = 60_000L
     private const val MIN_NEGATIVE_CACHE_TTL_MILLIS = 30_000L
+    private const val DEFAULT_DNS_CACHE_MAX_ENTRIES = 1024
 
     data class CachedDnsResponse(
         val payload: ByteArray,
@@ -61,7 +62,7 @@ object DnsRuntimeSupport {
         question: DnsQuestion,
         response: ByteArray,
         now: Long,
-        maxEntries: Int = 256
+        maxEntries: Int = DEFAULT_DNS_CACHE_MAX_ENTRIES
     ) {
         val expiresAt = when {
             DnsMessageParser.isCacheableResponse(response, question) -> {

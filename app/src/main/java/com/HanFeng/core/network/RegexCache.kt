@@ -4,7 +4,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 object RegexCache {
 
-    private val cache = ConcurrentHashMap<String, Regex>(128)
+    private val cache = ConcurrentHashMap<String, Regex>(1024)
 
     fun get(pattern: String): Regex =
         cache.getOrPut(pattern) { Regex(pattern) }
