@@ -17,6 +17,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.HanFeng.R
+import com.HanFeng.adblocker.shizuku.RootHideManager
 import com.HanFeng.adblocker.shizuku.SuSession
 import java.io.File
 
@@ -27,6 +28,7 @@ class RootScriptActivity : BaseActivity() {
     private lateinit var btnLoad: Button
     private lateinit var btnEdit: Button
     private lateinit var btnBrowse: Button
+    private lateinit var btnHiddenExecute: Button
     private var isEditing = false
     private var loadedFilePath: String? = null
 
@@ -51,6 +53,7 @@ class RootScriptActivity : BaseActivity() {
         btnLoad.setOnClickListener { loadScriptFromPath() }
         btnEdit.setOnClickListener { toggleEditMode() }
         btnTerminal.setOnClickListener { launchTerminal() }
+        btnHiddenExecute.setOnClickListener { launchHiddenExecute() }
 
         etScriptPath.setOnFocusChangeListener { _, hasFocus ->
             if (hasFocus) etScriptPath.selectAll()
@@ -295,6 +298,25 @@ class RootScriptActivity : BaseActivity() {
         startActivity(Intent(this, RootTerminalActivity::class.java).apply {
             putExtra("script_path", externalTmp.absolutePath)
         })
+    }
+
+    private fun launchHiddenExecute() {
+        val path = loadedFilePath
+        if (path == null) {
+            Toast.makeText(this, "请先加载或输入脚本路径", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        Thread {
+            val newPid = RootHideManager().executeHiddenScript(path)
+            runOnUiThread {
+                if (newPid != null) {
+                    Toast.makeText(this, "脚本已在隔离环境中执行\nPID: $newPid\n对其他 App 不可见", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this, "隐藏执行失败\n请确认：\n1. 已授予 Root 权限\n2. 设备支持 unshare 命令", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     private data class FileEntry(val name: String, val isDirectory: Boolean)
