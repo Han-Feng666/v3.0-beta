@@ -16,22 +16,21 @@
         <item name="buttonStyle">@style/Widget.HanFeng.Button</item>
         <item name="android:buttonStyle">@style/Widget.HanFeng.Button</item>
         <item name="materialButtonStyle">@style/Widget.HanFeng.MaterialButton</item>
+        <!-- 关键修复:Xiaomi MIUI/HyperOS Android 16 上 m3_alert_dialog 布局 line 38 缺 layout_width
+             导致 MaterialAlertDialogBuilder.show() 必崩。统一指向 AppCompat AlertDialog 主题规避。 -->
         <item name="android:alertDialogTheme">@style/ThemeOverlay.HanFeng.AppCompatDialog</item>
         <item name="alertDialogTheme">@style/ThemeOverlay.HanFeng.AppCompatDialog</item>
-        <item name="materialAlertDialogTheme">@style/ThemeOverlay.HanFeng.Dialog</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.HanFeng.AppCompatDialog</item>
     </style>
 
-    <style name="ThemeOverlay.HanFeng.Dialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
-        <item name="materialAlertDialogBodyTextStyle">@style/TextAppearance.HanFeng.DialogBody</item>
-        <item name="materialAlertDialogTitleTextStyle">@style/TextAppearance.HanFeng.DialogTitle</item>
-        <item name="buttonBarPositiveButtonStyle">@style/Widget.HanFeng.DialogButton.Positive</item>
-        <item name="buttonBarNegativeButtonStyle">@style/Widget.HanFeng.DialogButton.Negative</item>
-        <item name="buttonBarNeutralButtonStyle">@style/Widget.HanFeng.DialogButton.Neutral</item>
-        <item name="backgroundTint">@color/hf_surface_elevated</item>
+    <!-- 已弃用:保留以兼容老代码引用 ThemeOverlay.HanFeng.Dialog 的地方,但内部直接走 AppCompat 主题,
+         避免 m3_alert_dialog 布局在 Xiaomi ROM 上 inflate 失败 -->
+    <style name="ThemeOverlay.HanFeng.Dialog" parent="ThemeOverlay.AppCompat.Dialog.Alert">
         <item name="android:windowBackground">@drawable/bg_dialog_window</item>
-        <item name="shapeAppearanceOverlay">@style/ShapeAppearanceOverlayHanFengDialog</item>
-        <item name="colorPrimary">@color/hf_brand_primary</item>
-        <item name="colorOnPrimary">@color/hf_button_primary_text</item>
+        <item name="android:colorBackground">@color/hf_surface_elevated</item>
+        <item name="colorAccent">@color/hf_brand_primary</item>
+        <item name="android:textColorPrimary">@color/hf_text_primary</item>
+        <item name="android:textColorSecondary">@color/hf_text_secondary</item>
         <item name="android:windowAnimationStyle">@style/HanFengDialogAnimation</item>
     </style>
 

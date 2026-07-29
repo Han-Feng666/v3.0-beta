@@ -16,15 +16,17 @@ import com.HanFeng.data.ShizukuConnectionOwnerRepository
 import com.HanFeng.data.ShizukuRepository
 import com.HanFeng.data.LogRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.lifecycle.lifecycleScope
 
 open class BaseActivity : AppCompatActivity() {
     companion object {
-        private val hideBackgroundHandler = Handler(Looper.getMainLooper())
-        private var startedActivityCount = 0
         private var lastAppliedHideBackground: Boolean? = null
         private var lastAppliedHideBackgroundAt: Long = 0L
     }
+
+    private val hideBackgroundHandler = Handler(Looper.getMainLooper())
 
     protected data class ShizukuReadyState(
         val status: ShizukuRepository.Status,
@@ -42,12 +44,13 @@ open class BaseActivity : AppCompatActivity() {
         lastAppliedHideBackground = enabled
         lastAppliedHideBackgroundAt = System.currentTimeMillis()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            // 5 秒节流:同一 enabled 状态在 5s 内不重复调用 appTasks.forEach(setExcludeFromRecents)
+            // am.appTasks 是跨进程 IPC,每次都开销不小,连续 Activity 切换时无需重复跑
             runCatching {
                 val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                 am.appTasks.forEach { task ->
                     task.setExcludeFromRecents(enabled)
                 }
-                LogRepository.append(this, "applyHideBackgroundPolicy: enabled=$enabled tasks=${am.appTasks.size}")
             }.onFailure {
                 LogRepository.append(this, "applyHideBackgroundPolicy excludeFromRecents failed: ${it.message}")
             }
@@ -91,7 +94,6 @@ open class BaseActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        startedActivityCount += 1
         hideBackgroundHandler.removeCallbacksAndMessages(null)
     }
 
@@ -103,13 +105,21 @@ open class BaseActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
-        if (startedActivityCount > 0 || isChangingConfigurations) return
+        if (isChangingConfigurations) return
         hideBackgroundHandler.postDelayed({
-            if (startedActivityCount == 0) {
+            // 关键修复:只有 App 真的退到后台(全局 started Activity 计数为 0)才执行隐藏逻辑。
+            // 之前用本类静态 startedActivityCount 判断,在新 Activity 的 onStart 来不及执行时
+            // (比如子 Activity 启动慢、系统调度延迟),1.2s 后会误触发 finishAndRemoveTask
+            // 把自己干掉,导致用户从子页面返回时直接回到主界面。
+            if (!com.HanFeng.HanFengApp.isAppInForeground() && !isFinishing && !isDestroyed) {
                 removeTaskFromRecentsIfHidden()
             }
         }, 1_200L)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        hideBackgroundHandler.removeCallbacksAndMessages(null)
     }
 
     protected fun showShortToast(message: String) {
@@ -195,72 +205,78 @@ open class BaseActivity : AppCompatActivity() {
             onStateChanged()
             return
         }
-        val readyState = runCatching {
-            val status = ShizukuRepository.getStatus(this)
-            if (!status.installed || !status.binderAlive) {
-                ShizukuReadyState(status, connectionOwnerAlive = false, adControlAlive = false)
-            } else {
-                warmShizukuServicesBlocking()
-                ShizukuReadyState(
-                    status = ShizukuRepository.getStatus(this),
-                    connectionOwnerAlive = runCatching { ShizukuConnectionOwnerRepository.isServiceAlive() }.getOrDefault(false),
-                    adControlAlive = runCatching { ShizukuAdControlRepository.checkServiceHealth(this) }.getOrDefault(false)
-                )
-            }
-        }.getOrElse {
-            ShizukuReadyState(
-                status = ShizukuRepository.getStatus(this),
-                connectionOwnerAlive = false,
-                adControlAlive = false
-            )
-        }
-        when {
-            !readyState.status.installed -> {
-                showShizukuGuideDialog(
-                    title = "需要先安装 Shizuku",
-                    message = "Shizuku 增强模式需要先安装并启动 Shizuku。安装完成后，再回到寒枫进行授权。",
-                    positiveLabel = "前往下载"
-                ) {
-                    ShizukuRepository.openDownloadPage(this)
+        // warmShizukuServicesBlocking() 最多 4.5s runBlocking 同步等待 binder，主线程会卡 1-5 秒，丢到 IO 协程
+        lifecycleScope.launch {
+            val readyState = withContext(Dispatchers.IO) {
+                runCatching {
+                    val status = ShizukuRepository.getStatus(this@BaseActivity)
+                    if (!status.installed || !status.binderAlive) {
+                        ShizukuReadyState(status, connectionOwnerAlive = false, adControlAlive = false)
+                    } else {
+                        warmShizukuServicesBlocking()
+                        ShizukuReadyState(
+                            status = ShizukuRepository.getStatus(this@BaseActivity),
+                            connectionOwnerAlive = runCatching { ShizukuConnectionOwnerRepository.isServiceAlive() }.getOrDefault(false),
+                            adControlAlive = runCatching { ShizukuAdControlRepository.checkServiceHealth(this@BaseActivity) }.getOrDefault(false)
+                        )
+                    }
+                }.getOrElse {
+                    ShizukuReadyState(
+                        status = ShizukuRepository.getStatus(this@BaseActivity),
+                        connectionOwnerAlive = false,
+                        adControlAlive = false
+                    )
                 }
             }
-            !readyState.status.binderAlive -> {
-                showShizukuGuideDialog(
-                    title = "需要先启动 Shizuku",
-                    message = "请先在 Shizuku App 中启动服务。Android 11 及以上通常可通过无线调试启动，已 Root 设备也可以直接启动。",
-                    positiveLabel = "我知道了"
-                ) {
+            if (isFinishing || isDestroyed) return@launch
+            // lifecycleScope.launch 默认就在 Main，无需再切换
+            when {
+                !readyState.status.installed -> {
+                    showShizukuGuideDialog(
+                        title = "需要先安装 Shizuku",
+                        message = "Shizuku 增强模式需要先安装并启动 Shizuku。安装完成后，再回到寒枫进行授权。",
+                        positiveLabel = "前往下载"
+                    ) {
+                        ShizukuRepository.openDownloadPage(this@BaseActivity)
+                    }
+                }
+                !readyState.status.binderAlive -> {
+                    showShizukuGuideDialog(
+                        title = "需要先启动 Shizuku",
+                        message = "请先在 Shizuku App 中启动服务。Android 11 及以上通常可通过无线调试启动，已 Root 设备也可以直接启动。",
+                        positiveLabel = "我知道了"
+                    ) {
+                        onStateChanged()
+                    }
+                }
+                readyState.serviceHealthy && !readyState.status.permissionGranted -> {
+                    showShortToast("Shizuku 已可用，当前按兼容模式接入增强能力")
                     onStateChanged()
                 }
-            }
-            readyState.serviceHealthy && !readyState.status.permissionGranted -> {
-                showShortToast("Shizuku 已可用，当前按兼容模式接入增强能力")
-                onStateChanged()
-            }
-            !readyState.status.permissionStateKnown -> {
-                showShizukuGuideDialog(
-                    title = "Shizuku 权限状态异常",
-                    message = buildShizukuUnavailableMessage(readyState),
-                    positiveLabel = "我知道了"
-                ) {
+                !readyState.status.permissionStateKnown -> {
+                    showShizukuGuideDialog(
+                        title = "Shizuku 权限状态异常",
+                        message = buildShizukuUnavailableMessage(readyState),
+                        positiveLabel = "我知道了"
+                    ) {
+                        onStateChanged()
+                    }
+                }
+                readyState.status.permissionGranted -> {
+                    showShortToast("Shizuku 已授权，增强服务会继续完成连接")
                     onStateChanged()
                 }
-            }
-            readyState.status.permissionGranted -> {
-                warmShizukuServicesBlocking()
-                showShortToast("Shizuku 已授权，增强服务会继续完成连接")
-                onStateChanged()
-            }
-            ShizukuRepository.requestPermission() -> {
-                showShortToast("正在请求 Shizuku 授权")
-            }
-            else -> {
-                showShizukuGuideDialog(
-                    title = "Shizuku 需要手动授权",
-                    message = "请确认 Shizuku 已运行，并在弹出的授权界面中允许寒枫访问。如果之前拒绝过，需要先在 Shizuku 中清理授权状态。",
-                    positiveLabel = "我知道了"
-                ) {
-                    onStateChanged()
+                ShizukuRepository.requestPermission() -> {
+                    showShortToast("正在请求 Shizuku 授权")
+                }
+                else -> {
+                    showShizukuGuideDialog(
+                        title = "Shizuku 需要手动授权",
+                        message = "请确认 Shizuku 已运行，并在弹出的授权界面中允许寒枫访问。如果之前拒绝过，需要先在 Shizuku 中清理授权状态。",
+                        positiveLabel = "我知道了"
+                    ) {
+                        onStateChanged()
+                    }
                 }
             }
         }
@@ -268,11 +284,17 @@ open class BaseActivity : AppCompatActivity() {
 
     protected fun handleShizukuPermissionResult(granted: Boolean, onStateChanged: () -> Unit = {}) {
         if (granted) {
-            warmShizukuServicesBlocking()
+            // warmShizukuServicesBlocking() 内最多 3 × 1.5 = 4.5s runBlocking，主线程会卡顿，丢到 IO 协程
+            lifecycleScope.launch {
+                withContext(Dispatchers.IO) { warmShizukuServicesBlocking() }
+                // lifecycleScope.launch 默认就走回 Main，无需再切
+                showShortToast("Shizuku 授权成功")
+                onStateChanged()
+            }
+        } else {
+            showShortToast("Shizuku 授权失败")
+            onStateChanged()
         }
-        val message = if (granted) "Shizuku 授权成功" else "Shizuku 授权失败"
-        showShortToast(message)
-        onStateChanged()
     }
 
     private fun showShizukuGuideDialog(title: String, message: String, positiveLabel: String, action: () -> Unit) {

@@ -32,8 +32,22 @@ class RootHideActivity : BaseActivity() {
     private lateinit var btnApply: Button
     private lateinit var switchProp: Switch
     private lateinit var switchAutoWatcher: Switch
-    private lateinit var modulesFragment: RootHideModulesFragment
-    private lateinit var scopeFragment: RootHideScopeFragment
+
+    // 用 FragmentStateAdapter 标准范式：不缓存 Fragment 实例，每次 createFragment 返回新实例
+    // 通过 supportFragmentManager.findFragmentByView 拿到当前已实例化的 Fragment 引用
+    private val scopeFragment: RootHideScopeFragment?
+        get() = supportFragmentManager.fragments.firstNotNullOfOrNull { frag ->
+            frag.javaClass.simpleName.takeIf { it == "RootHideScopeFragment" }?.let {
+                frag.childFragmentManager.fragments.firstOrNull { it is RootHideScopeFragment } as? RootHideScopeFragment
+            } ?: (frag as? RootHideScopeFragment)
+        }
+
+    private val modulesFragment: RootHideModulesFragment?
+        get() = supportFragmentManager.fragments.firstNotNullOfOrNull { frag ->
+            frag.javaClass.simpleName.takeIf { it == "RootHideModulesFragment" }?.let {
+                frag.childFragmentManager.fragments.firstOrNull { it is RootHideModulesFragment } as? RootHideModulesFragment
+            } ?: (frag as? RootHideModulesFragment)
+        }
 
     private var cachedPreCheck: RootHideManager.PreCheckResult? = null
 
@@ -58,10 +72,7 @@ class RootHideActivity : BaseActivity() {
         switchProp = findViewById(R.id.switchPropDisguise)
         switchAutoWatcher = findViewById(R.id.switchAutoWatcher)
 
-        modulesFragment = RootHideModulesFragment()
-        scopeFragment = RootHideScopeFragment()
-
-        viewPager.adapter = HidePagerAdapter(this, modulesFragment, scopeFragment)
+        viewPager.adapter = HidePagerAdapter(this)
         TabLayoutMediator(tabLayout, viewPager) { tab, position ->
             tab.text = if (position == 0) "隐藏内容" else "作用域"
         }.attach()
@@ -85,6 +96,7 @@ class RootHideActivity : BaseActivity() {
         Thread {
             val hasRoot = SuSession.getInstance().open(30)
             runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 if (!hasRoot) {
                     tvResult.text = "Root 权限未授予"
                     btnApply.isEnabled = false
@@ -124,6 +136,7 @@ class RootHideActivity : BaseActivity() {
             val status = mgr.getHiddenStatus()
             sb.append("\n已隐藏: DenyList=${status.magiskDenyListCount}  进程=${status.processHiddenCount}  路径=${status.hiddenPathCount}")
             runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 tvRootSolution.text = pc.rootSolution
                 tvHideStatus.text = sb.toString()
             }
@@ -183,7 +196,6 @@ class RootHideActivity : BaseActivity() {
 
     private fun selectAllThirdParty() {
         Thread {
-            val scopeFragmentView = scopeFragment
             val pm = packageManager
             @Suppress("DEPRECATION")
             val flags = PackageManager.MATCH_UNINSTALLED_PACKAGES or
@@ -197,7 +209,7 @@ class RootHideActivity : BaseActivity() {
             RootHideRepository.replaceScopePackages(this, allThirdParty)
             runOnUiThread {
                 Toast.makeText(this, "已全选 ${allThirdParty.size} 个第三方应用", Toast.LENGTH_LONG).show()
-                scopeFragmentView.reloadFromOutside()
+                scopeFragment?.reloadFromOutside()
             }
         }.start()
     }
@@ -207,7 +219,7 @@ class RootHideActivity : BaseActivity() {
             RootHideRepository.replaceScopePackages(this, emptySet())
             runOnUiThread {
                 Toast.makeText(this, "作用域已清空", Toast.LENGTH_SHORT).show()
-                scopeFragment.reloadFromOutside()
+                scopeFragment?.reloadFromOutside()
             }
         }.start()
     }
@@ -245,7 +257,7 @@ class RootHideActivity : BaseActivity() {
     }
 
     private fun applyHiding() {
-        val scopePackages = scopeFragment.getSelectedScopePackages()
+        val scopePackages = scopeFragment?.getSelectedScopePackages() ?: emptySet()
 
         if (scopePackages.isEmpty()) {
             Toast.makeText(this, "请先在「作用域」中勾选目标应用（或使用一键预设）", Toast.LENGTH_SHORT).show()
@@ -291,14 +303,14 @@ class RootHideActivity : BaseActivity() {
     }
 
     private inner class HidePagerAdapter(
-        activity: FragmentActivity,
-        private val modulesFrag: RootHideModulesFragment,
-        private val scopeFrag: RootHideScopeFragment
+        activity: FragmentActivity
     ) : FragmentStateAdapter(activity) {
 
         override fun getItemCount(): Int = 2
         override fun createFragment(position: Int): Fragment {
-            return if (position == 0) modulesFrag else scopeFrag
+            // FragmentStateAdapter 标准范式：每次重建都返回新实例
+            // 通过 fragmentManager 持有实例不会泄漏，且支持配置变更/进程恢复
+            return if (position == 0) RootHideModulesFragment() else RootHideScopeFragment()
         }
     }
 

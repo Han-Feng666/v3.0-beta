@@ -64,11 +64,9 @@ object ShizukuRepository {
     }
 
     fun requestPermission(): Boolean {
-        val canRequest = isBinderReachable() && runCatching {
-            val permission = Shizuku.checkSelfPermission()
-            permission != PackageManager.PERMISSION_GRANTED && !Shizuku.shouldShowRequestPermissionRationale()
-        }.getOrDefault(false)
-        if (!canRequest) return false
+        if (!isBinderReachable()) return false
+        val permission = runCatching { Shizuku.checkSelfPermission() }.getOrNull()
+        if (permission == PackageManager.PERMISSION_GRANTED) return false
         return runCatching {
             Shizuku.requestPermission(REQUEST_CODE)
             true
@@ -84,6 +82,10 @@ object ShizukuRepository {
     }
 
     private fun isShizukuInstalled(context: Context): Boolean {
+        // A 路线:本 app 内置 starter + server,不需要外部 Shizuku APK
+        // 主 app 自己就是 Shizuku 管理端,视为已安装
+        if (com.HanFeng.adblocker.shizuku.BuiltInShizukuStarter.isShizukuBuiltin()) return true
+        if (com.HanFeng.adblocker.shizuku.BuiltInShizukuStarter.isShizukuAppInstalled(context)) return true
         return shizukuPackages.any { packageName ->
             runCatching {
                 context.packageManager.getPackageInfo(packageName, 0)
@@ -99,12 +101,21 @@ object ShizukuRepository {
         }.getOrDefault(false)
     }
 
-    private fun isBinderReachable(): Boolean {
-        return runCatching { Shizuku.pingBinder() }.getOrDefault(false) ||
-            runCatching { Shizuku.getBinder()?.pingBinder() == true }.getOrDefault(false) ||
-            runCatching { Shizuku.getBinder()?.isBinderAlive == true }.getOrDefault(false) ||
-            runCatching { Shizuku.getVersion() > 0 }.getOrDefault(false) ||
-            runCatching { Shizuku.getUid() > 0 }.getOrDefault(false)
+    @Volatile private var cachedBinderAlive: Boolean? = null
+    @Volatile private var cachedBinderAliveAtMs: Long = 0L
+    private const val BINDER_ALIVE_CACHE_TTL_MS = 200L
+
+    fun isBinderReachable(): Boolean {
+        val nowMs = android.os.SystemClock.elapsedRealtime()
+        val cached = cachedBinderAlive
+        if (cached != null && nowMs - cachedBinderAliveAtMs < BINDER_ALIVE_CACHE_TTL_MS) {
+            return cached
+        }
+        // 单 pingBinder() 已经够：它本身就是 binder transact，alive=true 立即返回，dead 立即 false
+        val alive = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
+        cachedBinderAlive = alive
+        cachedBinderAliveAtMs = nowMs
+        return alive
     }
 
     private fun readBaseStatus(context: Context): Status {

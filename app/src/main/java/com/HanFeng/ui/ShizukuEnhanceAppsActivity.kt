@@ -70,6 +70,7 @@ class ShizukuEnhanceAppsActivity : BaseActivity() {
 
     override fun onDestroy() {
         loadJob?.cancel()
+        adapter.shutdown()
         super.onDestroy()
     }
 

@@ -16,7 +16,10 @@ object DnsMessageParser {
         val questionCount = readShort(payload, 4)
         if (questionCount < 1) return null
         var offset = 12
-        val labels = mutableListOf<String>()
+        // 单遍 char 遍历直接拼成 domain String，省 mutableListOf<String>+copyOfRange+joinToString 三层分配。
+        // DNS query 名长度上限 255 字节，StringBuilder 给 64 初容量足够 99% 场景。
+        val nameBuilder = StringBuilder(64)
+        var firstLabel = true
         while (offset < payload.size) {
             val len = payload[offset].toInt() and 0xFF
             if (len == 0) {
@@ -25,13 +28,18 @@ object DnsMessageParser {
             }
             if (len and 0xC0 != 0) return null
             if (offset + 1 + len > payload.size) return null
-            labels += payload.copyOfRange(offset + 1, offset + 1 + len).toString(Charsets.UTF_8)
+            if (!firstLabel) nameBuilder.append('.')
+            // 直接用 String constructor 指定 payload 的 [offset+1, offset+1+len) 段 — 一步构造 UTF-8 String，
+            // 避免 copyOfRange 复制一次 byte[] 再 toString。
+            nameBuilder.append(String(payload, offset + 1, len, Charsets.UTF_8))
             offset += len + 1
+            firstLabel = false
         }
         if (offset + 4 > payload.size) return null
+        if (firstLabel) return null  // 空域名不合法
         val id = readShort(payload, 0)
         val qType = readShort(payload, offset)
-        return DnsQuestion(id, labels.joinToString("."), qType, System.currentTimeMillis())
+        return DnsQuestion(id, nameBuilder.toString(), qType, System.currentTimeMillis())
     }
 
     fun buildSinkholeResponse(queryPayload: ByteArray, question: DnsQuestion): ByteArray? {

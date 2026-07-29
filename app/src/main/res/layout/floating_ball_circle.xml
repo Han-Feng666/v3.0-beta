@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:clipChildren="false"
+    android:clipToPadding="false">
+
+    <LinearLayout
+        android:id="@+id/ballRootCircle"
+        android:layout_width="@dimen/floating_ball_circle_size"
+        android:layout_height="@dimen/floating_ball_circle_size"
+        android:background="@drawable/bg_floating_ball_circle"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="@dimen/floating_ball_padding">
+
+        <TextView
+            android:id="@+id/tvBallTitleCircle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="拦截"
+            android:textColor="#99FFFFFF"
+            android:textSize="@dimen/floating_ball_title_size"
+            android:maxLines="1"
+            android:ellipsize="none" />
+
+        <TextView
+            android:id="@+id/tvBallValueCircle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:gravity="center"
+            android:text="1555"
+            android:textColor="#FFFFFFFF"
+            android:textSize="@dimen/floating_ball_value_size"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="none"
+            android:textAlignment="center" />
+
+    </LinearLayout>
+</FrameLayout>

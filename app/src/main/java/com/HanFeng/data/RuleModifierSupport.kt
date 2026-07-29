@@ -64,6 +64,11 @@ object RuleModifierSupport {
         val emptyResponse: Boolean = false,
         val jsonPrunePaths: Set<String> = emptySet(),
         val hlsRules: Set<String> = emptySet(),
+        val methods: Set<String> = emptySet(),
+        val headerMatchRules: Set<String> = emptySet(),
+        val permissions: Set<String> = emptySet(),
+        val inlineScript: Boolean = false,
+        val inlineFont: Boolean = false,
         val unsupportedModifiers: List<String> = emptyList(),
         val invalid: Boolean = false
     )
@@ -153,6 +158,11 @@ object RuleModifierSupport {
         var emptyResponse = false
         val jsonPrunePaths = mutableSetOf<String>()
         val hlsRules = mutableSetOf<String>()
+        val methods = mutableSetOf<String>()
+        val headerMatchRules = mutableSetOf<String>()
+        val permissions = mutableSetOf<String>()
+        var inlineScript = false
+        var inlineFont = false
 
         modifierPart.split(',')
             .map { it.trim() }
@@ -256,10 +266,7 @@ object RuleModifierSupport {
                         val normalizedRule = parseReplaceRule(value) ?: return ModifierInfo(invalid = true)
                         replaceRules += normalizedRule
                     }
-                    "csp" -> {
-                        if (value.isBlank()) return ModifierInfo(invalid = true)
-                        cspValue = value
-                    }
+                    "csp" -> cspValue = value.takeIf { it.isNotBlank() } ?: "*"
                     "urlblock" -> urlblock = true
                     "from" -> {
                         if (value.isBlank()) return ModifierInfo(invalid = true)
@@ -406,7 +413,53 @@ object RuleModifierSupport {
                         if (rules.isEmpty()) return ModifierInfo(invalid = true)
                         hlsRules += rules
                     }
+                    // uBO 1.47+/ABP method 修饰符
+                    "method" -> {
+                        if (value.isBlank()) return ModifierInfo(invalid = true)
+                        val tokens = value.split('|').map { it.trim().uppercase() }.filter { it.isNotBlank() }
+                        if (tokens.isEmpty()) return ModifierInfo(invalid = true)
+                        methods.addAll(tokens)
+                    }
+                    // uBO/AdGuard header 修饰符(如 header=user-agent:...,header=content-type:application-json)
+                    "header" -> {
+                        if (value.isBlank()) return ModifierInfo(invalid = true)
+                        val tokens = value.split('|').map { it.trim() }.filter { it.isNotBlank() }
+                        if (tokens.isEmpty()) return ModifierInfo(invalid = true)
+                        headerMatchRules += tokens
+                    }
+                    // uBO 1.47+ permissions 修饰符
+                    "permissions" -> {
+                        if (value.isBlank()) return ModifierInfo(invalid = true)
+                        val tokens = value.split('|').map { it.trim().lowercase() }.filter { it.isNotBlank() }
+                        if (tokens.isEmpty()) return ModifierInfo(invalid = true)
+                        permissions += tokens
+                    }
+                    // uBO 资源类型 inline-script / inline-font
+                    "inline-script" -> {
+                        requestTypeScoped = true
+                        requestTypes += "inline-script"
+                    }
+                    "inline-font" -> {
+                        requestTypeScoped = true
+                        requestTypes += "inline-font"
+                    }
+                    // AdGuard specifichide-exception / generichide-exception 已有 generichideException,
+                    // 这里补 generichide 例外
+                    "specifichide-exception" -> Unit
+                    "generichide-exception" -> generichideException = true
+                    // uBO/ABP 兼容 alias
+                    "object-subrequest", "object_subrequest" -> {
+                        requestTypeScoped = true
+                        requestTypes += "object-subrequest"
+                    }
+                    // uBO 1.50+ 所有未在以上列出的已知/无害修饰符 — 静默忽略,不报错也不丢规则
+                    "extension", "extensions", "extensions-pre", "popup-if-anything", "frame-top",
+                    "request", "response", "request-from", "response-to", "request-to",
+                    "stealth", "disable-pcname-mismatch", "disable-sni-mismatch",
+                    "pso" -> Unit
                 }
+
+                // 未识别的 modifier 不报错,让规则继续解析(已通过 extractUnsupportedModifiers 兜底)
             }
 
         val normalizedIncluded = normalizeDnsTypes(dnsTypes)
@@ -471,7 +524,12 @@ object RuleModifierSupport {
             cname = cname,
             emptyResponse = emptyResponse,
             jsonPrunePaths = jsonPrunePaths.toSet(),
-            hlsRules = hlsRules.toSet()
+            hlsRules = hlsRules.toSet(),
+            methods = methods.toSet(),
+            headerMatchRules = headerMatchRules.toSet(),
+            permissions = permissions.toSet(),
+            inlineScript = inlineScript,
+            inlineFont = inlineFont
         )
     }
 

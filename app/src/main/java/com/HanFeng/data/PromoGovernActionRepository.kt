@@ -171,7 +171,7 @@ object PromoGovernActionRepository {
             lastGovernTime = prefs.getLong("last_govern_time", 0),
             categoryStats = governedPackages.associateWith { pkg ->
                 val status = ShizukuAdControlRepository.queryPackageStatus(context, pkg)
-                if (isDisabledState(status.enabledState)) 1 else if (status.suspended) 2 else if (!status.notificationsEnabled) 3 else 0
+                if (isDisabledState(status.enabledState)) 1 else if (status.suspended) 2 else 0
             }
         )
     }
@@ -201,7 +201,12 @@ object PromoGovernActionRepository {
     }
 
     fun setNotificationsBlocked(context: Context, target: PromoGovernTarget, blocked: Boolean): String {
-        if (blocked) PromoGovernSnapshotRepository.savePackageSnapshot(context, target, notificationTouched = true)
+        if (blocked) {
+            PromoGovernSnapshotRepository.savePackageSnapshot(context, target, notificationTouched = true)
+        } else {
+            // 用户明确恢复通知，必须从治理名单移除，否则下次 onResume 复核会重新关掉通知
+            PromoGovernSnapshotRepository.unmarkPackageGoverned(context, target.packageName)
+        }
         val success = if (blocked) {
             ShizukuAdControlRepository.blockPackageNotifications(context, target.packageName)
         } else {

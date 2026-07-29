@@ -16,7 +16,6 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.HanFeng.core.network.NetworkKernel
 import com.HanFeng.data.LogRepository
 import com.HanFeng.data.RuleRepository
@@ -249,21 +248,27 @@ class ImpactNormalNetworkActivity : BaseActivity() {
             .map { it.rule.id.trim() }
             .filter { it.isNotEmpty() }
             .toSet()
+        val appContext = applicationContext
         LogRepository.append(this, "deleteSelectedRules: requested=${selected.size}, ids=${selectedIds.size}")
-        val removedCount = RuleRepository.removeRules(this, selectedIds, selected.map { it.rule })
-        LogRepository.append(this, "Delete impact-network candidates result: requested=${selected.size} actualRemoved=$removedCount")
-        if (removedCount <= 0) {
-            Toast.makeText(this, "未删除任何规则，请重试一次", Toast.LENGTH_SHORT).show()
-            loadCandidates()
-            return
+        // removeRules 会全量读+全量重写规则文件(可能 MB 级)，必须放后台
+        lifecycleScope.launch {
+            val removedCount = withContext(Dispatchers.IO) {
+                RuleRepository.removeRules(appContext, selectedIds, selected.map { it.rule })
+            }
+            LogRepository.append(appContext, "Delete impact-network candidates result: requested=${selected.size} actualRemoved=$removedCount")
+            if (removedCount <= 0) {
+                Toast.makeText(appContext, "未删除任何规则，请重试一次", Toast.LENGTH_SHORT).show()
+                loadCandidates()
+                return@launch
+            }
+            hasChanges = true
+            NetworkKernel.reloadIfRunning(appContext)
+            Toast.makeText(appContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
+            selectedRuleIds.clear()
+            loadCandidates()  // 重新加载列表
+            adapter.submitListWithForceUpdate(emptyList())  // 先清空
+            adapter.submitListWithForceUpdate(visibleCandidates)  // 再刷新
         }
-        hasChanges = true
-        NetworkKernel.reloadIfRunning(this)
-        Toast.makeText(this, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
-        selectedRuleIds.clear()
-        loadCandidates()  // 重新加载列表
-        adapter.submitListWithForceUpdate(emptyList())  // 先清空
-        adapter.submitListWithForceUpdate(visibleCandidates)  // 再刷新
     }
 
     private fun updateDeleteButton() {

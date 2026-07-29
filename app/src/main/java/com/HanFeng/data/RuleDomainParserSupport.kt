@@ -16,13 +16,26 @@ object RuleDomainParserSupport {
         val domainToken = trimmed.substring(0, boundaryIndex)
         val suffix = trimmed.substring(boundaryIndex)
         if (domainToken.isBlank()) return null
-        return sanitizeDomain(normalizeDomainToken(domainToken))
-            ?: parseWildcardDomainAnchorPattern(domainToken)
-            ?: if (slashIndex > 0) {
-                sanitizeDomain(normalizeDomainToken(trimmed.substring(0, slashIndex)))
-            } else {
-                null
-            }
+        sanitizeDomain(normalizeDomainToken(domainToken))
+            ?.let { return it }
+        parseWildcardDomainAnchorPattern(domainToken)
+            ?.let { return it }
+        if (slashIndex > 0) {
+            sanitizeDomain(normalizeDomainToken(trimmed.substring(0, slashIndex)))
+                ?.let { return it }
+        }
+        // ABP anchor 形式 ||xxx^ 支持单标签 (无 . 的 host 名)
+        // 仅在用户明确用了 ABP anchor (^ 或 / 后续) 的情况下接受 — 防止 hosts 表里
+        // 写成 0.0.0.0 localhost 或 plain domain 被误捕
+        if ((caretIndex >= 0 || slashIndex >= 0) && domainToken.length in 2..63) {
+            val token = normalizeDomainToken(domainToken).lowercase()
+            // label 合法字符 (不能比域名 label 严格, 允许 hyphens)
+            val isPlainLabel = token.all { c ->
+                (c in 'a'..'z') || (c in '0'..'9') || c == '-' || c == '_'
+            } && token.first().isLetterOrDigit() && token.last().isLetterOrDigit()
+            if (isPlainLabel) return token
+        }
+        return null
     }
 
     fun parseExactAnchorPattern(

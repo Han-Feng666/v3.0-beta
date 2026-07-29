@@ -877,3 +877,52 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - SNI 拦截不需要解密 HTTPS：只看 TLS ClientHello 明文 SNI 字段匹配规则后发 TCP RST，对证书绑定 App 也有效。已通过 `shouldBlockBySniWithoutMitm` 在 `httpDecryptEnabled=false` 时独立运行。
   - `SniInterceptor.evaluate` 零 MITM 依赖：只依赖 `RuleRepository`（规则库）+ `ScoredBlockCache`（学习缓存）+ `isProtectedTrafficDomain`（业务保护），纯 DNS 模式可用。
   - 评论区/底部卡片/翻页/激励类内容级广告（URL 路径区分，如 `api.xxx.com/comment/list`）SNI 仍拦不住——同域名不同路径，只能在 `httpDecryptEnabled=true` 时由 `HttpMitmFilter` 内容级过滤拦掉。
+
+[Shizuku fork 内置集成]
+- Date: 2026-07-18
+- Context: Agent 在执行"Shizuku 全量 fork 内置主 app"时发现
+- Category: 构建方法
+- Instructions:
+  - shizuku-fork 子工程含 11 个 Gradle module：`aidl / shared / common / api / provider / server-shared / rish / starter / server / manager`，全部在 `/workspace/shizuku-fork/`。除 `rish` (Android 无模拟器运行环境，但能编 AAR) 和 `manager` (含 native build)外其他都纯 Java/Kotlin 库。
+  - 主 app 通过 `implementation(project(":shizuku-fork:manager"))` 等依赖把 fork module 集成进 APK，APK 自动包含 `lib/<abi>/libshizuku.so` (starter native binary)、`librish.so` (rich shell)、`libadb.so` (adb 配对 SSL)全部 4 个 ABI。
+  - 集成模式：A 路线，客户端 SDK 仍用 `dev.rikka.shizuku:api:13.1.5`，只把 starter native binary 内置。`BuiltInShizukuStarter.activateViaRoot` 从找外部 Shizuku APK 改为读主 app 自身 `applicationInfo.sourceDir`+`nativeLibraryDir/libshizuku.so`，root shell `<libshizuku.so> --apk=<apkPath>` 启动 server。
+  - `BuiltInShizukuStarter` 需在 app 启动时调 `BuiltInShizukuStarter.init(context)` 保存 application context 才能跑 activate。
+  - fork starter.cpp 内 `SERVER_NAME="hanfeng_shizuku_server"`（避免与官方 Shizuku process 名冲突），`PACKAGE_NAME="com.HanFeng.shizuku"`（拼 authority），`SERVER_CLASS_PATH="rikka.shizuku.server.ShizukuService"`（Java 包名不变）。
+  - Shizuku License 第 6 条限制字符串：applicationId=`com.HanFeng.shizuku`、permission=`com.HanFeng.permission.shizuku.*`、intent extra prefix=`com.HanFeng.shizuku.intent.extra.*`、REQUEST_PERMISSION action=`com.HanFeng.intent.action.REQUEST_PERMISSION`，全部不得用 `moe.shizuku.privileged.api` / `moe.shizuku.manager.permission.*` 等。Java 内部包名 `moe.shizuku.*` / `rikka.shizuku.*` 保留不动。
+  - 启动主 app 句柄 `BuiltInShizukuStarter.stop` 中 `pkill -f 'hanfeng_shizuku_server'` 与 `rm /dev/socket/hanfeng_shizuku_server`。
+  - 主 app Build 时强制 `androidx.core:core:1.13.1` 与 `core-ktx:1.13.1` 否则 fork:manager 拉到 1.16.0 要 AGP 8.6+ 与现行 AGP 8.5.0 不兼容（见 `app/build.gradle.kts` `configurations.all resolutionStrategy.force`）。
+  - fork manager module 路径 `/workspace/shizuku-fork/manager/`：res 已精简到只保留 `drawable/ic_launcher.xml + ic_system_icon.xml + ic_default_app_icon_background.xml` + `values/strings.xml + styles.xml + themes.xml + themes_overlay.xml` + `values-night/styles.xml` + `values-v31/themes_overlay.xml` + `mipmap-xxxhdpi/ic_launcher.png` 等。所有 layout 已删（RequestPermissionActivity 已改纯 Java 构造对话框）。所有 values-XX locale strings 已删（只保留默认 values/strings.xml）。
+  - NDK 路径：`/usr/lib/android-sdk/ndk/26.1.10909125`（已装），cmake 3.22.1 在 `/usr/lib/android-sdk/cmake/3.22.1/bin/`。CMakeLists.txt `cmake_minimum_required(VERSION 3.22)`，原本要 3.31+ 因环境 cmake 老改降了。
+  - shizuku-fork 子 modules 的 build.gradle.kts 中 plugin 不声明版本（通过 `settings.gradle.kts` pluginManagement.plugins 集中管理）。
+  - shizuku-fork/:aidl 必须设 `buildFeatures.aidl = true`，否则 AIDL 不生成 stub → server/common/api 找不到 `moe.shizuku.server.IShizukuService` 包报错。
+  - `moe.shizuku.manager.application` 是 fork manager 模块全局 lateinit 变量（见 `application.kt`），需要主 app 启动时调 `moe.shizuku.manager.init(application)` 才能让 `Starter.kt` 拿到包路径。当前主 app 暂未做这步——只 BootCompleteReceiver 在开机时才会触发该路径，运行态没用。
+  - 编译验证：`./gradlew :app:assembleDebug` 全量通过；APK 含上述 12 个 .so。
+
+[设备标识三个字的修正]
+- Date: 2026-07-18
+- Context: Agent 在执行"root 区域的主板 ID 显示成内核版本号、SN 码错误"修复时发现
+- Category: 业务规则
+- Instructions:
+  - 主板 ID 正确含义 = SoC 平台代号（全小写英文），如高通 lahaina/taro/kalama、谷歌 oriole/panther/shiba、MTK mt6895/mt6983/sun。绝不可能是 3.9.0 这种内核版本号，也绝不可是 PVT/EVT 工程版本号。
+  - 真正能读到主板平台代号的 prop 集（共 6 条，按主→次排序）：ro.board.platform / ro.boot.board.platform / ro.board.hardware / ro.hardware / ro.boot.hardware / ro.soc.model。
+  - 之前错误把 ro.boot.hardware.revision / ro.boot.hwversion / ro.boot.hwlevel / ro.boot.hardware.sku / ro.boot.hardware.id / ro.boot.hardware.mlbid / ro.boot.em.modelid / ro.boot.motherboard.id 塞进"主板 ID"，这些 prop 在大多数设备上由 bootloader 写成内核版本号字符串或工程版本号（PVT/EVT），已彻底移除。
+  - 主板 ID 随机生成器应当从真实已知 SoC 平台代号表(lahaina/taro/sun/oriole/mt6895/...)选一个返回，而不是瞎编 8 位 hex 字符串。
+  - 主板 ID 校验 ^[a-z0-9._\-]+$（必须小写，与历史 SoC 命名一致）。
+  - SN 码真实含义 = 拨号盘 *#06# 第三行「SN:」行的值，就是 ro.serialno / ro.boot.serialno 这组硬件序列号，与"修改主板序列号"工具修改的是同一组 prop。两者只是 UI 同一值的不同入口名。SN_PROPS 只含 3 条：ro.serialno / ro.boot.serialno / persist.sys.serialno。
+  - 之前错误 SN_PROPS 还含 gsm.serial(实为 IMEI1 别名，改它等于改 IMEI)、ro.product.sn/sys.sn/sys.xiaomi.sn/ro.xiaomi.sn(产品 SN 不是拨号盘 SN)、persist.radio.sn/ril.sn/gsm.sn(RIL-side serial 可能等于 IMEI)，全部已移除。
+  - SN 码正确格式 = 厂商自定义不定长字符串，可能含字母、数字、斜杠(如 50936/R3YT02307)；不是 16 位十六进制(那是 Android ID 的格式)；generateRandomSn 已是「5 位 digits + "/" + 8 位 uppercase letter」，符合该格式。
+  - SettingsActivity prefill 优先：主板 ID 取 ro.board.platform > ro.boot.board.platform > ro.hardware > ro.boot.hardware > ro.board.hardware > ro.soc.model；SN 码取 ro.serialno > ro.boot.serialno > persist.sys.serialno。不再 fallback 到不存在或被乱填的 prop。
+  - 用户区分澄清：主板 ID(平台代号) 与 主板序列号(ro.serialno) 与 SN 码(同 ro.serialno，只是另一个入口)——主板 ID 才是真正独立字段,后两者是同源。
+
+
+[项目知识：证书安装模块]
+- Date: 2026-07-26（2026-07-28 修正）
+- Context: 用户在确认任务时说明；后续用户反馈"安装证书到系统"功能失效
+- Category: 运维部署
+- Instructions:
+  - SystemCertInstaller 当前实现优先持久化写盘（remount rw /system + cp；失败再 tmpfs overlay）；
+    两个手段都失败才退化到 bind mount（重启失效）。
+  - persistent 标记反映是否写盘：success.persistent=true 时 UI 提示"重启后仍生效"，
+    false 时提示"重启后失效"。
+  - 目标目录：/system/etc/security/cacerts 主路径（旧设备）；/apex/com.android.conscrypt/cacerts
+    为 Android 14+ conscrypt 引擎实际加载点，但 APEX 不可写，仅可用 bind mount + nsenter。

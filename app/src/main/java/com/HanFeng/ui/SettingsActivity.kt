@@ -8,46 +8,52 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.LayoutInflater
 import android.view.View
 import android.widget.EditText
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioGroup
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.ArrayAdapter
+import android.widget.Spinner
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
-import com.HanFeng.core.network.NetworkKernel
-import com.HanFeng.service.AdBlockVpnService
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.HanFeng.R
+import com.HanFeng.core.network.NetworkKernel
+import com.HanFeng.core.network.RegexCache
 import com.HanFeng.data.AppSettingsRepository
 import com.HanFeng.data.FeatureSettingsRepository
-import com.HanFeng.core.network.RegexCache
 import com.HanFeng.data.HttpsMitmRepository
-import java.io.File
 import com.HanFeng.data.LogRepository
 import com.HanFeng.data.RuleRepositoryExport
 import com.HanFeng.data.ShizukuAdControlCatalog
 import com.HanFeng.data.ShizukuAdControlRepository
-import com.HanFeng.data.ShizukuConnectionOwnerRepository
 import com.HanFeng.data.ShizukuRepository
 import com.HanFeng.security.CertificateAuthorityManager
+import com.HanFeng.service.AdBlockVpnService
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import rikka.shizuku.Shizuku
+import java.io.File
 
 class SettingsActivity : BaseActivity() {
 
-    private lateinit var switchShizuku: Switch
     private lateinit var switchHideBackground: Switch
     private lateinit var switchStealthMode: Switch
     private lateinit var textStealthDesc: TextView
@@ -61,7 +67,7 @@ class SettingsActivity : BaseActivity() {
     private lateinit var textCustomTrackingParamsPreview: TextView
     private lateinit var btnManageCustomTrackingHeaders: Button
     private lateinit var textCustomTrackingHeadersPreview: TextView
-    private lateinit var textShizukuStatus: TextView
+    private lateinit var btnShizukuPermissionManage: Button
     private lateinit var btnShizukuAdControl: Button
     private lateinit var btnAppFreeze: Button
     private lateinit var btnGameAntiMark: Button
@@ -76,12 +82,14 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnInstallSystemCert: Button
     private lateinit var btnModifyDeviceId: Button
     private lateinit var btnModifySerial: Button
+    private lateinit var btnModifyMainboardId: Button
+    private lateinit var btnModifyModel: Button
+    private lateinit var btnModifySn: Button
+    private lateinit var btnModifyImei: Button
+    private lateinit var btnModifyMeid: Button
+    private lateinit var btnConvertSystemApp: Button
     private lateinit var btnBack: Button
     private lateinit var settingsRoot: View
-    private var cachedShizukuServiceHealthy = false
-    private var lastShizukuServiceHealthCheckAt = 0L
-    private var shizukuStatusRefreshJob: Job? = null
-    
     private lateinit var btnHostsEditor: Button
     private lateinit var btnNetworkPermission: Button
     private lateinit var btnBackgroundRestrict: Button
@@ -90,6 +98,12 @@ class SettingsActivity : BaseActivity() {
     private lateinit var cbAutoInstallSystemCert: CheckBox
 
     private lateinit var switchHotspotBlock: Switch
+    private lateinit var switchIdleShutdown: Switch
+    private lateinit var spinnerIdleShutdownInterval: Spinner
+    private lateinit var textIdleShutdownDesc: TextView
+    private lateinit var switchNotificationAdBlock: Switch
+    private lateinit var btnOpenNotificationAccess: Button
+    private lateinit var textNotificationAdBlockDesc: TextView
     private lateinit var hotspotModeLayout: LinearLayout
     private lateinit var rgHotspotMode: RadioGroup
     private lateinit var tvHotspotStatus: TextView
@@ -100,16 +114,8 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnChooseBackground: Button
     private lateinit var btnRemoveBackground: Button
     private lateinit var textCustomBgPreview: TextView
-    
-    private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
-        if (requestCode != ShizukuRepository.REQUEST_CODE) return@OnRequestPermissionResultListener
-        val granted = grantResult == PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            prewarmShizukuIfPossible()
-        }
-        showShortToast(if (granted) "Shizuku 授权成功" else "Shizuku 授权失败")
-        updateShizukuActionState()
-    }
+    private lateinit var btnFloatingBall: Button
+    private lateinit var btnRunningApps: Button
 
     private val certificateExportPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
@@ -129,12 +135,10 @@ class SettingsActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(R.layout.activity_settings)
 
         settingsRoot = findViewById(R.id.settingsRoot)
-        switchShizuku = findViewById(R.id.switchUseShizuku)
         switchHideBackground = findViewById(R.id.switchHideBackground)
         switchStealthMode = findViewById(R.id.switchStealthMode)
         textStealthDesc = findViewById(R.id.textStealthDesc)
@@ -148,7 +152,6 @@ class SettingsActivity : BaseActivity() {
         textCustomTrackingParamsPreview = findViewById(R.id.textCustomTrackingParamsPreview)
         btnManageCustomTrackingHeaders = findViewById(R.id.btnManageCustomTrackingHeaders)
         textCustomTrackingHeadersPreview = findViewById(R.id.textCustomTrackingHeadersPreview)
-        textShizukuStatus = findViewById(R.id.textShizukuStatus)
         btnShizukuAdControl = findViewById(R.id.btnShizukuAdControl)
         btnAppFreeze = findViewById(R.id.btnAppFreeze)
         btnGameAntiMark = findViewById(R.id.btnGameAntiMark)
@@ -163,6 +166,12 @@ class SettingsActivity : BaseActivity() {
         btnInstallSystemCert = findViewById(R.id.btnInstallSystemCert)
         btnModifyDeviceId = findViewById(R.id.btnModifyDeviceId)
         btnModifySerial = findViewById(R.id.btnModifySerial)
+        btnModifyMainboardId = findViewById(R.id.btnModifyMainboardId)
+        btnModifyModel = findViewById(R.id.btnModifyModel)
+        btnModifySn = findViewById(R.id.btnModifySn)
+        btnModifyImei = findViewById(R.id.btnModifyImei)
+        btnModifyMeid = findViewById(R.id.btnModifyMeid)
+        btnConvertSystemApp = findViewById(R.id.btnConvertSystemApp)
         btnBack = findViewById(R.id.btnBack)
         
         // Shizuku 增强
@@ -171,9 +180,16 @@ class SettingsActivity : BaseActivity() {
         btnBackgroundRestrict = findViewById(R.id.btnBackgroundRestrict)
         btnRootScript = findViewById(R.id.btnRootScript)
         btnRootHide = findViewById(R.id.btnRootHide)
+        btnShizukuPermissionManage = findViewById(R.id.btnShizukuPermissionManage)
         cbAutoInstallSystemCert = findViewById(R.id.cbAutoInstallSystemCert)
 
         switchHotspotBlock = findViewById(R.id.switchHotspotBlock)
+        switchIdleShutdown = findViewById(R.id.switchIdleShutdown)
+        spinnerIdleShutdownInterval = findViewById(R.id.spinnerIdleShutdownInterval)
+        textIdleShutdownDesc = findViewById(R.id.textIdleShutdownDesc)
+        switchNotificationAdBlock = findViewById(R.id.switchNotificationAdBlock)
+        btnOpenNotificationAccess = findViewById(R.id.btnOpenNotificationAccess)
+        textNotificationAdBlockDesc = findViewById(R.id.textNotificationAdBlockDesc)
         hotspotModeLayout = findViewById(R.id.hotspotModeLayout)
         rgHotspotMode = findViewById(R.id.rgHotspotMode)
         tvHotspotStatus = findViewById(R.id.tvHotspotStatus)
@@ -184,6 +200,8 @@ class SettingsActivity : BaseActivity() {
         btnChooseBackground = findViewById(R.id.btnChooseBackground)
         btnRemoveBackground = findViewById(R.id.btnRemoveBackground)
         textCustomBgPreview = findViewById(R.id.textCustomBgPreview)
+        btnFloatingBall = findViewById(R.id.btnFloatingBall)
+        btnRunningApps = findViewById(R.id.btnRunningApps)
 
         val initialTopPadding = settingsRoot.paddingTop
         val initialBottomPadding = settingsRoot.paddingBottom
@@ -193,23 +211,13 @@ class SettingsActivity : BaseActivity() {
             insets
         }
 
-        switchShizuku.isChecked = AppSettingsRepository.isShizukuEnabled(this)
         switchHideBackground.isChecked = AppSettingsRepository.isHideBackgroundEnabled(this)
-        switchStealthMode.isChecked = FeatureSettingsRepository.isStealthModeEnabled(this)
         stealthSubLayout.visibility = if (switchStealthMode.isChecked) View.VISIBLE else View.GONE
+        switchStealthMode.isChecked = FeatureSettingsRepository.isStealthModeEnabled(this)
         switchStealthStripParams.isChecked = FeatureSettingsRepository.isStealthStripTrackingParamsEnabled(this)
         switchStealthHideReferer.isChecked = FeatureSettingsRepository.isStealthHideRefererEnabled(this)
         switchStealthRemoveFingerprintHeaders.isChecked = FeatureSettingsRepository.isStealthRemoveFingerprintHeadersEnabled(this)
         switchAdFreeReward.isChecked = FeatureSettingsRepository.isAdFreeRewardEnabled(this)
-        updateShizukuActionState()
-
-        switchShizuku.setOnCheckedChangeListener { _, isChecked ->
-            AppSettingsRepository.setShizukuEnabled(this, isChecked)
-            if (isChecked) {
-                handleShizukuEnableRequested(fromUser = true)
-            }
-            updateShizukuActionState()
-        }
 
         switchHideBackground.setOnCheckedChangeListener { _, isChecked ->
             AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
@@ -254,6 +262,13 @@ class SettingsActivity : BaseActivity() {
         btnRemoveBackground.setOnClickListener {
             removeCustomBackground()
         }
+        btnFloatingBall.setOnClickListener {
+            startActivity(Intent(this, FloatingBallSettingsActivity::class.java))
+        }
+
+        btnRunningApps.setOnClickListener {
+            startActivity(Intent(this, RunningAppsActivity::class.java))
+        }
 
         btnManageCustomTrackingParams.setOnClickListener {
             showCustomParamsDialog()
@@ -262,6 +277,9 @@ class SettingsActivity : BaseActivity() {
             showCustomHeadersDialog()
         }
         refreshCustomTrackingPreviews()
+        btnShizukuPermissionManage.setOnClickListener {
+            startActivity(Intent(this, ShizukuPermissionManageActivity::class.java))
+        }
         btnShizukuAdControl.setOnClickListener {
             openShizukuAdControlCatalog()
         }
@@ -302,6 +320,9 @@ class SettingsActivity : BaseActivity() {
             sendBroadcast(Intent(AdBlockVpnService.ACTION_RELOAD).setPackage(packageName))
         }
 
+        setupIdleShutdownSetting()
+        setupNotificationAdBlockSetting()
+
         startHotspotStatusRefresh()
         btnCoexistSettings.setOnClickListener {
             launchActivitySafely(
@@ -340,24 +361,58 @@ class SettingsActivity : BaseActivity() {
             FeatureSettingsRepository.setAutoInstallSystemCertEnabled(this, cbAutoInstallSystemCert.isChecked)
         }
         btnModifyDeviceId.setOnClickListener {
-            showModifyDeviceIdDialog()
+            requireRootThen("root-unavailable-device-id", "修改 Android ID") { granted ->
+                if (granted) showModifyDeviceIdDialog()
+            }
         }
         btnModifySerial.setOnClickListener {
-            showModifySerialDialog()
+            requireRootThen("root-unavailable-serial", "修改主板序列号") { granted ->
+                if (granted) showModifySerialDialog()
+            }
+        }
+        btnModifyMainboardId.setOnClickListener {
+            requireRootThen("root-unavailable-mainboard", "修改 CPUID 和 CELLID") { granted ->
+                if (granted) showModifyMainboardIdDialog()
+            }
+        }
+        btnModifyModel.setOnClickListener {
+            requireRootThen("root-unavailable-model", "修改手机型号") { granted ->
+                if (granted) showModifyModelDialog()
+            }
+        }
+        btnModifySn.setOnClickListener {
+            requireRootThen("root-unavailable-sn", "修改 SN 码") { granted ->
+                if (granted) showModifySnDialog()
+            }
+        }
+        btnModifyImei.setOnClickListener {
+            requireRootThen("root-unavailable-imei", "修改 IMEI") { granted ->
+                if (granted) showModifyImeiDialog()
+            }
+        }
+        btnModifyMeid.setOnClickListener {
+            requireRootThen("root-unavailable-meid", "修改 MEID") { granted ->
+                if (granted) showModifyMeidDialog()
+            }
+        }
+        btnConvertSystemApp.setOnClickListener {
+            requireRootThen("root-unavailable-convert-sys-app", "第三方应用转系统应用") { granted ->
+                if (granted) showConvertSystemAppDialog()
+            }
         }
         refreshSystemCertStatus()
         
         // Shizuku 增强功能按钮
         btnHostsEditor.setOnClickListener {
-            if (!Shizuku.pingBinder()) {
+            if (!ShizukuRepository.isBinderReachable()) {
                 showShortToast("请先授权 Shizuku")
                 return@setOnClickListener
             }
             launchActivitySafely(Intent(this, HostsEditorActivity::class.java), failureMessage = "打开 Hosts 编辑失败")
         }
-        
+
         btnNetworkPermission.setOnClickListener {
-            if (!Shizuku.pingBinder()) {
+            if (!ShizukuRepository.isBinderReachable()) {
                 showShortToast("请先授权 Shizuku")
                 return@setOnClickListener
             }
@@ -367,9 +422,9 @@ class SettingsActivity : BaseActivity() {
                 failureMessage = "打开网络权限管理失败"
             )
         }
-        
+
         btnBackgroundRestrict.setOnClickListener {
-            if (!Shizuku.pingBinder()) {
+            if (!ShizukuRepository.isBinderReachable()) {
                 showShortToast("请先授权 Shizuku")
                 return@setOnClickListener
             }
@@ -384,98 +439,25 @@ class SettingsActivity : BaseActivity() {
             launchActivitySafely(Intent(this, RootScriptActivity::class.java), failureMessage = "打开 Root 脚本执行失败")
         }
 
-        btnRootHide.setOnClickListener {
+btnRootHide.setOnClickListener {
             launchActivitySafely(Intent(this, RootHideActivity::class.java), failureMessage = "打开 Root 隐藏失败")
         }
-        
-        textShizukuStatus.setOnClickListener {
-            if (AppSettingsRepository.isShizukuEnabled(this)) {
-                handleShizukuEnableRequested(fromUser = false)
-            } else {
-                StableDialog.builder(this)
-                    .setTitle("Shizuku 未启用")
-                    .setMessage("先打开“使用 Shizuku 增强”，再继续安装、启动或授权。")
-                    .setPositiveButton("我知道了", null)
-                    .showSafely(this, "Show shizuku disabled dialog failed")
-            }
-        }
+
         btnBack.setOnClickListener { finish() }
     }
 
     override fun onResume() {
         super.onResume()
-        syncShizukuSwitch()
         syncHideBackgroundSwitch()
         syncStealthModeSwitch()
         syncAdFreeRewardSwitch()
-        updateShizukuActionState()
-        refreshShizukuActionStateAsync(force = false)
-        prewarmShizukuIfPossible()
+        refreshCustomBackgroundPreview()
+        refreshNotificationAccessHintAsync()
     }
 
     override fun onDestroy() {
-        shizukuStatusRefreshJob?.cancel()
-        Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
+        hotspotStatusJob?.cancel()
         super.onDestroy()
-    }
-
-    private fun syncShizukuSwitch() {
-        val enabled = AppSettingsRepository.isShizukuEnabled(this)
-        if (switchShizuku.isChecked == enabled) return
-        switchShizuku.setOnCheckedChangeListener(null)
-        switchShizuku.isChecked = enabled
-        switchShizuku.setOnCheckedChangeListener { _, isChecked ->
-            AppSettingsRepository.setShizukuEnabled(this, isChecked)
-            if (isChecked) {
-                handleShizukuEnableRequested(fromUser = true)
-            }
-            updateShizukuActionState()
-        }
-    }
-
-    private fun handleShizukuEnableRequested(fromUser: Boolean) {
-        val status = ShizukuRepository.getStatus(this)
-        val serviceHealthy = status.installed && status.binderAlive && cachedShizukuServiceHealthy
-        when {
-            !status.installed -> {
-                StableDialog.builder(this)
-                    .setTitle("需要先安装 Shizuku")
-                    .setMessage("系统推广治理和连接增强依赖 Shizuku。安装完成后回到这里即可继续。")
-                    .setPositiveButton("前往下载") { _, _ -> ShizukuRepository.openDownloadPage(this) }
-                    .setNegativeButton("取消", null)
-                    .showSafely(this, "Show install shizuku dialog failed")
-            }
-            !status.binderAlive -> {
-                StableDialog.builder(this)
-                    .setTitle("需要先启动 Shizuku")
-                    .setMessage("请先在 Shizuku App 里启动服务。完成后回到设置页，状态会自动刷新。")
-                    .setPositiveButton("我知道了", null)
-                    .showSafely(this, "Show start shizuku dialog failed")
-            }
-            serviceHealthy && !status.permissionGranted -> {
-                if (fromUser) {
-                    showShortToast("Shizuku 已通过兼容模式连接")
-                }
-            }
-            status.permissionGranted -> {
-                refreshShizukuActionStateAsync(force = true)
-                prewarmShizukuIfPossible()
-                if (fromUser) {
-                    showShortToast("Shizuku 已连接")
-                }
-            }
-            ShizukuRepository.requestPermission() -> {
-                showShortToast("正在请求 Shizuku 授权")
-            }
-            else -> {
-                StableDialog.builder(this)
-                    .setTitle("Shizuku 需要授权")
-                    .setMessage("请确认 Shizuku 已运行，并在授权界面里允许寒枫访问。若之前拒绝过，请到 Shizuku 中清理授权状态后重试。")
-                    .setPositiveButton("我知道了", null)
-                    .showSafely(this, "Show shizuku permission dialog failed")
-            }
-        }
-        updateShizukuActionState()
     }
 
     private fun syncHideBackgroundSwitch() {
@@ -666,50 +648,6 @@ class SettingsActivity : BaseActivity() {
             .showSafely(this, "Show add custom header dialog failed")
     }
 
-    private fun updateShizukuActionState() {
-        val shizukuEnabled = AppSettingsRepository.isShizukuEnabled(this)
-        val status = if (shizukuEnabled) ShizukuRepository.getStatus(this) else null
-        val baseReady = status?.let { it.installed && it.binderAlive } == true
-        val serviceHealthy = shizukuEnabled && baseReady && cachedShizukuServiceHealthy
-        val shizukuReady = status?.let { it.installed && it.binderAlive && (it.permissionGranted || serviceHealthy) } == true
-        btnShizukuAdControl.isEnabled = true
-        btnAppFreeze.isEnabled = true
-        btnGameAntiMark.isEnabled = true
-        btnCoexistSettings.isEnabled = true
-        btnTrafficCardSettings.isEnabled = true
-        btnJoinGroupSettings.isEnabled = true
-        btnShizukuAdControl.alpha = if (shizukuReady) 1f else 0.72f
-        btnAppFreeze.alpha = if (shizukuReady) 1f else 0.72f
-        btnGameAntiMark.alpha = 1f
-        textShizukuStatus.text = buildShizukuStatusText(shizukuEnabled, shizukuReady, serviceHealthy, status)
-    }
-
-    private fun refreshShizukuActionStateAsync(force: Boolean) {
-        val shizukuEnabled = AppSettingsRepository.isShizukuEnabled(this)
-        if (!shizukuEnabled) {
-            cachedShizukuServiceHealthy = false
-            lastShizukuServiceHealthCheckAt = 0L
-            return
-        }
-        val now = System.currentTimeMillis()
-        if (!force && now - lastShizukuServiceHealthCheckAt < SHIZUKU_STATUS_REFRESH_INTERVAL_MILLIS) return
-        if (shizukuStatusRefreshJob?.isActive == true) return
-        lastShizukuServiceHealthCheckAt = now
-        shizukuStatusRefreshJob = lifecycleScope.launch {
-            val serviceHealthy = withContext(Dispatchers.IO) {
-                runCatching { ShizukuAdControlRepository.isServiceAlive() }.getOrDefault(false)
-            }
-            cachedShizukuServiceHealthy = serviceHealthy
-            if (!isFinishing && !isDestroyed) {
-                updateShizukuActionState()
-            }
-        }
-    }
-
-    private fun warmShizukuServices(): Boolean {
-        return warmShizukuServicesBlocking()
-    }
-
     private fun openJoinGroupPage() {
         runCatching {
             startActivity(
@@ -840,20 +778,15 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun installCertificateToSystem() {
-        if (!com.HanFeng.adblocker.shizuku.SystemCertInstaller.isRootAvailable()) {
+        requireRootThen("root-unavailable-cert-install", "安装证书到系统") { granted ->
+            if (!granted) return@requireRootThen
             StableDialog.builder(this)
-                .setTitle("需要 Root 权限")
-                .setMessage("安装证书到系统需要 Root 权限，请确保设备已获取 Root。")
-                .setPositiveButton("确定", null)
-                .showSafely(this, "root-unavailable-cert-install")
-            return
+                .setTitle("安装证书到系统")
+                .setMessage("将 MITM CA 证书安装到系统信任库。\n\n安装方式：\n- Magisk 模块（推荐）：重启后自动生效，无需重新安装\n- bind mount：当前会话生效，重启后失效\n- 系统写入：直接写入系统分区\n\n安装成功后可拦截更多 HTTPS 广告。\n\n是否继续？")
+                .setPositiveButton("安装") { _, _ -> performSystemCertInstall() }
+                .setNegativeButton("取消", null)
+                .showSafely(this, "confirm-system-cert-install")
         }
-        StableDialog.builder(this)
-            .setTitle("安装证书到系统")
-            .setMessage("将 MITM CA 证书安装到系统信任库。\n\n安装方式：\n- Magisk 模块（推荐）：重启后自动生效，无需重新安装\n- bind mount：当前会话生效，重启后失效\n- 系统写入：直接写入系统分区\n\n安装成功后可拦截更多 HTTPS 广告。\n\n是否继续？")
-            .setPositiveButton("安装") { _, _ -> performSystemCertInstall() }
-            .setNegativeButton("取消", null)
-            .showSafely(this, "confirm-system-cert-install")
     }
 
     private fun performSystemCertInstall() {
@@ -877,9 +810,14 @@ class SettingsActivity : BaseActivity() {
                             refreshSystemCertStatus()
                         }
                         is com.HanFeng.adblocker.shizuku.SystemCertInstaller.InstallResult.Failure -> {
+                            val diagText = if (result.diagnostics.isNotEmpty()) {
+                                "\n\n--- 诊断信息 ---\n" + result.diagnostics.entries.joinToString("\n") { (k, v) ->
+                                    "$k:\n  ${v.take(200)}"
+                                }
+                            } else ""
                             StableDialog.builder(this@SettingsActivity)
                                 .setTitle("安装失败")
-                                .setMessage("${result.reason}\n\n已尝试: ${result.triedMethods.joinToString(", ")}")
+                                .setMessage("${result.reason}\n\n已尝试: ${result.triedMethods.joinToString(", ")}$diagText")
                                 .setPositiveButton("确定", null)
                                 .showSafely(this@SettingsActivity, "system-cert-install-failed")
                         }
@@ -898,11 +836,14 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun refreshSystemCertStatus() {
-        if (!com.HanFeng.adblocker.shizuku.SystemCertInstaller.isRootAvailable()) {
-            btnInstallSystemCert.text = "安装证书到系统 (Root)"
-            return
-        }
         lifecycleScope.launch {
+            val granted = withContext(Dispatchers.Default) {
+                com.HanFeng.adblocker.shizuku.SystemCertInstaller.isRootAvailable()
+            }
+            if (!granted) {
+                btnInstallSystemCert.text = "安装证书到系统 (Root)"
+                return@launch
+            }
             val installer = com.HanFeng.adblocker.shizuku.SystemCertInstaller(this@SettingsActivity)
             val status = withContext(Dispatchers.Default) { installer.checkCurrentInstallStatus() }
             withContext(Dispatchers.Main) {
@@ -923,14 +864,6 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun showModifyDeviceIdDialog() {
-        if (!com.HanFeng.adblocker.shizuku.DeviceIdModifier.isRootAvailable()) {
-            StableDialog.builder(this)
-                .setTitle("需要 Root 权限")
-                .setMessage("修改 Android ID 需要 Root 权限。")
-                .setPositiveButton("确定", null)
-                .showSafely(this, "root-unavailable-device-id")
-            return
-        }
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(16.dp, 16.dp, 16.dp, 8.dp)
@@ -986,25 +919,28 @@ class SettingsActivity : BaseActivity() {
         btnReset.setOnClickListener {
             etInput.setText("")
             etInput.hint = "正在恢复..."
-            Thread {
-                val result = com.HanFeng.adblocker.shizuku.DeviceIdModifier().readAndroidId()
-                runOnUiThread {
-                    val currentId = if (result.exitCode == 0 && result.output.isNotBlank()) result.output.trim() else "(无法读取)"
-                    etInput.setText(currentId)
-                    etInput.setSelection(etInput.text.length)
+            lifecycleScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    com.HanFeng.adblocker.shizuku.DeviceIdModifier().readAndroidId()
                 }
-            }.start()
-        }
-
-        Thread {
-            val result = com.HanFeng.adblocker.shizuku.DeviceIdModifier().readAndroidId()
-            runOnUiThread {
+                if (isFinishing || isDestroyed) return@launch
                 val currentId = if (result.exitCode == 0 && result.output.isNotBlank()) result.output.trim() else "(无法读取)"
                 etInput.setText(currentId)
                 etInput.setSelection(etInput.text.length)
-                dialog.setMessage("当前 Android ID（16 位十六进制）：")
             }
-        }.start()
+        }
+
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                com.HanFeng.adblocker.shizuku.DeviceIdModifier().readAndroidId()
+            }
+            if (isFinishing || isDestroyed) return@launch
+            if (!dialog.isShowing) return@launch
+            val currentId = if (result.exitCode == 0 && result.output.isNotBlank()) result.output.trim() else "(无法读取)"
+            etInput.setText(currentId)
+            etInput.setSelection(etInput.text.length)
+            dialog.setMessage("当前 Android ID（16 位十六进制）：")
+        }
     }
 
     private fun executeDeviceIdChange(newId: String) {
@@ -1030,14 +966,6 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun showModifySerialDialog() {
-        if (!com.HanFeng.adblocker.shizuku.DeviceIdModifier.isRootAvailable()) {
-            StableDialog.builder(this)
-                .setTitle("需要 Root 权限")
-                .setMessage("修改主板序列号需要 Root 权限。")
-                .setPositiveButton("确定", null)
-                .showSafely(this, "root-unavailable-serial")
-            return
-        }
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(16.dp, 16.dp, 16.dp, 8.dp)
@@ -1072,7 +1000,6 @@ class SettingsActivity : BaseActivity() {
 
         val dialog = StableDialog.builder(this)
             .setTitle("修改主板序列号")
-            .setMessage("当前主板序列号：")
             .setView(container)
             .setPositiveButton("确认修改") { _, _ ->
                 val newSerial = etInput.text.toString().trim()
@@ -1093,24 +1020,27 @@ class SettingsActivity : BaseActivity() {
         btnReset.setOnClickListener {
             etInput.setText("")
             etInput.hint = "正在恢复..."
-            Thread {
-                val result = com.HanFeng.adblocker.shizuku.DeviceIdModifier().readSerialNo()
-                runOnUiThread {
-                    etInput.setText(result.output.trim())
-                    etInput.setSelection(etInput.text.length)
+            lifecycleScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    com.HanFeng.adblocker.shizuku.DeviceIdModifier().readSerialNo()
                 }
-            }.start()
+                if (isFinishing || isDestroyed) return@launch
+                etInput.setText(result.output.trim())
+                etInput.setSelection(etInput.text.length)
+            }
         }
 
-        Thread {
-            val result = com.HanFeng.adblocker.shizuku.DeviceIdModifier().readSerialNo()
-            runOnUiThread {
-                val currentSerial = result.output.trim().ifBlank { "(无法读取)" }
-                etInput.setText(currentSerial)
-                etInput.setSelection(etInput.text.length)
-                dialog.setMessage("当前主板序列号：")
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                com.HanFeng.adblocker.shizuku.DeviceIdModifier().readSerialNo()
             }
-        }.start()
+            if (isFinishing || isDestroyed) return@launch
+            if (!dialog.isShowing) return@launch
+            val currentSerial = result.output.trim().ifBlank { "(无法读取)" }
+            etInput.setText(currentSerial)
+            etInput.setSelection(etInput.text.length)
+            dialog.setMessage("当前主板序列号：")
+        }
     }
 
     private fun executeSerialChange(newSerial: String) {
@@ -1135,6 +1065,1000 @@ class SettingsActivity : BaseActivity() {
         }
     }
 
+    // ==================== 主板 ID ====================
+    private fun showModifyMainboardIdDialog() {
+        val modifier = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16.dp, 16.dp, 16.dp, 8.dp)
+        }
+        val tvCurrent = TextView(this).apply {
+            text = "正在读取..."
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 0, 0, 8.dp)
+            maxLines = 8
+        }
+        container.addView(tvCurrent)
+
+        data class FieldGroup(
+            val propKey: String,
+            val label: String,
+            val placeholder: String,
+            val etInput: EditText,
+            val btnRandom: Button,
+            val btnReset: Button,
+            var originalValue: String? = null
+        )
+
+        val cpuidField = FieldGroup(
+            propKey = "ro.boot.cpuid",
+            label = "CPUID",
+            placeholder = "新 CPUID，留空保持不变",
+            etInput = EditText(this).apply {
+                setSingleLine(true)
+                inputType = android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or android.text.InputType.TYPE_CLASS_TEXT
+                setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+                setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+                setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+                setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+            },
+            btnRandom = Button(this).apply {
+                text = "随机"
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp }
+            },
+            btnReset = Button(this).apply {
+                text = "恢复默认"
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp }
+            }
+        )
+        val cellIdField = FieldGroup(
+            propKey = "ro.boot.cell_id",
+            label = "CELLID",
+            placeholder = "新 CELLID，留空保持不变",
+            etInput = EditText(this).apply {
+                setSingleLine(true)
+                inputType = android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or android.text.InputType.TYPE_CLASS_TEXT
+                setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+                setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+                setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+                setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+            },
+            btnRandom = Button(this).apply {
+                text = "随机"
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp }
+            },
+            btnReset = Button(this).apply {
+                text = "恢复默认"
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp }
+            }
+        )
+
+        fun renderField(group: FieldGroup) {
+            val tvLabel = TextView(this).apply {
+                text = group.label
+                setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+                textSize = 12f
+                setPadding(0, 8.dp, 0, 4.dp)
+            }
+            group.etInput.hint = group.placeholder
+            // 输入框
+            container.addView(tvLabel)
+            container.addView(group.etInput)
+            // 按钮行：随机 + 恢复默认，并排放输入框下方
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, 6.dp, 0, 4.dp)
+            }
+            row.addView(group.btnRandom)
+            row.addView(group.btnReset)
+            container.addView(row)
+
+            group.btnRandom.setOnClickListener {
+                val seed = group.originalValue
+                val generated = if (!seed.isNullOrBlank()) {
+                    com.HanFeng.adblocker.shizuku.DeviceIdModifier.generateRandomMainboardId(seed)
+                } else {
+                    com.HanFeng.adblocker.shizuku.DeviceIdModifier.generateRandomMainboardId(null)
+                }
+                group.etInput.setText(generated)
+                group.etInput.setSelection(group.etInput.text.length)
+            }
+            group.btnReset.setOnClickListener {
+                lifecycleScope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        modifier.clearMainboardIdForProp(group.propKey)
+                    }
+                    if (isFinishing || isDestroyed) return@launch
+                    if (result.exitCode == 0) {
+                        showShortToast("已清除 ${group.label}，重启后恢复默认")
+                        group.etInput.setText("")
+                    } else {
+                        showShortToast("清除失败: ${result.output}")
+                    }
+                }
+            }
+        }
+        renderField(cpuidField)
+        renderField(cellIdField)
+
+        val dialog = StableDialog.builder(this)
+            .setTitle("修改 CPUID 和 CELLID")
+            .setView(container)
+            .setPositiveButton("确认修改") { _, _ ->
+                val newCpuid = cpuidField.etInput.text.toString().trim()
+                val newCellId = cellIdField.etInput.text.toString().trim()
+                if (newCpuid.isBlank() && newCellId.isBlank()) {
+                    showShortToast("请至少输入一项")
+                    return@setPositiveButton
+                }
+                executeMainboardIdChange(newCpuid, newCellId)
+            }
+            .setNegativeButton("取消", null)
+            .create()
+
+        dialog.show()
+
+        lifecycleScope.launch {
+            val pair = withContext(Dispatchers.IO) {
+                modifier.readMainboardIdForProp("ro.boot.cpuid") to modifier.readMainboardIdForProp("ro.boot.cell_id")
+            }
+            if (isFinishing || isDestroyed) return@launch
+            if (!dialog.isShowing) return@launch
+            val cpuidVal = pair.first
+            val cellIdVal = pair.second
+            val sb = StringBuilder("当前 CPUID/CELLID：")
+            sb.append('\n').append("CPUID = ").append(cpuidVal.ifBlank { "(空)" })
+            sb.append('\n').append("CELLID = ").append(cellIdVal.ifBlank { "(空)" })
+            tvCurrent.text = sb.toString()
+            cpuidField.originalValue = cpuidVal.takeIf { it.isNotBlank() }
+            cellIdField.originalValue = cellIdVal.takeIf { it.isNotBlank() }
+            if (cpuidField.originalValue == null && cellIdField.originalValue == null) {
+                tvCurrent.text = "当前 CPUID/CELLID：\n(无法读取，请检查 root 权限)"
+            }
+        }
+    }
+
+
+    private fun executeMainboardIdChange(newCpuid: String, newCellId: String) {
+        lifecycleScope.launch {
+            val modifier = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
+            val cpuidResult = if (newCpuid.isNotBlank())
+                withContext(Dispatchers.Default) { modifier.writeMainboardIdForProp("ro.boot.cpuid", newCpuid) }
+            else null
+            val cellIdResult = if (newCellId.isNotBlank())
+                withContext(Dispatchers.Default) { modifier.writeMainboardIdForProp("ro.boot.cell_id", newCellId) }
+            else null
+
+            val sb = StringBuilder()
+            if (cpuidResult != null) {
+                if (cpuidResult.exitCode == 0) sb.append("CPUID → ").append(newCpuid)
+                else sb.append("CPUID 修改失败: ").append(cpuidResult.output.ifBlank { "exit=${cpuidResult.exitCode}" })
+            }
+            if (cellIdResult != null) {
+                if (sb.isNotBlank()) sb.append('\n')
+                if (cellIdResult.exitCode == 0) sb.append("CELLID → ").append(newCellId)
+                else sb.append("CELLID 修改失败: ").append(cellIdResult.output.ifBlank { "exit=${cellIdResult.exitCode}" })
+            }
+            val success = (cpuidResult == null || cpuidResult.exitCode == 0) &&
+                (cellIdResult == null || cellIdResult.exitCode == 0)
+            withContext(Dispatchers.Main) {
+                if (success) {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改成功")
+                        .setMessage("$sb\n\n重启设备后全面生效。")
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "mainboard-changed")
+                } else {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改失败")
+                        .setMessage(sb.toString().ifBlank { "修改失败" })
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "mainboard-change-failed")
+                }
+            }
+        }
+    }
+
+    // ==================== 手机型号 ====================
+    private fun showModifyModelDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16.dp, 16.dp, 16.dp, 8.dp)
+        }
+
+        // 当前值展示区
+        val tvCurrent = TextView(this).apply {
+            text = "正在读取..."
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 0, 0, 8.dp)
+            maxLines = 10
+        }
+        container.addView(tvCurrent)
+
+        // 4 个字段输入框生成器: 留空 = 该字段保留原值
+        fun makeField(label: String, hint: String): EditText {
+            val tvLabel = TextView(this).apply {
+                text = label
+                setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+                textSize = 12f
+                setPadding(0, 8.dp, 0, 4.dp)
+            }
+            val et = EditText(this).apply {
+                this.hint = hint
+                setSingleLine(true)
+                inputType = android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or android.text.InputType.TYPE_CLASS_TEXT
+                setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+                setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+                setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+                setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+                tag = label
+            }
+            container.addView(tvLabel)
+            container.addView(et)
+            return et
+        }
+
+        val etManufacturer = makeField("厂商", "如 OnePlus、Xiaomi、Google")
+        val etBrand = makeField("品牌", "如 OnePlus、Xiaomi、Google")
+        val etModel = makeField("型号代号", "如 PLZ110、23127PN0CC")
+        val etMarketname = makeField("市场名", "如 OnePlus 15 T、小米 15")
+
+        // 恢复默认按钮
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 12.dp, 0, 0)
+        }
+        val btnReset = Button(this).apply {
+            text = "恢复默认"
+            textSize = 12f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        btnRow.addView(btnReset)
+        container.addView(btnRow)
+
+        val dialog = StableDialog.builder(this)
+            .setTitle("修改手机型号")
+            .setMessage("全部字段自定义，留空的字段保留原值不动。")
+            .setView(container)
+            .setPositiveButton("确认修改") { _, _ ->
+                val fields = com.HanFeng.adblocker.shizuku.DeviceIdModifier.ModelFields(
+                    manufacturer = etManufacturer.text.toString().trim(),
+                    brand = etBrand.text.toString().trim(),
+                    model = etModel.text.toString().trim(),
+                    marketname = etMarketname.text.toString().trim()
+                )
+                if (fields.manufacturer.isBlank() && fields.brand.isBlank() &&
+                    fields.model.isBlank() && fields.marketname.isBlank()
+                ) {
+                    showShortToast("至少填写一个字段")
+                    return@setPositiveButton
+                }
+                executeModelChange(fields)
+            }
+            .setNegativeButton("取消", null)
+            .create()
+
+        dialog.show()
+        btnReset.setOnClickListener {
+            lifecycleScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    com.HanFeng.adblocker.shizuku.DeviceIdModifier().clearModelModule()
+                }
+                if (isFinishing || isDestroyed) return@launch
+                if (result.exitCode == 0) {
+                    showShortToast("已清除型号持久化模块，重启后恢复默认")
+                } else {
+                    showShortToast("清除失败: ${result.output}")
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                com.HanFeng.adblocker.shizuku.DeviceIdModifier().readModel()
+            }
+            if (isFinishing || isDestroyed) return@launch
+            if (!dialog.isShowing) return@launch
+            val lines = result.output.trim().lines().map { it.trim() }.filter { it.contains('=') }
+            // prop key -> 中文 label
+            fun propLabel(key: String): String = when (key) {
+                "ro.product.manufacturer" -> "厂商"
+                "ro.product.brand" -> "品牌"
+                "ro.product.model" -> "型号代号"
+                "ro.product.marketname" -> "市场名"
+                else -> key
+            }
+            val display = lines.joinToString("\n") {
+                val k = it.substringBefore('=').trim()
+                val v = it.substringAfter('=').trim()
+                "${propLabel(k)}：$v"
+            }.ifBlank { "(无法读取)" }
+            tvCurrent.text = "当前型号信息：\n$display"
+            // 把当前 4 字段值填入对应输入框作为起点, 方便用户只改其中一项
+            fun fill(et: EditText, propName: String) {
+                val v = lines.firstOrNull { it.startsWith("$propName=") }
+                    ?.substringAfter('=')?.trim()
+                if (!v.isNullOrBlank() && v != "(空)") {
+                    et.setText(v)
+                    et.setSelection(et.text.length)
+                }
+            }
+            fill(etManufacturer, "ro.product.manufacturer")
+            fill(etBrand, "ro.product.brand")
+            fill(etModel, "ro.product.model")
+            fill(etMarketname, "ro.product.marketname")
+        }
+    }
+
+    private fun executeModelChange(fields: com.HanFeng.adblocker.shizuku.DeviceIdModifier.ModelFields) {
+        lifecycleScope.launch {
+            val modifier = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
+            val result = withContext(Dispatchers.Default) { modifier.writeModel(fields) }
+            withContext(Dispatchers.Main) {
+                if (result.exitCode == 0) {
+                    val summary = buildString {
+                        if (fields.manufacturer.isNotBlank()) append("厂商: ${fields.manufacturer}\n")
+                        if (fields.brand.isNotBlank()) append("品牌: ${fields.brand}\n")
+                        if (fields.model.isNotBlank()) append("型号: ${fields.model}\n")
+                        if (fields.marketname.isNotBlank()) append("市场名: ${fields.marketname}\n")
+                    }.trimEnd()
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改成功")
+                        .setMessage("已修改字段:\n$summary\n\n重启设备后全面生效。")
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "model-changed")
+                } else {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改失败")
+                        .setMessage(result.output.ifBlank { "修改失败 (exit=${result.exitCode})" })
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "model-change-failed")
+                }
+            }
+        }
+    }
+
+    // ==================== SN 码 (拨号盘 *#06# 显示的 SN 行) ====================
+    private fun showModifySnDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16.dp, 16.dp, 16.dp, 8.dp)
+        }
+        val tvCurrent = TextView(this).apply {
+            text = "正在读取..."
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 0, 0, 8.dp)
+            maxLines = 8
+        }
+        val etInput = EditText(this).apply {
+            hint = "如 ABCDE1234FG"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or android.text.InputType.TYPE_CLASS_TEXT
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+        }
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 8.dp, 0, 0)
+        }
+        val btnRandom = Button(this).apply {
+            text = "随机"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp }
+        }
+        val btnRestore = Button(this).apply {
+            text = "恢复备份"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp }
+        }
+        btnRow.addView(btnRandom)
+        btnRow.addView(btnRestore)
+        container.addView(tvCurrent)
+        container.addView(etInput)
+        container.addView(btnRow)
+
+        val dialog = StableDialog.builder(this)
+            .setTitle("修改 SN 码")
+            .setView(container)
+            .setPositiveButton("确认修改") { _, _ ->
+                val newSn = etInput.text.toString().trim()
+                if (newSn.isBlank()) {
+                    showShortToast("请输入 SN 码")
+                    return@setPositiveButton
+                }
+                executeSnChange(newSn)
+            }
+            .setNegativeButton("取消", null)
+            .create()
+
+        dialog.show()
+        btnRandom.setOnClickListener {
+            etInput.setText(com.HanFeng.adblocker.shizuku.DeviceIdModifier.generateRandomSn())
+            etInput.setSelection(etInput.text.length)
+        }
+        btnRestore.setOnClickListener {
+            lifecycleScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    com.HanFeng.adblocker.shizuku.DeviceIdModifier().restoreSn()
+                }
+                if (isFinishing || isDestroyed) return@launch
+                val hint = if (result.exitCode == 0) "已恢复备份，重启后生效" else "恢复失败：${result.output}"
+                showShortToast(hint)
+            }
+        }
+
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                com.HanFeng.adblocker.shizuku.DeviceIdModifier().readSn()
+            }
+            if (isFinishing || isDestroyed) return@launch
+            if (!dialog.isShowing) return@launch
+            val lines = result.output.trim().lines()
+            // 不暴露 prop key 给用户 - 只显示 "SN：xxx" 一行
+            val snVal = lines.firstOrNull { it.startsWith("gsm.sn=") }
+                ?.substringAfter('=')?.trim()
+                ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("persist.sys.sn=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("ril.sn=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull()
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+            tvCurrent.text = "当前 SN：\n${snVal ?: "(无法读取)"}"
+            if (!snVal.isNullOrBlank()) {
+                etInput.setText(snVal)
+                etInput.setSelection(etInput.text.length)
+            }
+        }
+    }
+
+    private fun executeSnChange(newSn: String) {
+        lifecycleScope.launch {
+            val modifier = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
+            val result = withContext(Dispatchers.Default) { modifier.writeSn(newSn) }
+            withContext(Dispatchers.Main) {
+                if (result.exitCode == 0) {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改成功")
+                        .setMessage("SN 码已修改为:\n$newSn\n\n注：拨号盘 *#06# 显示需重启系统重新加载；IMEI1/IMEI2/MEID 本功能不在范围。")
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "sn-changed")
+                } else {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改失败")
+                        .setMessage(result.output.ifBlank { "修改失败 (exit=${result.exitCode})" })
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "sn-change-failed")
+                }
+            }
+        }
+    }
+
+    // ==================== IMEI ====================
+    private fun showModifyImeiDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16.dp, 16.dp, 16.dp, 8.dp)
+        }
+        val tvCurrent = TextView(this).apply {
+            text = "正在读取..."
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 0, 0, 8.dp)
+            maxLines = 8
+        }
+        val etInput = EditText(this).apply {
+            hint = "15 位数字 (末位 Luhn 校验)"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+        }
+        val tvHint = TextView(this).apply {
+            text = "本工具先尝试 NV 真 IMEI 写入, 失败 (常见 OEM 锁) 自动降级 prop 伪装。" +
+                "prop 伪装对 TelephonyManager.getImei() 等 API 在 com.android.phone 重启后才生效; " +
+                "拨号盘 *#06# 在部分机型不会刷新。修改 IMEI 风险较高, 已自动备份原值, " +
+                "失败可用\"恢复备份\"按钮。"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 11f
+            setPadding(0, 8.dp, 0, 0)
+            maxLines = 10
+        }
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 8.dp, 0, 0)
+        }
+        val btnRandom = Button(this).apply {
+            text = "随机"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp }
+        }
+        val btnRestore = Button(this).apply {
+            text = "恢复备份"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp }
+        }
+        btnRow.addView(btnRandom)
+        btnRow.addView(btnRestore)
+        container.addView(tvCurrent)
+        container.addView(etInput)
+        container.addView(tvHint)
+        container.addView(btnRow)
+
+        val dialog = StableDialog.builder(this)
+            .setTitle("修改 IMEI")
+            .setView(container)
+            .setPositiveButton("确认修改") { _, _ ->
+                val newImei = etInput.text.toString().trim()
+                if (newImei.isBlank()) {
+                    showShortToast("请输入 IMEI")
+                    return@setPositiveButton
+                }
+                executeImeiChange(newImei)
+            }
+            .setNegativeButton("取消", null)
+            .create()
+
+        dialog.show()
+        btnRandom.setOnClickListener {
+            etInput.setText(com.HanFeng.adblocker.shizuku.DeviceIdModifier.generateRandomImei())
+            etInput.setSelection(etInput.text.length)
+        }
+        btnRestore.setOnClickListener {
+            lifecycleScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    com.HanFeng.adblocker.shizuku.DeviceIdModifier().restoreImei()
+                }
+                if (isFinishing || isDestroyed) return@launch
+                val hint = if (result.exitCode == 0) "已恢复备份，重启后生效" else "恢复提示：${result.output}"
+                showShortToast(hint)
+            }
+        }
+
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                com.HanFeng.adblocker.shizuku.DeviceIdModifier().readImei()
+            }
+            if (isFinishing || isDestroyed) return@launch
+            if (!dialog.isShowing) return@launch
+            val lines = result.output.trim().lines()
+            // 优先 RIL 真值 (slot0)
+            val rilVal = lines.firstOrNull { it.startsWith("RIL(slot0)=") }
+                ?.substringAfter('=')?.trim()
+                ?.takeIf { it.isNotBlank() && it != "(空)" }
+            val propVal = lines.firstOrNull { it.startsWith("gsm.imei=") }
+                ?.substringAfter('=')?.trim()
+                ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("persist.sys.imei=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("ril.imei=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+            val displayVal = rilVal ?: propVal
+            tvCurrent.text = "当前 IMEI：\n${displayVal ?: "(无法读取)"}"
+            if (!propVal.isNullOrBlank()) {
+                etInput.setText(propVal)
+                etInput.setSelection(etInput.text.length)
+            } else if (!rilVal.isNullOrBlank()) {
+                etInput.setText(rilVal)
+                etInput.setSelection(etInput.text.length)
+            }
+        }
+    }
+
+    private fun executeImeiChange(newImei: String) {
+        lifecycleScope.launch {
+            val modifier = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
+            val result = withContext(Dispatchers.Default) { modifier.writeImei(newImei) }
+            withContext(Dispatchers.Main) {
+                if (result.exitCode == 0) {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改结果")
+                        .setMessage("已尝试修改 IMEI。\n\n${result.output}")
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "imei-changed")
+                } else {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改提示")
+                        .setMessage(result.output.ifBlank { "修改失败 (exit=${result.exitCode})" })
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "imei-change-failed")
+                }
+            }
+        }
+    }
+
+    // ==================== MEID ====================
+    private fun showModifyMeidDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16.dp, 16.dp, 16.dp, 8.dp)
+        }
+        val tvCurrent = TextView(this).apply {
+            text = "正在读取..."
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 0, 0, 8.dp)
+            maxLines = 8
+        }
+        val etInput = EditText(this).apply {
+            hint = "14 位十六进制 (0-9A-F)"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or
+                android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+        }
+        val tvHint = TextView(this).apply {
+            text = "MEID NV 写入需 OEM 鉴权, 几乎必失败, 此工具仅做 prop 伪装层与日志展示。" +
+                "结果以 prop 伪装生效为准; 原值已自动备份, 失败用\"恢复备份\"回退。"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 11f
+            setPadding(0, 8.dp, 0, 0)
+            maxLines = 10
+        }
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 8.dp, 0, 0)
+        }
+        val btnRandom = Button(this).apply {
+            text = "随机"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp }
+        }
+        val btnRestore = Button(this).apply {
+            text = "恢复备份"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp }
+        }
+        btnRow.addView(btnRandom)
+        btnRow.addView(btnRestore)
+        container.addView(tvCurrent)
+        container.addView(etInput)
+        container.addView(tvHint)
+        container.addView(btnRow)
+
+        val dialog = StableDialog.builder(this)
+            .setTitle("修改 MEID")
+            .setView(container)
+            .setPositiveButton("确认修改") { _, _ ->
+                val newMeid = etInput.text.toString().trim()
+                if (newMeid.isBlank()) {
+                    showShortToast("请输入 MEID")
+                    return@setPositiveButton
+                }
+                executeMeidChange(newMeid)
+            }
+            .setNegativeButton("取消", null)
+            .create()
+
+        dialog.show()
+        btnRandom.setOnClickListener {
+            etInput.setText(com.HanFeng.adblocker.shizuku.DeviceIdModifier.generateRandomMeid())
+            etInput.setSelection(etInput.text.length)
+        }
+        btnRestore.setOnClickListener {
+            lifecycleScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    com.HanFeng.adblocker.shizuku.DeviceIdModifier().restoreMeid()
+                }
+                if (isFinishing || isDestroyed) return@launch
+                val hint = if (result.exitCode == 0) "已恢复备份，重启后生效" else "恢复提示：${result.output}"
+                showShortToast(hint)
+            }
+        }
+
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                com.HanFeng.adblocker.shizuku.DeviceIdModifier().readMeid()
+            }
+            if (isFinishing || isDestroyed) return@launch
+            if (!dialog.isShowing) return@launch
+            val lines = result.output.trim().lines()
+            val rilVal = lines.firstOrNull { it.startsWith("RIL(slot0)=") }
+                ?.substringAfter('=')?.trim()
+                ?.takeIf { it.isNotBlank() && it != "(空)" }
+            val propVal = lines.firstOrNull { it.startsWith("gsm.meid=") }
+                ?.substringAfter('=')?.trim()
+                ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("persist.sys.meid=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("ril.meid=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+            val displayVal = rilVal ?: propVal
+            tvCurrent.text = "当前 MEID：\n${displayVal ?: "(无法读取)"}"
+            if (!propVal.isNullOrBlank()) {
+                etInput.setText(propVal)
+                etInput.setSelection(etInput.text.length)
+            } else if (!rilVal.isNullOrBlank()) {
+                etInput.setText(rilVal)
+                etInput.setSelection(etInput.text.length)
+            }
+        }
+    }
+
+    private fun executeMeidChange(newMeid: String) {
+        lifecycleScope.launch {
+            val modifier = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
+            val result = withContext(Dispatchers.Default) { modifier.writeMeid(newMeid) }
+            withContext(Dispatchers.Main) {
+                if (result.exitCode == 0) {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改结果")
+                        .setMessage("已尝试修改 MEID。\n\n${result.output}")
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "meid-changed")
+                } else {
+                    StableDialog.builder(this@SettingsActivity)
+                        .setTitle("修改提示")
+                        .setMessage(result.output.ifBlank { "修改失败 (exit=${result.exitCode})" })
+                        .setPositiveButton("确定", null)
+                        .showSafely(this@SettingsActivity, "meid-change-failed")
+                }
+            }
+        }
+    }
+
+    // ==================== 第三方应用转系统应用 ====================
+    /**
+     * 列出已安装的第三方应用(provider 走 pm 列表避免 PackageManager 一直取 icon 卡顿)
+     * 让用户勾选要转成系统应用的目标
+     */
+    private fun showConvertSystemAppDialog() {
+        // 先弹一个加载框 (因为 listApp 可能要 1-2s)
+        val loadingDialog = StableDialog.builder(this)
+            .setTitle("加载应用列表...")
+            .setMessage("正在枚举已安装第三方应用, 请稍候...")
+            .setCancelable(false)
+            .setPositiveButton("取消") { _, _ -> }
+            .create()
+        loadingDialog.show()
+
+        lifecycleScope.launch {
+            // 异步列包 — 优先用 RootScriptExecutor 的 pm list packages -3 拿干净列表
+            val apps = withContext(Dispatchers.IO) {
+                val su = com.HanFeng.adblocker.shizuku.SuSession.getInstance()
+                val pm = packageManager
+                val res = su.execute("pm list packages -3 2>/dev/null")
+                if (res.exitCode == 0) {
+                    res.output.lines().mapNotNull { line ->
+                        if (!line.startsWith("package:")) return@mapNotNull null
+                        val pkg = line.removePrefix("package:").trim()
+                        if (pkg.isBlank()) return@mapNotNull null
+                        try {
+                            val info = pm.getApplicationInfo(pkg, 0)
+                            val label = info.loadLabel(pm).toString()
+                            Triple(pkg, label, info.sourceDir)
+                        } catch (_: Throwable) {
+                            null
+                        }
+                    }.sortedBy { it.second.lowercase() }
+                } else {
+                    // 退化用 PackageManager 直接列
+                    pm.getInstalledApplications(0)
+                        .filter { (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 }
+                        .filter { it.packageName != packageName }
+                        .map { Triple(it.packageName, it.loadLabel(pm).toString(), it.sourceDir) }
+                        .sortedBy { it.second.lowercase() }
+                }
+            }
+            if (isFinishing || isDestroyed) return@launch
+            loadingDialog.dismiss()
+            if (apps.isEmpty()) {
+                StableDialog.builder(this@SettingsActivity)
+                    .setTitle("无可转换的应用")
+                    .setMessage("没有检测到第三方应用, 或 root 权限不足")
+                    .setPositiveButton("确定", null)
+                    .showSafely(this@SettingsActivity, "convert-no-apps")
+                return@launch
+            }
+
+            showAppPickerDialog(apps)
+        }
+    }
+
+    private data class ThirdPartyAppEntry(
+        val pkg: String,
+        val label: String,
+        val sourceDir: String
+    )
+
+    private fun showAppPickerDialog(apps: List<Triple<String, String, String>>) {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16.dp, 16.dp, 16.dp, 8.dp)
+        }
+
+        // 搜索框过滤应用
+        val etFilter = android.widget.EditText(this).apply {
+            hint = "搜索应用名/包名"
+            setSingleLine(true)
+            setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+        }
+        container.addView(etFilter)
+
+        // 列表容器 (用户可滚动选择)
+        val scroll = android.widget.ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+        val listLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        scroll.addView(listLayout)
+        container.addView(scroll)
+
+        // 风险告知
+        val tvWarn = android.widget.TextView(this).apply {
+            text = "此操作将把所选应用以 root 权限复制到 /system/priv-app 并卸载用户态副本。\n" +
+                "1) 该应用的当前登录态会丢失, 需重新登录;\n" +
+                "2) 大多数 Android 14+ A/B 设备 /system 只读 squashfs, remount 失败会失败;\n" +
+                "3) 转换成功需重启系统才完全生效;\n" +
+                "4) HyperOS / MIUI 等定制系统可能仍会杀该后台, 转为系统应用只是降低概率;\n" +
+                "5) 可在 动作完成后用 恢复用户态 按钮撤销。"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 11f
+            setPadding(0, 8.dp, 0, 8.dp)
+            maxLines = 10
+        }
+        container.addView(tvWarn)
+
+        val selectionMap = HashMap<String, ThirdPartyAppEntry>() // pkg -> entry
+
+        fun rebuildList(filter: String) {
+            listLayout.removeAllViews()
+            selectionMap.clear()
+            val lower = filter.lowercase().trim()
+            apps.forEach { (pkg, label, sourceDir) ->
+                if (lower.isNotBlank() &&
+                    !label.lowercase().contains(lower) &&
+                    !pkg.lowercase().contains(lower)
+                ) return@forEach
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(0, 6.dp, 0, 6.dp)
+                }
+                val cb = android.widget.CheckBox(this).apply {
+                    text = "$label\n（$pkg）"
+                    textSize = 12f
+                    setOnCheckedChangeListener { _, isChecked ->
+                        val entry = ThirdPartyAppEntry(pkg, label, sourceDir)
+                        if (isChecked) selectionMap[pkg] = entry else selectionMap.remove(pkg)
+                    }
+                }
+                row.addView(cb)
+                listLayout.addView(row)
+            }
+        }
+        rebuildList("")
+        etFilter.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, p1: Int, p2: Int, p3: Int) {}
+            override fun onTextChanged(s: CharSequence?, p1: Int, p2: Int, p3: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) { rebuildList(s?.toString() ?: "") }
+        })
+
+        val dialog = StableDialog.builder(this)
+            .setTitle("选择要转换为系统应用的应用")
+            .setView(container)
+            .setPositiveButton("确认转换") { _, _ ->
+                if (selectionMap.isEmpty()) {
+                    showShortToast("请至少勾选一个应用")
+                    return@setPositiveButton
+                }
+                executeConvertSystemAppBatch(selectionMap.values.toList())
+            }
+            .setNegativeButton("取消", null)
+            .setNeutralButton("恢复选中应用的普通态") { _, _ ->
+                if (selectionMap.isEmpty()) {
+                    showShortToast("请至少勾选一个应用")
+                    return@setNeutralButton
+                }
+                executeRevertSystemAppBatch(selectionMap.values.toList())
+            }
+            .create()
+        dialog.show()
+    }
+
+    private fun executeConvertSystemAppBatch(targets: List<ThirdPartyAppEntry>) {
+        val progressSb = StringBuilder()
+        val progressDialog = StableDialog.builder(this)
+            .setTitle("正在转换...")
+            .setMessage("正在处理...")
+            .setCancelable(false)
+            .setPositiveButton("确定", null)
+            .create()
+        progressDialog.show()
+
+        lifecycleScope.launch {
+            val converter = com.HanFeng.adblocker.shizuku.SystemAppConverter()
+            val reports = withContext(Dispatchers.IO) {
+                targets.map { entry ->
+                    withContext(Dispatchers.Default) { converter.convertToSystemApp(this@SettingsActivity, entry.pkg) }
+                }
+            }
+            if (isFinishing || isDestroyed) return@launch
+            progressDialog.dismiss()
+
+            val sb = StringBuilder()
+            sb.appendLine("共处理 ${targets.size} 个应用, ${reports.count { it.allSucceed }} 个成功\n")
+            for (r in reports) {
+                sb.append("─── ").append(r.packageName).appendLine(" ───")
+                sb.appendLine(r.summary)
+                sb.appendLine()
+            }
+            val okCount = reports.count { it.allSucceed }
+            val needsReboot = reports.any { it.needsReboot }
+            StableDialog.builder(this@SettingsActivity)
+                .setTitle("转换结果 (${okCount}/${targets.size})" + if (needsReboot) " 需重启" else "")
+                .setMessage(sb.toString())
+                .setPositiveButton("确定", null)
+                .showSafely(this@SettingsActivity, "convert-batch-done")
+            progressSb.append(sb)
+        }
+    }
+
+    private fun executeRevertSystemAppBatch(targets: List<ThirdPartyAppEntry>) {
+        val progressDialog = StableDialog.builder(this)
+            .setTitle("正在还原...")
+            .setMessage("正在处理...")
+            .setCancelable(false)
+            .setPositiveButton("确定", null)
+            .create()
+        progressDialog.show()
+
+        lifecycleScope.launch {
+            val converter = com.HanFeng.adblocker.shizuku.SystemAppConverter()
+            val reports = withContext(Dispatchers.IO) {
+                targets.map { entry ->
+                    withContext(Dispatchers.Default) { converter.revertFromSystemApp(this@SettingsActivity, entry.pkg) }
+                }
+            }
+            if (isFinishing || isDestroyed) return@launch
+            progressDialog.dismiss()
+
+            val sb = StringBuilder()
+            sb.appendLine("共处理 ${targets.size} 个应用\n")
+            for (r in reports) {
+                sb.append("─── ").append(r.packageName).appendLine(" ───")
+                sb.appendLine(r.summary)
+                sb.appendLine()
+            }
+            StableDialog.builder(this@SettingsActivity)
+                .setTitle("还原结果")
+                .setMessage(sb.toString())
+                .setPositiveButton("确定", null)
+                .showSafely(this@SettingsActivity, "revert-batch-done")
+        }
+    }
+
+
     private val Int.dp: Int
         get() = (this * resources.displayMetrics.density).toInt()
 
@@ -1143,47 +2067,41 @@ class SettingsActivity : BaseActivity() {
             checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
     }
 
-    private fun prewarmShizukuIfPossible() {
-        val shizukuEnabled = AppSettingsRepository.isShizukuEnabled(this)
-        if (!shizukuEnabled) return
-        val status = ShizukuRepository.getStatus(this)
-        if (!status.installed || !status.binderAlive) return
-        if (!status.permissionGranted && !cachedShizukuServiceHealthy) {
-            refreshShizukuActionStateAsync(force = false)
-            return
-        }
+    /**
+     * 异步确认 Root 权限已授权，避免在主线程同步等待 su 提示导致 UI 卡死。
+     * 已开 session 时立即回调 granted；未开时后台异步触发 SuSession.open()，
+     * 最多等待 60s 弹出 root 授权框，结果通过 onResult 在主线程回调。
+     * 弹出 loading toast 提示用户当前正在请求授权。
+     */
+    private fun requireRootThen(
+        tag: String,
+        featureName: String,
+        onResult: (granted: Boolean) -> Unit
+    ) {
         lifecycleScope.launch {
-            val warmed = withContext(Dispatchers.IO) {
-                warmShizukuServices()
+            // 已授权直接走
+            if (com.HanFeng.adblocker.shizuku.DeviceIdModifier.isRootAvailable()) {
+                onResult(true)
+                return@launch
             }
-            cachedShizukuServiceHealthy = warmed || cachedShizukuServiceHealthy
-            if (!isFinishing && !isDestroyed && warmed) {
-                updateShizukuActionState()
+            // 否则给出 loading 提示，异步等待 root 授权
+            val toastJob = lifecycleScope.launch(Dispatchers.Main) {
+                kotlinx.coroutines.delay(250)
+                if (lifecycleScope.isActive) showShortToast("请允许 Root 授权以使用 $featureName")
             }
-        }
-    }
-
-    private fun buildShizukuStatusText(
-        shizukuEnabled: Boolean,
-        shizukuReady: Boolean,
-        serviceHealthy: Boolean,
-        status: ShizukuRepository.Status? = null
-    ): String {
-        if (!shizukuEnabled) return "Shizuku 状态：未启用"
-        val currentStatus = status ?: ShizukuRepository.getStatus(this)
-        val connectedMode = when {
-            serviceHealthy && !currentStatus.permissionGranted -> "UserService"
-            else -> currentStatus.runningMode
-        }
-        return when {
-            !currentStatus.installed -> "Shizuku 状态：未安装，点击这里可打开下载指引"
-            !currentStatus.binderAlive -> "Shizuku 状态：未启动，点击这里可查看启动提示"
-            shizukuReady && serviceHealthy && !currentStatus.permissionGranted -> "Shizuku 状态：已连接 (${connectedMode} / 兼容模式)，可直接使用治理功能"
-            shizukuReady && serviceHealthy -> "Shizuku 状态：已连接 (${connectedMode})，可直接使用治理功能"
-            !currentStatus.permissionStateKnown -> "Shizuku 状态：权限状态异常，点击这里查看处理提示"
-            !currentStatus.permissionGranted -> "Shizuku 状态：未授权，点击这里可重新请求授权"
-            currentStatus.permissionGranted -> "Shizuku 状态：已授权 (${connectedMode}，服务连接中)"
-            else -> "Shizuku 状态：服务连接中 (${connectedMode})"
+            val granted = withContext(Dispatchers.Default) {
+                com.HanFeng.adblocker.shizuku.DeviceIdModifier.isRootAvailable()
+            }
+            toastJob.cancel()
+            if (isFinishing || isDestroyed) return@launch
+            if (!granted) {
+                StableDialog.builder(this@SettingsActivity)
+                    .setTitle("需要 Root 权限")
+                    .setMessage("$featureName 需要 Root 权限，请在 Root 授权框同意授权后再试。")
+                    .setPositiveButton("确定", null)
+                    .showSafely(this@SettingsActivity, tag)
+            }
+            onResult(granted)
         }
     }
 
@@ -1196,7 +2114,7 @@ class SettingsActivity : BaseActivity() {
         installedPackages: Set<String>
     ) {
         if (targets.isEmpty()) {
-            MaterialAlertDialogBuilder(this)
+            MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_HanFeng_Dialog)
                 .setTitle("暂无可治理项目")
                 .setMessage("当前没有可展示的治理目标。")
                 .setPositiveButton("我知道了", null)
@@ -2171,15 +3089,19 @@ class SettingsActivity : BaseActivity() {
 
     private fun startHotspotStatusRefresh() {
         hotspotStatusJob?.cancel()
+        // 使用 repeatOnLifecycle 当 Activity 进入 STOPPED 时自动取消，回到 STARTED 时再启动，
+        // 避免 Activity 退到后台仍然 5s 轮询 shell SuSession.execute
         hotspotStatusJob = lifecycleScope.launch {
-            while (isActive) {
-                refreshHotspotStatus()
-                delay(5_000L)
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (isActive) {
+                    refreshHotspotStatus()
+                    delay(5_000L)
+                }
             }
         }
     }
 
-    private fun refreshHotspotStatus() {
+    private suspend fun refreshHotspotStatus() {
         if (!FeatureSettingsRepository.isHotspotBlockEnabled(this)) {
             tvHotspotDevices.text = "设备数: 0"
             tvHotspotBlocked.text = "拦截: 0"
@@ -2189,11 +3111,22 @@ class SettingsActivity : BaseActivity() {
 
         val mode = FeatureSettingsRepository.getHotspotBlockMode(this)
         if (mode == "dns") {
+            // getHotspotStatus 会调多次 SuSession.execute 同步 shell 命令，必须放 IO；同步主线程会导致 ANR
+            val status: com.HanFeng.adblocker.shizuku.HotspotInterceptor.HotspotStatus
+            val startTime: Long
             try {
-                val status = com.HanFeng.adblocker.shizuku.HotspotInterceptor.getHotspotStatus(this)
+                status = withContext(Dispatchers.IO) {
+                    com.HanFeng.adblocker.shizuku.HotspotInterceptor.getHotspotStatus(this@SettingsActivity)
+                }
+                startTime = FeatureSettingsRepository.getHotspotStartTime(this@SettingsActivity)
+            } catch (e: Exception) {
+                // Silent fail for status refresh
+                return
+            }
+            if (isFinishing || isDestroyed) return
+            try {
                 tvHotspotDevices.text = "设备数: ${status.connectedDevices.size}"
                 tvHotspotBlocked.text = "拦截: ${status.blockedQueries}"
-                val startTime = FeatureSettingsRepository.getHotspotStartTime(this)
                 val minutes = if (startTime > 0) {
                     (System.currentTimeMillis() - startTime) / 60_000
                 } else 0
@@ -2219,11 +3152,6 @@ class SettingsActivity : BaseActivity() {
         }
     }
 
-    override fun onDestroy() {
-        hotspotStatusJob?.cancel()
-        super.onDestroy()
-    }
-
     companion object {
         private const val SHIZUKU_STATUS_REFRESH_INTERVAL_MILLIS = 3_000L
     }
@@ -2237,7 +3165,7 @@ class SettingsActivity : BaseActivity() {
                     ?: throw IllegalStateException("无法打开选择的图片")
                 val bgDir = File(appContext.filesDir, "backgrounds")
                 if (!bgDir.exists()) bgDir.mkdirs()
-                val bgFile = File(bgDir, "custom_background.jpg")
+                val bgFile = File(bgDir, "bg_" + System.currentTimeMillis() + ".jpg")
                 withContext(Dispatchers.IO) {
                     inputStream.use { input ->
                         bgFile.outputStream().use { output ->
@@ -2245,11 +3173,11 @@ class SettingsActivity : BaseActivity() {
                         }
                     }
                 }
-                FeatureSettingsRepository.setCustomBackgroundPath(appContext, bgFile.absolutePath)
+                FeatureSettingsRepository.appendCustomBackgroundPath(appContext, bgFile.absolutePath)
                 refreshCustomBackgroundPreview()
-                showShortToast("背景图已设置，三个界面将同步应用")
+                showShortToast("背景图已添加")
             } catch (e: Exception) {
-                showShortToast("设置背景图失败：${e.message}")
+                showShortToast("添加背景图失败：${e.message}")
             }
         }
     }
@@ -2260,21 +3188,314 @@ class SettingsActivity : BaseActivity() {
 
     private fun removeCustomBackground() {
         val appContext = applicationContext
-        FeatureSettingsRepository.setCustomBackgroundPath(appContext, null)
-        val bgFile = File(appContext.filesDir, "backgrounds/custom_background.jpg")
-        if (bgFile.exists()) bgFile.delete()
-        refreshCustomBackgroundPreview()
-        showShortToast("已移除自定义背景图")
+        // 删除所有已上传的背景图文件
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                val paths = FeatureSettingsRepository.getCustomBackgroundPaths(appContext)
+                paths.forEach { runCatching { java.io.File(it).delete() } }
+                // 清空 SP 中的列表
+                FeatureSettingsRepository.setCustomBackgroundPath(appContext, null)
+            }
+            runOnUiThread {
+                refreshCustomBackgroundPreview()
+                showShortToast("已移除所有自定义背景图")
+            }
+        }
     }
 
     private fun refreshCustomBackgroundPreview() {
-        val path = FeatureSettingsRepository.getCustomBackgroundPath(this)
-        if (!path.isNullOrEmpty()) {
-            textCustomBgPreview.text = "已设置自定义背景图"
+        val count = FeatureSettingsRepository.getCustomBackgroundPaths(this).size
+        if (count > 0) {
+            textCustomBgPreview.text = "已上传 $count 张背景图，点击下方缩略图切换"
             btnRemoveBackground.visibility = View.VISIBLE
         } else {
-            textCustomBgPreview.text = "未设置自定义背景图"
+            textCustomBgPreview.text = "未设置自定义背景图，点击「选择图片」上传"
             btnRemoveBackground.visibility = View.GONE
+        }
+        refreshBackgroundSwitcher()
+    }
+
+    private fun refreshBackgroundSwitcher() {
+        val row = findViewById<LinearLayout?>(R.id.bgSwitcherRow) ?: return
+        val appContext = applicationContext
+        row.removeAllViews()
+        val paths = FeatureSettingsRepository.getCustomBackgroundPaths(appContext)
+        val activeIdx = FeatureSettingsRepository.getActiveBackgroundIndex(appContext)
+        val inflater = LayoutInflater.from(appContext)
+
+        for ((index, path) in paths.withIndex()) {
+            val item = inflater.inflate(R.layout.item_background_switcher, row, false)
+            val thumb = item.findViewById<ImageView>(R.id.ivThumb)
+            val activeMarker = item.findViewById<View>(R.id.viewActive)
+            val removeBtn = item.findViewById<ImageButton>(R.id.btnRemove)
+            lifecycleScope.launch {
+                val drawable = withContext(Dispatchers.IO) {
+                    runCatching {
+                        decodeSampledBitmapDrawable(appContext, path, 256, 256)
+                    }.getOrNull()
+                }
+                if (drawable != null) thumb.setImageDrawable(drawable)
+            }
+            if (index == activeIdx) activeMarker.visibility = View.VISIBLE
+            thumb.setOnClickListener {
+                FeatureSettingsRepository.setActiveBackgroundIndex(appContext, index)
+                refreshCustomBackgroundPreview()
+                showShortToast("已切换为图片 ${index + 1}")
+            }
+            removeBtn.setOnClickListener {
+                val appCtx = appContext
+                lifecycleScope.launch {
+                    withContext(Dispatchers.IO) {
+                        runCatching { java.io.File(path).delete() }
+                        FeatureSettingsRepository.removeCustomBackgroundPath(appCtx, path)
+                    }
+                    runOnUiThread {
+                        refreshCustomBackgroundPreview()
+                        showShortToast("已删除该背景")
+                    }
+                }
+            }
+            row.addView(item)
+        }
+    }
+
+    private data class IdleShutdownOption(val label: String, val millis: Long)
+
+    private fun setupIdleShutdownSetting() {
+        val options = listOf(
+            IdleShutdownOption("1 分钟", 60_000L),
+            IdleShutdownOption("2 分钟", 2 * 60_000L),
+            IdleShutdownOption("5 分钟", 5 * 60_000L),
+            IdleShutdownOption("10 分钟", 10 * 60_000L),
+            IdleShutdownOption("15 分钟", 15 * 60_000L),
+            IdleShutdownOption("30 分钟", 30 * 60_000L),
+            IdleShutdownOption("60 分钟", 60 * 60_000L),
+            IdleShutdownOption("自定义", -2L),
+            IdleShutdownOption("关闭", -1L)
+        )
+        val labels = options.map { it.label }.toMutableList()
+        val spinnerAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        spinnerIdleShutdownInterval.adapter = spinnerAdapter
+
+        val enabled = FeatureSettingsRepository.isIdleShutdownEnabled(this)
+        val savedThreshold = FeatureSettingsRepository.getIdleShutdownThreshold(this)
+        val isPreset = options.any { it.millis == savedThreshold && it.millis > 0 }
+        val selected = when {
+            !enabled || savedThreshold <= 0 -> options.lastIndex
+            isPreset -> options.indexOfFirst { it.millis == savedThreshold }
+            else -> options.indexOfFirst { it.millis == -2L }
+        }.coerceAtLeast(0)
+        spinnerIdleShutdownInterval.setSelection(selected, false)
+        updateIdleShutdownCustomLabel(labels, spinnerAdapter, savedThreshold)
+
+        switchIdleShutdown.isChecked = enabled
+        textIdleShutdownDesc.text = if (enabled)
+            "未开启拦截且 APP 在后台空闲一定时长后自动结束进程，省电省内存"
+        else
+            "已关闭，APP 后台将一直常驻"
+
+        spinnerIdleShutdownInterval.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val opt = options[position]
+                when {
+                    opt.millis == -2L -> {
+                        showCustomIdleShutdownInputDialog(labels, options, spinnerAdapter)
+                    }
+                    opt.millis == -1L -> {
+                        switchIdleShutdown.isChecked = false
+                        FeatureSettingsRepository.setIdleShutdownEnabled(this@SettingsActivity, false)
+                        textIdleShutdownDesc.text = "已关闭，APP 后台将一直常驻"
+                    }
+                    else -> {
+                        switchIdleShutdown.isChecked = true
+                        FeatureSettingsRepository.setIdleShutdownEnabled(this@SettingsActivity, true)
+                        FeatureSettingsRepository.setIdleShutdownThreshold(this@SettingsActivity, opt.millis)
+                        textIdleShutdownDesc.text = "未开启拦截且 APP 在后台空闲一定时长后自动结束进程，省电省内存"
+                    }
+                }
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+
+        switchIdleShutdown.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked) {
+                val currPos = spinnerIdleShutdownInterval.selectedItemPosition
+                val currOpt = options.getOrNull(currPos)
+                if (currOpt == null || currOpt.millis <= 0) {
+                    spinnerIdleShutdownInterval.setSelection(options.indexOfFirst { it.millis == 5 * 60_000L })
+                } else {
+                    FeatureSettingsRepository.setIdleShutdownEnabled(this, true)
+                }
+                textIdleShutdownDesc.text = "未开启拦截且 APP 在后台空闲一定时长后自动结束进程，省电省内存"
+            } else {
+                FeatureSettingsRepository.setIdleShutdownEnabled(this, false)
+                textIdleShutdownDesc.text = "已关闭，APP 后台将一直常驻"
+            }
+        }
+    }
+
+    private fun showCustomIdleShutdownInputDialog(
+        labels: MutableList<String>,
+        options: List<IdleShutdownOption>,
+        spinnerAdapter: ArrayAdapter<String>
+    ) {
+        val editText = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            hint = "请输入 1-180 分钟"
+            filters = arrayOf(android.text.InputFilter.LengthFilter(3))
+        }
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 0)
+            addView(editText)
+        }
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this, R.style.ThemeOverlay_HanFeng_Dialog)
+            .setTitle("自定义空闲时长")
+            .setMessage("输入 1 到 180 之间的数字(分钟)")
+            .setView(container)
+            .setPositiveButton("确定") { _, _ ->
+                val raw = editText.text?.toString().orEmpty().trim()
+                val minutes = raw.toIntOrNull()
+                if (minutes == null || minutes < 1 || minutes > 180) {
+                    showShortToast("请输入 1-180 之间的数字")
+                    restoreIdleShutdownSpinnerSelection(labels, options)
+                    return@setPositiveButton
+                }
+                val millis = minutes.toLong() * 60_000L
+                FeatureSettingsRepository.setIdleShutdownThreshold(this, millis)
+                FeatureSettingsRepository.setIdleShutdownEnabled(this, true)
+                switchIdleShutdown.isChecked = true
+                textIdleShutdownDesc.text = "未开启拦截且 APP 在后台空闲一定时长后自动结束进程，省电省内存"
+                updateIdleShutdownCustomLabel(labels, spinnerAdapter, millis)
+            }
+            .setNegativeButton("取消") { dialog, _ ->
+                dialog.dismiss()
+                restoreIdleShutdownSpinnerSelection(labels, options)
+                val saved = FeatureSettingsRepository.getIdleShutdownThreshold(this)
+                updateIdleShutdownCustomLabel(labels, spinnerAdapter, saved)
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun restoreIdleShutdownSpinnerSelection(
+        labels: MutableList<String>,
+        options: List<IdleShutdownOption>
+    ) {
+        val enabled = FeatureSettingsRepository.isIdleShutdownEnabled(this)
+        val savedThreshold = FeatureSettingsRepository.getIdleShutdownThreshold(this)
+        val restoreIdx = when {
+            !enabled || savedThreshold <= 0 -> options.lastIndex
+            options.any { it.millis == savedThreshold && it.millis > 0 } ->
+                options.indexOfFirst { it.millis == savedThreshold }
+            else -> options.indexOfFirst { o -> o.millis == -2L }
+        }
+        spinnerIdleShutdownInterval.setSelection(restoreIdx.coerceAtLeast(0), false)
+    }
+
+    private fun updateIdleShutdownCustomLabel(
+        labels: MutableList<String>,
+        spinnerAdapter: ArrayAdapter<String>,
+        savedThreshold: Long
+    ) {
+        val customIdx = labels.size - 2 // "自定义"在 options 倒数第二项
+        if (customIdx < 0) return
+        val presetMillis = setOf(
+            60_000L, 2 * 60_000L, 5 * 60_000L, 10 * 60_000L,
+            15 * 60_000L, 30 * 60_000L, 60 * 60_000L
+        )
+        labels[customIdx] = if (savedThreshold > 0 && savedThreshold !in presetMillis) {
+            "自定义 ${savedThreshold / 60_000L} 分钟"
+        } else {
+            "自定义"
+        }
+        spinnerAdapter.notifyDataSetChanged()
+    }
+
+    private fun setupNotificationAdBlockSetting() {
+        val enabled = FeatureSettingsRepository.isNotificationAdBlockEnabled(this)
+        // 在设置 listener 之前设置 isChecked，避免 listener 被初始设置触发
+        switchNotificationAdBlock.isChecked = enabled
+        // 进入设置页时异步检查通知访问授权，避免 Settings.Secure.getString 阻塞主线程 (跨 binder IPC)
+        refreshNotificationAccessHintAsync()
+        switchNotificationAdBlock.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setNotificationAdBlockEnabled(this, isChecked)
+            if (isChecked) {
+                lifecycleScope.launch {
+                    if (!isNotificationListenerEnabledAsync()) {
+                        showShortToast("已开启，但还需要授予通知访问权限才能真正生效")
+                    }
+                    refreshNotificationAccessHintAsync()
+                }
+            } else {
+                refreshNotificationAccessHintAsync()
+            }
+        }
+
+        btnOpenNotificationAccess.setOnClickListener {
+            // 跳转到系统"通知访问权限"页让用户勾选本 App
+            runCatching {
+                startActivity(android.content.Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            }.onFailure {
+                showShortToast("无法打开通知访问设置，请手动前往 设置 → 通知访问")
+            }
+        }
+    }
+
+    private fun refreshNotificationAccessHintAsync() {
+        val switchOnNow = switchNotificationAdBlock.isChecked
+        if (!switchOnNow) {
+            // 开关关着，直接更新文案即可，不需要拿监听状态
+            textNotificationAdBlockDesc.text = "开关未开启；可授予通知访问权限后让监听器一并接管已治理 APP 的通知"
+            btnOpenNotificationAccess.visibility = View.VISIBLE
+            return
+        }
+        lifecycleScope.launch {
+            val listenerReady = isNotificationListenerEnabledAsync()
+            if (!isActive) return@launch
+            textNotificationAdBlockDesc.text = if (listenerReady) {
+                "实时监听通知栏，已治理 APP 与含广告关键字的通知会被自动移除"
+            } else {
+                "已开启，但通知访问权限未授予。请点击右侧按钮授予后系统才会推送通知给本 App"
+            }
+            btnOpenNotificationAccess.visibility = if (listenerReady) View.INVISIBLE else View.VISIBLE
+        }
+    }
+
+    private suspend fun isNotificationListenerEnabledAsync(): Boolean = withContext(Dispatchers.IO) {
+        val flat = android.provider.Settings.Secure.getString(
+            contentResolver, "enabled_notification_listeners"
+        ) ?: return@withContext false
+        val expectedComponent = packageName + "/" + com.HanFeng.service.AdNotificationListenerService::class.java.name
+        flat.split(":").any { it == expectedComponent }
+    }
+
+    /**
+     * 解码图片为缩略图并裁成圆角 Drawable。
+     * 相比直接 BitmapFactory.decodeFile（原图 4K 可能瞬间吃 64MB），通过 inSampleSize + inTargetDensity，
+     * 让解码后的 Bitmap 只占目标尺寸的内存（256x256 ≈ 256KB），避免缩略图列表把内存撑爆。
+     */
+    private fun decodeSampledBitmapDrawable(
+        context: android.content.Context,
+        path: String,
+        reqWidth: Int,
+        reqHeight: Int
+    ): android.graphics.drawable.Drawable? {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val sample = ((bounds.outWidth / reqWidth).coerceAtLeast(bounds.outHeight / reqHeight).coerceAtLeast(1))
+            .coerceAtMost(8)
+        val opts = android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+        }
+        val bmp = android.graphics.BitmapFactory.decodeFile(path, opts) ?: return null
+        return androidx.core.graphics.drawable.RoundedBitmapDrawableFactory.create(context.resources, bmp).apply {
+            isCircular = false
+            cornerRadius = 12f
         }
     }
 }

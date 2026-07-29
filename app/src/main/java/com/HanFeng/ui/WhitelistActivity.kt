@@ -34,6 +34,7 @@ class WhitelistActivity : BaseActivity() {
     private var batchUpdating = false
     private var pendingReloadJob: Job? = null
     private var loadAppsJob: Job? = null
+    private var applyFilterJob: Job? = null
     private var loadAppsVersion = 0
     private var allApps: List<InstalledApp> = emptyList()
     private val mode by lazy { intent.getStringExtra(EXTRA_MODE) ?: MODE_WHITELIST }
@@ -87,7 +88,12 @@ class WhitelistActivity : BaseActivity() {
             }
         }
         binding.searchInput.doAfterTextChanged {
-            applyFilter(it?.toString().orEmpty())
+            applyFilterJob?.cancel()
+            applyFilterJob = lifecycleScope.launch {
+                delay(180)
+                if (isFinishing || isDestroyed) return@launch
+                applyFilter(it?.toString().orEmpty())
+            }
         }
         binding.btnSelectVisible.setOnClickListener {
             updateVisibleSelection(selectAll = true)
@@ -166,6 +172,8 @@ class WhitelistActivity : BaseActivity() {
     override fun onDestroy() {
         loadAppsJob?.cancel()
         pendingReloadJob?.cancel()
+        applyFilterJob?.cancel()
+        adapter.shutdown()
         super.onDestroy()
     }
 

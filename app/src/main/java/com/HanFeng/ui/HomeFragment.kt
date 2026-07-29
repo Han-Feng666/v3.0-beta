@@ -16,6 +16,7 @@ import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import com.HanFeng.BuildConfig
 import com.HanFeng.R
 import com.HanFeng.core.network.NetworkKernel
@@ -23,6 +24,9 @@ import com.HanFeng.data.FeatureSettingsRepository
 import com.HanFeng.data.HttpsMitmRepository
 import com.HanFeng.data.ShizukuAdControlRepository
 import com.HanFeng.data.ShizukuRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class HomeFragment : Fragment(R.layout.fragment_home) {
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -30,8 +34,12 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
     private var cachedShizukuUiState: CachedShizukuUiState? = null
     private val vpnStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            if (!isAdded || view == null) return
             if (intent?.action == NetworkKernel.statusChangedAction) {
-                updateAllStatus()
+                // vpn 状态变更可能频繁触发（reload/revoke/reacquire/wakelock 事件），但 UI 200ms 内不需要看多次
+                // 这里 debounce 200ms 合并多次广播为一次刷新，避免主线程高频跑 SP read + 跨 binder
+                uiHandler.removeCallbacks(statusRefreshRunnable)
+                uiHandler.postDelayed(statusRefreshRunnable, 200L)
             }
         }
     }
@@ -78,6 +86,7 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
     override fun onResume() {
         super.onResume()
         registerVpnStatusReceiverIfNeeded()
+        view?.findViewById<ImageView>(R.id.homeBackground)?.let(::applyBackgroundImage)
         updateAllStatus()
     }
 
@@ -226,24 +235,51 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         cachedShizukuUiState?.takeIf {
             it.enabled == shizukuEnabled && now - it.cachedAt <= SHIZUKU_STATUS_CACHE_MILLIS
         }?.let { return it }
-        val status = ShizukuRepository.getStatus(context)
-        val serviceReady = if (shizukuEnabled && status.installed && status.binderAlive) {
-            ShizukuAdControlRepository.isServiceAlive()
-        } else {
-            false
-        }
-        val mode = if (serviceReady && !status.permissionGranted) "UserService" else status.runningMode
-        return CachedShizukuUiState(
+
+        // 缓存为空或已过期：先返回一个"加载中"占位状态，避免主线程阻塞
+        val placeholder = cachedShizukuUiState?.copy(
             enabled = shizukuEnabled,
-            installed = status.installed,
-            binderAlive = status.binderAlive,
-            permissionGranted = status.permissionGranted,
-            permissionStateKnown = status.permissionStateKnown,
-            serviceReady = serviceReady,
-            ready = shizukuEnabled && status.installed && status.binderAlive && (status.permissionGranted || serviceReady),
-            mode = mode,
             cachedAt = now
-        ).also { cachedShizukuUiState = it }
+        ) ?: CachedShizukuUiState(
+            enabled = shizukuEnabled,
+            installed = false,
+            binderAlive = false,
+            permissionGranted = false,
+            permissionStateKnown = false,
+            serviceReady = false,
+            ready = false,
+            mode = "查询中",
+            cachedAt = now
+        )
+        cachedShizukuUiState = placeholder
+
+        // 后台异步刷新真实状态，完成后重新刷新 UI
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            val status = ShizukuRepository.getStatus(context)
+            val serviceReady = if (shizukuEnabled && status.installed && status.binderAlive) {
+                runCatching { ShizukuAdControlRepository.isServiceAlive() }.getOrDefault(false)
+            } else {
+                false
+            }
+            val mode = if (serviceReady && !status.permissionGranted) "UserService" else status.runningMode
+            val fresh = CachedShizukuUiState(
+                enabled = shizukuEnabled,
+                installed = status.installed,
+                binderAlive = status.binderAlive,
+                permissionGranted = status.permissionGranted,
+                permissionStateKnown = status.permissionStateKnown,
+                serviceReady = serviceReady,
+                ready = shizukuEnabled && status.installed && status.binderAlive && (status.permissionGranted || serviceReady),
+                mode = mode,
+                cachedAt = System.currentTimeMillis()
+            )
+            cachedShizukuUiState = fresh
+            withContext(Dispatchers.Main) {
+                if (isAdded && view != null) updateAllStatus()
+            }
+        }
+
+        return placeholder
     }
 
     private data class CachedShizukuUiState(

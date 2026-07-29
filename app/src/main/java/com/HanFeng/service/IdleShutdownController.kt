@@ -11,11 +11,12 @@ import com.HanFeng.adblocker.shizuku.GameAntiMarkManager
 import com.HanFeng.adblocker.shizuku.HotspotInterceptor
 import com.HanFeng.adblocker.shizuku.RootHideAppWatcher
 import com.HanFeng.core.network.NetworkKernel
+import com.HanFeng.data.FeatureSettingsRepository
 
 object IdleShutdownController {
 
     private const val TAG = "IdleShutdown"
-    private const val IDLE_THRESHOLD_MILLIS = 60_000L
+    private const val DEFAULT_THRESHOLD_MILLIS = 60_000L
     private const val TICK_INTERVAL_MILLIS = 15_000L
 
     @Volatile private var started: Boolean = false
@@ -63,6 +64,7 @@ object IdleShutdownController {
 
     private fun anyServiceInService(context: Context): Boolean {
         if (NetworkKernel.isRunning()) return true
+        if (FloatingBallService.isRunning()) return true
         if (runCatching { HotspotInterceptor.isDnsHijackRunning() }.getOrDefault(false)) return true
         if (RootHideAppWatcher.isRunning()) return true
         if (GameAntiMarkManager.isRunning()) return true
@@ -70,11 +72,14 @@ object IdleShutdownController {
     }
 
     private fun checkAndMaybeShutdown() {
+        if (!FeatureSettingsRepository.isIdleShutdownEnabled(appRef)) return
         if (isAppInForeground()) return
         val idle = System.currentTimeMillis() - lastActiveAt
-        if (idle < IDLE_THRESHOLD_MILLIS) return
+        val threshold = FeatureSettingsRepository.getIdleShutdownThreshold(appRef)
+            .takeIf { it > 0 } ?: DEFAULT_THRESHOLD_MILLIS
+        if (idle < threshold) return
         if (anyServiceInService(appRef)) return
-        Log.i(TAG, "App idle for ${idle}ms and no interception running, shutting down...")
+        Log.i(TAG, "App idle for ${idle}ms (threshold=${threshold}ms) and no interception running, shutting down...")
         performShutdown(appRef)
     }
 

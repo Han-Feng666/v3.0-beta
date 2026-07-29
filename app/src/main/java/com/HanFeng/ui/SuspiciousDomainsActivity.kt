@@ -18,6 +18,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.HanFeng.R
@@ -32,6 +33,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -44,6 +47,7 @@ class SuspiciousDomainsActivity : BaseActivity() {
     private var hasChanges = false
     private var syncingFilterChecks = false
     private var batchAdding = false
+    private var searchJob: Job? = null
 
     private val adapter = SuspiciousDomainAdapter(
         onToggle = { sample, checked ->
@@ -88,7 +92,14 @@ class SuspiciousDomainsActivity : BaseActivity() {
         }
         binding.btnAddRecommended.setOnClickListener { addRecommendedRules() }
         binding.btnAddSelected.setOnClickListener { addSelectedRules() }
-        binding.searchInput.doAfterTextChanged { applyFilter(it?.toString().orEmpty()) }
+        binding.searchInput.doAfterTextChanged {
+            searchJob?.cancel()
+            searchJob = lifecycleScope.launch {
+                delay(180)
+                if (isFinishing || isDestroyed) return@launch
+                applyFilter(it?.toString().orEmpty())
+            }
+        }
         binding.checkOnlyUnadded.setOnCheckedChangeListener { _, _ ->
             if (!syncingFilterChecks) {
                 syncExclusiveFilter(isUnadded = true)
@@ -109,7 +120,7 @@ class SuspiciousDomainsActivity : BaseActivity() {
     }
 
     override fun finish() {
-        if (hasChanges) {
+        if (!isFinishing && !isDestroyed && hasChanges) {
             setResult(Activity.RESULT_OK)
         }
         super.finish()
@@ -238,12 +249,15 @@ class SuspiciousDomainsActivity : BaseActivity() {
             val added = withContext(Dispatchers.Default) {
                 RuleRepository.addRules(this@SuspiciousDomainsActivity, domains, RuleSource.MANUAL)
             }
+            if (isFinishing || isDestroyed) return@launch
             batchAdding = false
             val addedCount = added.size
             if (addedCount <= 0) {
-                binding.emptyText.visibility = if (visibleSamples.isEmpty()) View.VISIBLE else View.GONE
-                Toast.makeText(this@SuspiciousDomainsActivity, "这些域名已经添加过了", Toast.LENGTH_SHORT).show()
-                updateSelectionSummary()
+                if (!isFinishing && !isDestroyed) {
+                    binding.emptyText.visibility = if (visibleSamples.isEmpty()) View.VISIBLE else View.GONE
+                    Toast.makeText(this@SuspiciousDomainsActivity, "这些域名已经添加过了", Toast.LENGTH_SHORT).show()
+                    updateSelectionSummary()
+                }
                 return@launch
             }
             hasChanges = true
@@ -252,8 +266,10 @@ class SuspiciousDomainsActivity : BaseActivity() {
             adapter.setSelection(selectedDomains)
             startService(Intent(this@SuspiciousDomainsActivity, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_RELOAD))
             LogRepository.append(this@SuspiciousDomainsActivity, "Batch added $addedCount suspicious domain rules")
-            Toast.makeText(this@SuspiciousDomainsActivity, successMessageTemplate.format(addedCount), Toast.LENGTH_SHORT).show()
-            finish()
+            if (!isFinishing && !isDestroyed) {
+                Toast.makeText(this@SuspiciousDomainsActivity, successMessageTemplate.format(addedCount), Toast.LENGTH_SHORT).show()
+            }
+            if (!isFinishing && !isDestroyed) finish()
         }
     }
 
@@ -405,6 +421,19 @@ private class SuspiciousDomainAdapter(
     private val items = mutableListOf<SuspiciousDomainItem>()
     private val selectedDomains = mutableSetOf<String>()
 
+    companion object {
+        private val timestampFormat = ThreadLocal<SimpleDateFormat>().apply {
+            set(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US))
+        }
+
+        private const val SELECTION_PAYLOAD = "selection"
+
+        private fun formatItemTimestamp(timestamp: Long): String {
+            if (timestamp <= 0L) return "未知"
+            return timestampFormat.get()!!.format(Date(timestamp))
+        }
+    }
+
     fun submit(samples: List<SuspiciousDomainItem>, selected: Set<String>) {
         val oldItems = items.toList()
         val oldSelected = selectedDomains.toSet()
@@ -429,7 +458,7 @@ private class SuspiciousDomainAdapter(
                 val new = items[newPos]
                 return old == new && oldSelected == selectedDomains
             }
-        }, detectMoves = false)
+        })
 
         diffResult.dispatchUpdatesTo(this)
     }
@@ -463,15 +492,10 @@ private class SuspiciousDomainAdapter(
         }
     }
 
-    companion object {
-        private const val SELECTION_PAYLOAD = "selection"
-    }
-
     inner class ViewHolder(private val binding: ItemSuspiciousDomainBinding) : RecyclerView.ViewHolder(binding.root) {
         fun bind(item: SuspiciousDomainItem) {
             binding.domainText.text = item.domain
             val appPart = item.lastAppName.ifBlank { "未知应用" }
-            binding.countText.text = "最近出现：${formatItemTimestamp(item.lastSeenAt)}  ·  应用：$appPart"
             val novelPart = if (item.novelHits > 0) "  ·  小说专项 ${item.novelHits} 次" else ""
             val confidencePart = if (item.highConfidence) "  ·  推荐 ${item.confidenceScore} 分" else "  ·  参考 ${item.confidenceScore} 分"
             binding.statusText.text = (if (item.alreadyAdded) "状态：已添加规则" else "状态：未添加规则") + "  ·  厂商：${item.vendor}  ·  累计出现 ${item.count} 次$novelPart$confidencePart"
@@ -485,19 +509,11 @@ private class SuspiciousDomainAdapter(
             binding.selectBox.setOnCheckedChangeListener { _, checked ->
                 val pos = bindingAdapterPosition
                 if (pos >= 0) {
-                    onToggle((bindingAdapter as SuspiciousDomainAdapter).items[pos], checked)
+                    val adapter = bindingAdapter as? SuspiciousDomainAdapter
+                    if (adapter != null) {
+                        onToggle(adapter.items[pos], checked)
+                    }
                 }
-            }
-        }
-
-        companion object {
-            private val timestampFormat = ThreadLocal<SimpleDateFormat>().apply {
-                set(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US))
-            }
-
-            private fun formatItemTimestamp(timestamp: Long): String {
-                if (timestamp <= 0L) return "未知"
-                return timestampFormat.get()!!.format(Date(timestamp))
             }
         }
     }

@@ -6,6 +6,10 @@ object RuleTextNormalizer {
     fun normalizeMessyRuleLine(rawLine: String): String {
         var line = rawLine.trim()
         if (line.isBlank()) return ""
+        // 全角 → 半角归一化: 部分手机输入法或第三方维护的规则文件使用全角字符
+        // (*: → ＊:, $ → ＄, | → ｜, ^ → ＾)。先统一转半角再走后续 OCR 修复路径,
+        // 防止 ＊:17204＄network / ｜｜xccx＾ 等输入被静默丢弃。
+        line = toHalfWidthAscii(line)
         val appModifierReplacement = Regex.escapeReplacement("\$app=")
         val caretAppModifierReplacement = Regex.escapeReplacement("^\$app=")
         val allAppModifierReplacement = Regex.escapeReplacement("\$all,app=")
@@ -38,5 +42,28 @@ object RuleTextNormalizer {
             .replace(RegexCache.get("""\s+"""), " ")
             .trim()
         return line
+    }
+
+    /**
+     * 将全角 ASCII 符号/数字/字母归一化为半角：
+     *   ＊ → * ｜ → |  ＄ → $  ＾ → ^  ＝ → =  ／ → /
+     *   ０-９ → 0-9  Ａ-Ｚ → A-Z  ａ-ｚ → a-z
+     * 解决部分用户从 PDF/聊天工具复制规则时被自动转全角导致无法识别的问题。
+     */
+    private fun toHalfWidthAscii(value: String): String {
+        if (value.isEmpty()) return value
+        val sb = StringBuilder(value.length)
+        for (c in value) {
+            val cp = c.code
+            sb.append(
+                when (cp) {
+                    in 0xFF01..0xFF5E -> (cp - 0xFEE0).toChar()
+                    // 全角空格 U+3000 → 半角空格
+                    0x3000 -> ' '
+                    else -> c
+                }
+            )
+        }
+        return sb.toString()
     }
 }

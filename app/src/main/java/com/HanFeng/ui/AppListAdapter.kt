@@ -9,19 +9,21 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.HanFeng.databinding.ItemAppBinding
 import com.HanFeng.model.InstalledApp
-import com.bumptech.glide.Glide
 
 class AppListAdapter(
     private val checkedSelector: (InstalledApp) -> Boolean = { it.whitelisted },
     private val onToggle: (InstalledApp, Boolean) -> Unit
 ) : ListAdapter<InstalledApp, AppListAdapter.AppHolder>(DIFF_CALLBACK) {
 
-    private val iconCache = HashMap<String, Drawable>()
-    private val iconExecutor = java.util.concurrent.Executors.newFixedThreadPool(2)
+    private val iconCache = androidx.collection.LruCache<String, Drawable>(128)
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     fun submit(items: List<InstalledApp>) {
         submitList(items)
+    }
+
+    fun shutdown() {
+        iconCache.evictAll()
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): AppHolder {
@@ -41,16 +43,16 @@ class AppListAdapter(
             } else {
                 binding.appIcon.setImageDrawable(null)
                 val ctx = binding.root.context
-                iconExecutor.execute {
+                IconExecutorPool.executor.execute {
                     val dr = runCatching {
                         ctx.packageManager.getApplicationIcon(item.packageName)
                     }.getOrNull()
                     if (dr != null) {
-                        iconCache[item.packageName] = dr
+                        iconCache.put(item.packageName, dr)
                         mainHandler.post {
-                            if (bindingAdapterPosition >= 0 &&
-                                bindingAdapterPosition < itemCount &&
-                                getItem(bindingAdapterPosition).packageName == item.packageName) {
+                            val pos = bindingAdapterPosition
+                            if (pos >= 0 && pos < itemCount &&
+                                getItem(pos).packageName == item.packageName) {
                                 binding.appIcon.setImageDrawable(dr)
                             }
                         }

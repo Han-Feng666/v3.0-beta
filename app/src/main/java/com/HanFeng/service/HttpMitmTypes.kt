@@ -12,7 +12,8 @@ data class RequestInspection(
     val httpVersion: String,
     val referer: String?,
     val origin: String?,
-    val upgrade: String? = null
+    val upgrade: String? = null,
+    val requestHeaders: Map<String, String> = emptyMap()
 ) {
     val isWebSocket: Boolean get() = upgrade.equals("websocket", ignoreCase = true)
 }
@@ -26,6 +27,7 @@ data class Http2HeaderInspection(
     val status: String?,
     val protocol: String? = null,
     val contentType: String?,
+    val contentEncoding: String? = null,
     val referer: String?,
     val userAgent: String?,
     val location: String?,

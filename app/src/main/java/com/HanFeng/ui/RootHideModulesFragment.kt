@@ -158,9 +158,10 @@ class RootHideModulesFragment : Fragment() {
             val (modules, apps) = detectItems()
 
             activity?.runOnUiThread {
+                if (!isAdded || context == null) return@runOnUiThread
                 moduleItems.clear()
                 moduleItems.addAll(modules)
-                val selectedModuleKeys = RootHideRepository.getHiddenModuleKeys(requireContext())
+                val selectedModuleKeys = RootHideRepository.getHiddenModuleKeys(context!!)
                 moduleItems.forEach { it.selected = it.key in selectedModuleKeys }
                 modulesHeader?.text = "模块 (${moduleItems.size})"
                 renderSectionItems(modulesContent, moduleItems)
@@ -273,9 +274,10 @@ class RootHideModulesFragment : Fragment() {
 
     private fun renderSectionItems(container: LinearLayout?, items: List<HideSectionItem>) {
         container ?: return
+        if (!isAdded || context == null) return
         container.removeAllViews()
         for (item in items) {
-            val row = LinearLayout(requireContext()).apply {
+            val row = LinearLayout(context!!).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, 4.dp, 0, 4.dp)
                 gravity = android.view.Gravity.CENTER_VERTICAL
@@ -346,8 +348,9 @@ class RootHideModulesFragment : Fragment() {
     }
 
     fun persistSelection() {
+        if (!isAdded || context == null) return
         val keys = (moduleItems + appItems).filter { it.selected }.map { it.key }.toSet()
-        RootHideRepository.setHiddenModuleKeys(requireContext(), keys)
+        RootHideRepository.setHiddenModuleKeys(context!!, keys)
     }
 
     fun getSelectedModules(): List<HideSectionItem> = moduleItems.filter { it.selected }

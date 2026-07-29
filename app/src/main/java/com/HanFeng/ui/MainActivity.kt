@@ -30,6 +30,7 @@ import com.HanFeng.data.HttpsMitmRepository
 import com.HanFeng.data.LogRepository
 import com.HanFeng.data.RemoteRuleSourceRepository
 import com.HanFeng.data.RuleRepository
+import com.HanFeng.data.ShizukuAdControlRepository
 import com.HanFeng.data.ShizukuRepository
 import com.HanFeng.databinding.ActivityMainBinding
 import com.HanFeng.security.CertificateAuthorityManager
@@ -58,8 +59,15 @@ class MainActivity : BaseActivity() {
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode != ShizukuRepository.REQUEST_CODE) return@OnRequestPermissionResultListener
         val granted = grantResult == PackageManager.PERMISSION_GRANTED
-        handleShizukuPermissionResult(granted) {
-            refreshHomeStatus()
+        // warmShizukuServicesBlocking() 会 runBlocking 等 Shizuku 服务绑定 (≤1.5s)，丢到 IO 协程避免主线程卡顿
+        lifecycleScope.launch {
+            if (granted) {
+                withContext(Dispatchers.IO) { warmShizukuServicesBlocking() }
+            }
+            // lifecycleScope.launch 默认 Main，无需再切
+            handleShizukuPermissionResult(granted) {
+                refreshHomeStatus()
+            }
         }
     }
     private val vpnLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -111,6 +119,18 @@ class MainActivity : BaseActivity() {
         ensureVpnServiceMatchesUserIntent()
         refreshHomeStatus()
         checkAndPromptBatteryOptimization()
+        refreshPromoGovernNotifications()
+    }
+
+    private fun refreshPromoGovernNotifications() {
+        // 异步路径:
+        // 1. ShizukuAdControlRepository.checkServiceHealth 已改为非阻塞,但仍含 binder IPC 开销
+        // 2. refreshBlockedPackagesNotifications 是 IO 重操作
+        // 全部丢到 IO 协程,避免主线程卡顿
+        lifecycleScope.launch(Dispatchers.IO) {
+            if (!ShizukuAdControlRepository.checkServiceHealth(this@MainActivity)) return@launch
+            runCatching { ShizukuAdControlRepository.refreshBlockedPackagesNotifications(this@MainActivity) }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -143,7 +163,8 @@ class MainActivity : BaseActivity() {
             pager?.isSaveEnabled = false
             pager?.adapter = null
             pager?.adapter = MainPagerAdapter(this)
-            pager?.offscreenPageLimit = 1
+            // 全 3 个 fragment 都保留,避免切换到 Rules/Stats 时重新 inflate 925 行 XML + 触发 refreshList
+            pager?.offscreenPageLimit = 2
             pager?.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
                 override fun onPageSelected(position: Int) {
                     if (position == 0) notifyRulesPageSelected()
@@ -231,9 +252,13 @@ class MainActivity : BaseActivity() {
         }
     }
 
+    private var remoteRuleSyncJob: kotlinx.coroutines.Job? = null
+
     private fun scheduleRemoteRuleSync() {
+        // 单并发去重：onResume/reattach 多次触发不会堆叠 IO 任务
+        if (remoteRuleSyncJob?.isActive == true) return
         binding.root.post {
-            lifecycleScope.launch {
+            remoteRuleSyncJob = lifecycleScope.launch {
                 runCatching {
                     withContext(Dispatchers.IO) {
                         RuleRepository.ensureSecurityRuleSource(applicationContext)
@@ -505,7 +530,8 @@ class MainActivity : BaseActivity() {
     }
 
     private fun refreshHomeStatus() {
-        refreshHomeStatus(supportFragmentManager.fragments)
+        if (isFinishing || isDestroyed) return
+        runCatching { refreshHomeStatus(supportFragmentManager.fragments) }
     }
 
     private fun refreshHomeStatus(fragments: List<androidx.fragment.app.Fragment>) {
@@ -513,9 +539,11 @@ class MainActivity : BaseActivity() {
             if (fragment is HomeFragment && fragment.isAdded) {
                 fragment.refreshStatusFromHost()
             }
-            val childFragments = fragment.childFragmentManager.fragments
-            if (childFragments.isNotEmpty()) {
-                refreshHomeStatus(childFragments)
+            runCatching {
+                val childFragments = fragment.childFragmentManager.fragments
+                if (childFragments.isNotEmpty()) {
+                    refreshHomeStatus(childFragments)
+                }
             }
         }
     }

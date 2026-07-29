@@ -30,6 +30,12 @@ object FeatureSettingsRepository {
     private const val KEY_HOTSPOT_START_TIME = "hotspot_start_time"
     private const val KEY_AUTO_INSTALL_SYSTEM_CERT = "auto_install_system_cert"
     private const val KEY_CUSTOM_BACKGROUND_PATH = "custom_background_path"
+    private const val KEY_CUSTOM_BACKGROUND_LIST = "custom_background_list_v2"
+    private const val KEY_CUSTOM_BACKGROUND_INDEX = "custom_background_index"
+    private const val KEY_IDLE_SHUTDOWN_ENABLED = "idle_shutdown_enabled"
+    private const val KEY_IDLE_SHUTDOWN_THRESHOLD = "idle_shutdown_threshold"
+    private const val KEY_NOTIFICATION_AD_BLOCK_ENABLED = "notification_ad_block_enabled"
+    private const val KEY_NOTIFICATION_AD_BLOCK_KEYWORDS = "notification_ad_block_keywords"
     private const val MAX_PENDING_FEEDBACK_RULES = 50
     private val gson = Gson()
     @Volatile private var cachedAdFreeRewardEnabled: Boolean? = null
@@ -348,12 +354,10 @@ object FeatureSettingsRepository {
     }
 
     fun incrementHotspotBlockedCount(context: Context, count: Int = 1) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .apply {
-                val current = getLong(KEY_HOTSPOT_BLOCKED_COUNT, 0)
-                putLong(KEY_HOTSPOT_BLOCKED_COUNT, current + count)
-            }
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val current = prefs.getLong(KEY_HOTSPOT_BLOCKED_COUNT, 0)
+        prefs.edit()
+            .putLong(KEY_HOTSPOT_BLOCKED_COUNT, current + count)
             .apply()
     }
 
@@ -413,15 +417,151 @@ object FeatureSettingsRepository {
     }
 
     fun getCustomBackgroundPath(context: Context): String? {
-        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_CUSTOM_BACKGROUND_PATH, null)
+        // 优先用多背景图逻辑的当前激活路径；迁移后会落在 list 中
+        migrateLegacyBackgroundToV2(context)
+        val list = getCustomBackgroundPaths(context)
+        val idx = getActiveBackgroundIndex(context)
+        return if (list.isEmpty() || idx < 0 || idx >= list.size) null else list[idx]
     }
 
     fun setCustomBackgroundPath(context: Context, path: String?) {
+        // 旧 API 仍可用：直接 append 到 list 中并选为当前激活
+        if (path == null) {
+            // 清空所有
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_CUSTOM_BACKGROUND_LIST)
+                .remove(KEY_CUSTOM_BACKGROUND_PATH)
+                .remove(KEY_CUSTOM_BACKGROUND_INDEX)
+                .apply()
+            invalidateBackgroundCache()
+        } else {
+            appendCustomBackgroundPath(context, path)
+        }
+    }
+
+    /**
+     * 单项内存缓存：onResume 频繁调用时避免每次都做 Gson 反序列化 + 多个 File.exists() stat。
+     * 缓存失效条件：append/remove/replace/切换 active index 等所有写入路径均调用 invalidateBackgroundCache()
+     */
+    @Volatile private var cachedBackgroundPaths: List<String>? = null
+
+    private fun invalidateBackgroundCache() {
+        cachedBackgroundPaths = null
+    }
+
+    /**
+     * 多背景图：返回用户已上传的路径列表，去掉文件已不存在的项
+     */
+    fun getCustomBackgroundPaths(context: Context): List<String> {
+        cachedBackgroundPaths?.let { if (it.isNotEmpty()) return it }
+        migrateLegacyBackgroundToV2(context)
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_CUSTOM_BACKGROUND_LIST, null)
+            ?: run {
+                cachedBackgroundPaths = emptyList()
+                return emptyList()
+            }
+        val type = object : TypeToken<List<String>>() {}.type
+        val list: List<String> = runCatching<List<String>> { gson.fromJson(raw, type) }.getOrNull() ?: emptyList()
+        // 过滤已不存在的文件，避免点击时显示黑屏
+        val filtered = list.filter { java.io.File(it).exists() }
+        if (filtered.size != list.size) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_CUSTOM_BACKGROUND_LIST, gson.toJson(filtered))
+                .apply()
+            // 索引可能越界，校正
+            val idx = getActiveBackgroundIndex(context).coerceIn(0, filtered.size - 1)
+            setActiveBackgroundIndex(context, idx)
+        }
+        cachedBackgroundPaths = filtered
+        return filtered
+    }
+
+    fun appendCustomBackgroundPath(context: Context, path: String): Int {
+        migrateLegacyBackgroundToV2(context)
+        val list = getCustomBackgroundPaths(context).toMutableList()
+        // 去重：相同 path 不重复加入
+        if (!list.contains(path)) {
+            list.add(path)
+        }
+        val newIdx = list.indexOf(path)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_CUSTOM_BACKGROUND_PATH, path)
+            .putString(KEY_CUSTOM_BACKGROUND_LIST, gson.toJson(list))
+            .putInt(KEY_CUSTOM_BACKGROUND_INDEX, newIdx)
             .apply()
+        invalidateBackgroundCache()
+        return newIdx
+    }
+
+    fun removeCustomBackgroundPath(context: Context, path: String) {
+        migrateLegacyBackgroundToV2(context)
+        val list = getCustomBackgroundPaths(context).toMutableList()
+        val removedIdx = list.indexOf(path)
+        if (removedIdx < 0) return
+        list.removeAt(removedIdx)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_CUSTOM_BACKGROUND_LIST, gson.toJson(list))
+            .apply()
+        invalidateBackgroundCache()
+        // 校正索引
+        val prevIdx = getActiveBackgroundIndex(context)
+        val newIdx = when {
+            list.isEmpty() -> -1
+            removedIdx < prevIdx -> prevIdx - 1
+            removedIdx == prevIdx -> prevIdx.coerceAtMost(list.size - 1)
+            else -> prevIdx
+        }
+        setActiveBackgroundIndex(context, newIdx.coerceIn(0, list.size - 1))
+    }
+
+    fun getActiveBackgroundIndex(context: Context): Int {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(KEY_CUSTOM_BACKGROUND_INDEX, 0)
+    }
+
+    fun setActiveBackgroundIndex(context: Context, index: Int) {
+        val list = getCustomBackgroundPaths(context)
+        val safe = if (list.isEmpty()) 0 else index.coerceIn(0, list.size - 1)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_CUSTOM_BACKGROUND_INDEX, safe)
+            .apply()
+    }
+
+    /**
+     * 旧的 KEY_CUSTOM_BACKGROUND_PATH 自动迁移到 list，仅在新版首启执行一次
+     */
+    @Volatile private var backgroundV2Migrated = false
+    private fun migrateLegacyBackgroundToV2(context: Context) {
+        if (backgroundV2Migrated) return
+        synchronized(this) {
+            if (backgroundV2Migrated) return
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val legacyPath = prefs.getString(KEY_CUSTOM_BACKGROUND_PATH, null)
+            if (legacyPath != null && !legacyPath.isBlank()) {
+                val list: List<String> = runCatching<List<String>> {
+                    val raw = prefs.getString(KEY_CUSTOM_BACKGROUND_LIST, null)
+                    if (raw != null) {
+                        val type = object : TypeToken<List<String>>() {}.type
+                        gson.fromJson(raw, type) ?: emptyList()
+                    } else emptyList()
+                }.getOrDefault(emptyList())
+                if (!list.contains(legacyPath) && java.io.File(legacyPath).exists()) {
+                    val newList = list + legacyPath
+                    prefs.edit()
+                        .putString(KEY_CUSTOM_BACKGROUND_LIST, gson.toJson(newList))
+                        .putInt(KEY_CUSTOM_BACKGROUND_INDEX, newList.size - 1)
+                        .apply()
+                }
+            }
+            // 移除旧 KEY 避免下次再处理（路径已迁移到 list）
+            prefs.edit().remove(KEY_CUSTOM_BACKGROUND_PATH).apply()
+            backgroundV2Migrated = true
+        }
     }
 
     private fun savePendingFeedbackRules(context: Context, rules: List<PendingFeedbackRule>) {
@@ -430,4 +570,78 @@ object FeatureSettingsRepository {
             .putString(KEY_PENDING_FEEDBACK_RULES, gson.toJson(rules))
             .apply()
     }
+
+    @Volatile private var cachedIdleShutdownEnabled: Boolean? = null
+    @Volatile private var cachedIdleShutdownThreshold: Long? = null
+
+    fun isIdleShutdownEnabled(context: Context): Boolean {
+        cachedIdleShutdownEnabled?.let { return it }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_IDLE_SHUTDOWN_ENABLED, true)
+            .also { cachedIdleShutdownEnabled = it }
+    }
+
+    fun setIdleShutdownEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_IDLE_SHUTDOWN_ENABLED, enabled)
+            .apply()
+        cachedIdleShutdownEnabled = enabled
+    }
+
+    fun getIdleShutdownThreshold(context: Context): Long {
+        cachedIdleShutdownThreshold?.let { return it }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_IDLE_SHUTDOWN_THRESHOLD, 60_000L)
+            .also { cachedIdleShutdownThreshold = it }
+    }
+
+    fun setIdleShutdownThreshold(context: Context, threshold: Long) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_IDLE_SHUTDOWN_THRESHOLD, threshold)
+            .apply()
+        cachedIdleShutdownThreshold = threshold
+    }
+
+    @Volatile private var cachedNotificationAdBlockEnabled: Boolean? = null
+    @Volatile private var cachedNotificationAdBlockKeywords: String? = null
+
+    fun isNotificationAdBlockEnabled(context: Context): Boolean {
+        cachedNotificationAdBlockEnabled?.let { return it }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NOTIFICATION_AD_BLOCK_ENABLED, false)
+            .also { cachedNotificationAdBlockEnabled = it }
+    }
+
+    fun setNotificationAdBlockEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_NOTIFICATION_AD_BLOCK_ENABLED, enabled)
+            .apply()
+        cachedNotificationAdBlockEnabled = enabled
+    }
+
+    fun getNotificationAdBlockKeywords(context: Context): String {
+        cachedNotificationAdBlockKeywords?.let { return it }
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_NOTIFICATION_AD_BLOCK_KEYWORDS, DEFAULT_NOTIFICATION_AD_KEYWORDS)
+        val value = raw ?: DEFAULT_NOTIFICATION_AD_KEYWORDS
+        cachedNotificationAdBlockKeywords = value
+        return value
+    }
+
+    fun setNotificationAdBlockKeywords(context: Context, keywords: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_NOTIFICATION_AD_BLOCK_KEYWORDS, keywords)
+            .apply()
+        cachedNotificationAdBlockKeywords = keywords
+    }
+
+    /**
+     * 默认广告通知关键字：横幅/启动/限时/拼团等典型推广话术。用户可在设置里覆盖。
+     */
+    const val DEFAULT_NOTIFICATION_AD_KEYWORDS: String =
+        "广告,推广,限时,秒杀,优惠券,红包,抽奖,领取,福利,免费,补贴,拼团,砍价,赚佣金,邀请好友,边玩边赚,首单立减,新人专享,今日特惠,签到领,推广入驻,送大礼,提现,up to,广告打开,新品首发,马上抢,零门槛"
 }

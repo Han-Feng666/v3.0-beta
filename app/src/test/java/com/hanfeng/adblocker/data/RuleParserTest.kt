@@ -406,11 +406,18 @@ class RuleParserTest {
     private fun withRepositoryRules(rules: List<BlockRule>, block: (Context) -> Unit) {
         val updateCache = RuleRepository::class.java.getDeclaredMethod("updateRuleCache", List::class.java)
             .apply { isAccessible = true }
+        // 关键: cachedWhitelistHits 是进程级 ConcurrentHashMap, 一次测试遗留的命中会让后续所有测试
+        // 在调 isWhitelistedDomain 时直接走缓存导致 isBlocked 提前 false, 引起跨测试 flaky 失败.
+        // 此前 setup + cleanup 必须显式清掉缓存, 否则 manual rules / imported rules 的子集失败不可复现.
+        val clearCaches = RuleRepository::class.java.getDeclaredMethod("clearCaches")
+            .apply { isAccessible = true }
         val context = mock(Context::class.java)
+        clearCaches.invoke(RuleRepository)
         updateCache.invoke(RuleRepository, rules)
         try {
             block(context)
         } finally {
+            clearCaches.invoke(RuleRepository)
             updateCache.invoke(RuleRepository, emptyList<BlockRule>())
         }
     }
@@ -431,6 +438,188 @@ class RuleParserTest {
             exceptionRule = exceptionRule,
             remoteSourceId = remoteSourceId
         )
+    }
+
+    @Test
+    fun `port wildcard rule star colon port with network modifier is parsed`() {
+        val line = "*:17204\$network"
+        val parsed = parseRuleLineViaReflection(line)
+        assertNotNull("parseRuleLine should produce non-null list for $line", parsed)
+        assertTrue("parsed list should be non-empty", (parsed as List<*>).isNotEmpty())
+        val first = parsed.first()
+        assertEquals("domain should be wildcard", "*", readParsedString(first, "domain"))
+        val ports = readParsedAnySet(first, "destinationPorts").mapNotNull { it.toString().toIntOrNull() }
+        assertTrue("17204 should be in destinationPorts", ports.contains(17204))
+    }
+
+    @Test
+    fun `single label abp anchor rule double_pipe xccx caret is parsed`() {
+        val line = "||xccx^"
+        val parsed = parseRuleLineViaReflection(line)
+        assertNotNull("parseRuleLine should produce non-null list for $line", parsed)
+        assertTrue("parsed list should be non-empty", (parsed as List<*>).isNotEmpty())
+        val first = parsed.first()
+        assertEquals("domain should be normalized xccx", "xccx", readParsedString(first, "domain"))
+    }
+
+    @Test
+    fun `analyzeImportContent counts port wildcard rule as safe`() {
+        val ctx = mock(Context::class.java)
+        presetEmptyRulesCache()
+        // 多种端口形式都应识别
+        assertEquals(1, readReportInt(analyzeImportContentViaReflection(ctx, "*:17204\$network\n"), "safeBlockedRules"))
+        assertEquals(1, readReportInt(analyzeImportContentViaReflection(ctx, "*:8080\$network\n"), "safeBlockedRules"))
+        assertEquals(1, readReportInt(analyzeImportContentViaReflection(ctx, "*:443\n"), "safeBlockedRules"))
+        assertEquals(1, readReportInt(analyzeImportContentViaReflection(ctx, "*:17204"), "safeBlockedRules"))
+    }
+
+    @Test
+    fun `analyzeImportContent counts single label abp anchor as safe`() {
+        val ctx = mock(Context::class.java)
+        presetEmptyRulesCache()
+        // 各种单字母/数字单标签 ABP anchor
+        assertEquals(1, readReportInt(analyzeImportContentViaReflection(ctx, "||xccx^\n"), "safeBlockedRules"))
+        assertEquals(1, readReportInt(analyzeImportContentViaReflection(ctx, "||abc^"), "safeBlockedRules"))
+        assertEquals(1, readReportInt(analyzeImportContentViaReflection(ctx, "||host123/-hint"), "safeBlockedRules"))
+    }
+
+    @Test
+    fun `analyzeImportContent counts both via multiline import`() {
+        val ctx = mock(Context::class.java)
+        presetEmptyRulesCache()
+        val report = analyzeImportContentViaReflection(ctx, "*:17204\$network\n||xccx^\nexample.com\n")
+        assertEquals("two advanced rules + one simple rule should sum to 3 safe", 3, readReportInt(report, "safeBlockedRules"))
+    }
+
+    @Test
+    fun `analyzeImportContent skips bare star ruleset consistent with streaming`() {
+        val ctx = mock(Context::class.java)
+        presetEmptyRulesCache()
+        // "** 不带 ports/regex/keyword/ipCidr 任一修饰" — importRulesStreaming 不写, analyze 也不计
+        val report = analyzeImportContentViaReflection(ctx, "*\n")
+        assertEquals(0, readReportInt(report, "safeBlockedRules"))
+    }
+
+    @Test
+    fun `analyzeImportContent fallback handles unrecognized complex rule as unsupported`() {
+        val ctx = mock(Context::class.java)
+        presetEmptyRulesCache()
+        // 一条完全不能 parseRuleLine 识别、但可被 parseUnsupportedImportRule 兜底的优势项
+        // 调 fake rule 验证 analyze 不再计 invalid 而是计 safeBlocked (与 streaming 行为一致)
+        val report = analyzeImportContentViaReflection(ctx, "weird-unknown-syntax-rule-line-without-domain")
+        val invalid = readReportInt(report, "invalidRules")
+        assertEquals("should not have any invalid entries", 0, invalid)
+    }
+
+    @Test
+    fun `analyzeImportContent counts mainstream rule formats correctly`() {
+        val ctx = mock(Context::class.java)
+        presetEmptyRulesCache()
+        // 覆盖各主流规则格式 - 与 importRulesStreaming 应保持一致的识别结果
+        val content = buildString {
+            // ABP 标准
+            appendLine("||doubleclick.net^")
+            appendLine("||googlesyndication.com^")
+            appendLine("@@||cdn.example.com^")  // exception rule
+            // 单标签 ABP anchor
+            appendLine("||xccx^")
+            // 端口通配
+            appendLine("*:443")
+            appendLine("*:17204\$network")
+            // hosts 表
+            appendLine("0.0.0.0 ads.example.com")
+            appendLine("127.0.0.1  tracker.example.org")
+            // 纯域 (hosts / dnsmasq 风格)
+            appendLine("analytics.example.net")
+            // dnsmasq
+            appendLine("address=/ad.example.com/0.0.0.0")
+            // smartdns
+            appendLine("address /-ad.com/0.0.0.0")
+            // surge/loon/clash 类
+            appendLine("DOMAIN-SUFFIX,doubleclick.net,REJECT")
+            appendLine("DOMAIN-KEYWORD,googleads,REJECT")
+            // adguard
+            appendLine("||ads.example.com^\$important")
+            // openwrt
+            appendLine("local-zone \".ads.example.com\" refuse")
+        }.toString()
+
+        val report = analyzeImportContentViaReflection(ctx, content)
+        // 至少应识别 12 条以上 safe 规则 (1 条 exception 不算 safeBlocked)
+        val safeBlocked = readReportInt(report, "safeBlockedRules")
+        assertTrue("Should have recognized at least 10 mainstream safe rules, got $safeBlocked", safeBlocked >= 10)
+        // 至少 1 条 exception
+        val safeException = readReportInt(report, "safeExceptionRules")
+        assertTrue("Should have at least 1 exception rule, got $safeException", safeException >= 1)
+        // invalidLines 不应大暴雷
+        val invalid = readReportInt(report, "invalidRules")
+        assertTrue("Unexpected invalid rules count $invalid", invalid <= 4)
+    }
+
+    private fun presetEmptyRulesCache() {
+        val rulesField = RuleRepository::class.java.getDeclaredField("cachedRules")
+        rulesField.isAccessible = true
+        rulesField.set(RuleRepository, emptyList<com.HanFeng.model.BlockRule>())
+        val vendorsField = RuleRepository::class.java.getDeclaredField("cachedCustomVendors")
+        vendorsField.isAccessible = true
+        vendorsField.set(RuleRepository, emptyMap<String, String>())
+    }
+
+    private fun analyzeImportContentViaReflection(ctx: Context, content: String): Any {
+        val method = RuleRepository::class.java.getDeclaredMethod("analyzeImportContent", Context::class.java, String::class.java)
+        method.isAccessible = true
+        return method.invoke(RuleRepository, ctx, content)!!
+    }
+
+    private fun readReportInt(report: Any, fieldName: String): Int {
+        val field = report::class.java.getDeclaredField(fieldName)
+        field.isAccessible = true
+        return field.get(report) as Int
+    }
+
+    @Test
+    fun `normalize leaves star colon port dollar network intact`() {
+        val raw = "*:17204\$network"
+        val method = com.HanFeng.data.RuleTextNormalizer::class.java.getDeclaredMethod("normalizeMessyRuleLine", String::class.java)
+        method.isAccessible = true
+        val normalized = method.invoke(com.HanFeng.data.RuleTextNormalizer, raw) as String
+        assertEquals("normalize should not mangle *:17204\$network", "*:17204\$network", normalized)
+    }
+
+    @Test
+    fun `normalize converts fullwidth asterisk pipe dollar caret to half width`() {
+        val method = com.HanFeng.data.RuleTextNormalizer::class.java.getDeclaredMethod("normalizeMessyRuleLine", String::class.java)
+        method.isAccessible = true
+        assertEquals("*:17204\$network", method.invoke(com.HanFeng.data.RuleTextNormalizer, "＊:17204＄network") as String)
+        assertEquals("||xccx^", method.invoke(com.HanFeng.data.RuleTextNormalizer, "｜｜xccx＾") as String)
+    }
+
+    @Test
+    fun `normalize leaves double pipe xccx caret intact`() {
+        val raw = "||xccx^"
+        val method = com.HanFeng.data.RuleTextNormalizer::class.java.getDeclaredMethod("normalizeMessyRuleLine", String::class.java)
+        method.isAccessible = true
+        val normalized = method.invoke(com.HanFeng.data.RuleTextNormalizer, raw) as String
+        assertEquals("normalize should not mangle ||xccx^", "||xccx^", normalized)
+    }
+
+    @Test
+    fun `extractSimpleImportDomain returns null for port wildcard and single label anchor`() {
+        assertEquals(null, extractSimpleImportDomainViaReflection("*:17204\$network"))
+        assertEquals(null, extractSimpleImportDomainViaReflection("||xccx^"))
+    }
+
+    private fun extractSimpleImportDomainViaReflection(line: String): String? {
+        val method = RuleRepository::class.java.getDeclaredMethod("extractSimpleImportDomain", String::class.java)
+        method.isAccessible = true
+        return method.invoke(RuleRepository, line) as String?
+    }
+
+    private fun parseRuleLineViaReflection(line: String): Any? {        val ctxClass = Class.forName("com.HanFeng.data.RuleParsingSupport\$LineContext")
+        val ctx = ctxClass.getDeclaredConstructor().newInstance()
+        val method = RuleRepository::class.java.getDeclaredMethod("parseRuleLine", String::class.java, ctxClass)
+        method.isAccessible = true
+        return method.invoke(RuleRepository, line, ctx)
     }
 
     private fun isValidRuleLine(line: String): Boolean {
@@ -515,6 +704,13 @@ class RuleParserTest {
         val field = parsed!!::class.java.getDeclaredField(fieldName)
         field.isAccessible = true
         return field.get(parsed) as Set<String>
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun readParsedAnySet(parsed: Any?, fieldName: String): Set<*> {
+        val field = parsed!!::class.java.getDeclaredField(fieldName)
+        field.isAccessible = true
+        return field.get(parsed) as Set<*>
     }
 
     private fun readParsedString(parsed: Any?, fieldName: String): String? {

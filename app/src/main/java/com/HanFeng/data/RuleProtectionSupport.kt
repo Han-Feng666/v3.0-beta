@@ -1,6 +1,18 @@
 package com.HanFeng.data
 
+import com.HanFeng.core.network.RegexCache
+
 object RuleProtectionSupport {
+    private val adTokenNormalizeRegex = RegexCache.get("[^a-z0-9]")
+    private val protectedNovelAppAdSubdomainPatterns = listOf(
+        "ad", "ads", "adserver", "adtrack", "adlog", "adx", "adv", "banner", "splash",
+        "promotion", "promo", "marketing", "track", "tracking", "log", "logger", "stat", "stats", "analytics"
+    )
+    private val aggressiveNovelAdStrongSignals = listOf(
+        "pangolin", "pangle", "gromore", "oceanengine", "adservice", "adserver", "adtrack",
+        "adsdk", "unionad", "mediation", "rtb", "dsp", "ssp", "reward", "splash", "interstitial"
+    )
+
     fun matchesExactOrSubdomain(domain: String, protectedDomains: Set<String>): Boolean {
         return protectedDomains.contains(domain) || protectedDomains.any { domain.endsWith(".$it") }
     }
@@ -19,7 +31,7 @@ object RuleProtectionSupport {
         val normalized = sanitizeDomain(domain) ?: return false
         if (isWhitelistedDomain(normalized)) return true
         val lower = normalized.lowercase()
-        val normalizedTokens = lower.replace(Regex("[^a-z0-9]"), "")
+        val normalizedTokens = lower.replace(adTokenNormalizeRegex, "")
         val labels = lower.split('.').filter { it.isNotBlank() }
         return sensitiveAuthKeywords.any { keyword ->
             labels.any { it == keyword } || keywordMatches(lower, normalizedTokens, keyword)
@@ -35,11 +47,7 @@ object RuleProtectionSupport {
     ): Boolean {
         val normalized = sanitizeDomain(domain) ?: return false
         val lower = normalized.lowercase()
-        val adSubdomainPatterns = listOf(
-            "ad", "ads", "adserver", "adtrack", "adlog", "adx", "adv", "banner", "splash",
-            "promotion", "promo", "marketing", "track", "tracking", "log", "logger", "stat", "stats", "analytics"
-        )
-        if (adSubdomainPatterns.any { lower.startsWith("$it.") || lower.startsWith("$it-") || lower == it }) return false
+        if (protectedNovelAppAdSubdomainPatterns.any { lower.startsWith("$it.") || lower.startsWith("$it-") || lower == it }) return false
         if (isGameCoreDomain(normalized)) return false
         if (isSocialCoreDomain(normalized)) return false
         return matchesProtectedDomain(normalized)
@@ -47,11 +55,7 @@ object RuleProtectionSupport {
 
     fun hasAggressiveNovelAdSignal(domain: String): Boolean {
         val lowerDomain = domain.lowercase()
-        val strongSignals = listOf(
-            "pangolin", "pangle", "gromore", "oceanengine", "adservice", "adserver", "adtrack",
-            "adsdk", "unionad", "mediation", "rtb", "dsp", "ssp", "reward", "splash", "interstitial"
-        )
-        return strongSignals.any { lowerDomain.contains(it) }
+        return aggressiveNovelAdStrongSignals.any { lowerDomain.contains(it) }
     }
 
     fun isLowValueSuspiciousSampleDomain(

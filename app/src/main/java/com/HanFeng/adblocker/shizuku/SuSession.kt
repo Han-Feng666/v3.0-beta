@@ -60,7 +60,8 @@ class SuSession {
 
     fun open(timeoutSeconds: Long = FIRST_CALL_TIMEOUT_SEC): Boolean {
         if (permissionGranted.get()) return true
-        if (permissionDenied.get()) return false
+        // 不再因 permissionDenied 永久拒绝后续重试: 让用户每次操作都有机会重新授权
+        permissionDenied.set(false)
 
         Log.d(TAG, "Requesting root permission (timeout=${timeoutSeconds}s)...")
         val result = runRawInternal("echo SU_READY && id", timeoutSeconds)
@@ -257,7 +258,7 @@ class SuSession {
                     reader.use { r ->
                         var line: String?
                         while (r.readLine().also { line = it } != null) {
-                            if (output.length < 256 * 1024) {
+                            if (output.length < 4 * 1024 * 1024) {
                                 if (output.isNotEmpty()) output.append("\n")
                                 output.append(line)
                             }
@@ -311,7 +312,7 @@ class SuSession {
                             while (alive.get() && reader.readLine().also { line = it } != null) {
                                 val l = line!!
                                 synchronized(allOutput) {
-                                    if (allOutput.length < 256 * 1024) {
+                                    if (allOutput.length < 4 * 1024 * 1024) {
                                         if (allOutput.isNotEmpty()) allOutput.append("\n")
                                         allOutput.append(l)
                                     }
@@ -449,7 +450,7 @@ class SuSession {
                     reader.use { r ->
                         var line: String?
                         while (r.readLine().also { line = it } != null) {
-                            if (output.length < 256 * 1024) {
+                            if (output.length < 4 * 1024 * 1024) {
                                 if (output.isNotEmpty()) output.append("\n")
                                 output.append(line)
                             }

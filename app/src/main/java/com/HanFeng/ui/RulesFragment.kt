@@ -344,12 +344,18 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     override fun onResume() {
         super.onResume()
+        _binding?.root?.findViewById<ImageView>(R.id.rulesBackground)?.let(::applyBackgroundImage)
         refreshList()
     }
 
     override fun onDestroyView() {
         pendingSearchJob?.cancel()
         pendingRefreshJob?.cancel()
+        // 解除 EditText 上的监听器，避免匿名内部类持有 Fragment 强引用导致内存泄漏
+        runCatching {
+            binding.inputSearch.addTextChangedListener(null)
+            binding.inputRule.setOnEditorActionListener(null)
+        }
         super.onDestroyView()
         _binding = null
     }
@@ -391,7 +397,11 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         return host
     }
 
+    private var isAddManualRuleInFlight = false
+
     private fun addManualRule() {
+        // 重入保护: IME 软键盘的某些机型会对一次 DONE 触发两次回调, 旧机型 keyCode ENTER 也可能 DOWN/UP 两次
+        if (isAddManualRuleInFlight) return
         val ctx = safeContext() ?: return
         val rawInput = binding.inputRule.text?.toString().orEmpty()
         if (rawInput.isBlank()) {
@@ -408,51 +418,109 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             importManualRuleBatch(ctx, rawInput)
             return
         }
-        val whitelistConflicts = RuleRepository.findWhitelistConflictsInManualInput(rawInput)
-        if (whitelistConflicts.isNotEmpty()) {
-            showWhitelistConflictDialog(
-                title = "发现疑似白名单规则",
-                domains = whitelistConflicts,
-                onContinue = {
-                    val added = RuleRepository.addRules(ctx, rawInput, RuleSource.MANUAL, allowWhitelistDomains = true)
-                    handleManualRuleAddResult(ctx, added)
-                },
-                onDeleteWhitelistAndContinue = {
-                    val sanitizedInput = RuleRepository.removeWhitelistConflictLines(rawInput)
-                    val added = RuleRepository.addRules(ctx, sanitizedInput, RuleSource.MANUAL)
-                    handleManualRuleAddResult(ctx, added)
+        // analyze/findWhitelist/addRules 都可能涉及大输入量正则扫描和规则文件 IO, 全部移到 IO 线程
+        isAddManualRuleInFlight = true
+        binding.btnAddRule.isEnabled = false
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val appContext = ctx.applicationContext
+                val whitelistConflicts = withContext(Dispatchers.IO) {
+                    RuleRepository.findWhitelistConflictsInManualInput(rawInput)
                 }
-            )
-            return
+                if (!isAdded) return@launch
+                if (whitelistConflicts.isNotEmpty()) {
+                    showWhitelistConflictDialog(
+                        title = "发现疑似白名单规则",
+                        domains = whitelistConflicts,
+                        onContinue = {
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                val added = withContext(Dispatchers.IO) {
+                                    RuleRepository.addRules(appContext, rawInput, RuleSource.MANUAL, allowWhitelistDomains = true)
+                                }
+                                if (!isAdded) return@launch
+                                handleManualRuleAddResult(appContext, added)
+                            }
+                        },
+                        onDeleteWhitelistAndContinue = {
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                val sanitizedInput = withContext(Dispatchers.IO) {
+                                    RuleRepository.removeWhitelistConflictLines(rawInput)
+                                }
+                                val added = withContext(Dispatchers.IO) {
+                                    RuleRepository.addRules(appContext, sanitizedInput, RuleSource.MANUAL)
+                                }
+                                if (!isAdded) return@launch
+                                handleManualRuleAddResult(appContext, added)
+                            }
+                        }
+                    )
+                    return@launch
+                }
+                val added = withContext(Dispatchers.IO) {
+                    RuleRepository.addRules(appContext, rawInput, RuleSource.MANUAL)
+                }
+                if (!isAdded) return@launch
+                handleManualRuleAddResult(appContext, added)
+            } finally {
+                isAddManualRuleInFlight = false
+                _binding?.btnAddRule?.isEnabled = true
+            }
         }
-        val added = RuleRepository.addRules(ctx, rawInput, RuleSource.MANUAL)
-        handleManualRuleAddResult(ctx, added)
     }
 
     private fun importManualRuleBatch(ctx: Context, rawInput: String) {
-        val report = RuleRepository.analyzeImportContent(ctx, rawInput)
-        if (report.safeRuleCount <= 0) {
-            showShortToast("未识别到可导入规则，建议改用导入规则按钮选择文件")
-            return
-        }
-        if (report.whitelistConflictRules > 0) {
-            showWhitelistConflictDialog(
-                title = "发现疑似白名单规则",
-                domains = report.sampleWhitelistConflictLines,
-                onContinue = {
-                    val imported = RuleRepository.importRules(ctx, rawInput, RuleSource.MANUAL, allowWhitelistDomains = true)
-                    handleManualRuleBatchImportResult(ctx, imported)
-                },
-                onDeleteWhitelistAndContinue = {
-                    val sanitizedInput = RuleRepository.removeWhitelistConflictLines(rawInput)
-                    val imported = RuleRepository.importRules(ctx, sanitizedInput, RuleSource.MANUAL)
-                    handleManualRuleBatchImportResult(ctx, imported)
+        // analyze/importRules 都可能涉及对几 MB 文本的扫描与规则文件 IO, 全部移到 IO
+        isAddManualRuleInFlight = true
+        binding.btnAddRule.isEnabled = false
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val appContext = ctx.applicationContext
+                val report = withContext(Dispatchers.IO) {
+                    RuleRepository.analyzeImportContent(appContext, rawInput)
                 }
-            )
-            return
+                if (!isAdded) return@launch
+                if (report.safeRuleCount <= 0) {
+                    showShortToast("未识别到可导入规则，建议改用导入规则按钮选择文件")
+                    return@launch
+                }
+                if (report.whitelistConflictRules > 0) {
+                    showWhitelistConflictDialog(
+                        title = "发现疑似白名单规则",
+                        domains = report.sampleWhitelistConflictLines,
+                        onContinue = {
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                val imported = withContext(Dispatchers.IO) {
+                                    RuleRepository.importRules(appContext, rawInput, RuleSource.MANUAL, allowWhitelistDomains = true)
+                                }
+                                if (!isAdded) return@launch
+                                handleManualRuleBatchImportResult(appContext, imported)
+                            }
+                        },
+                        onDeleteWhitelistAndContinue = {
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                val sanitizedInput = withContext(Dispatchers.IO) {
+                                    RuleRepository.removeWhitelistConflictLines(rawInput)
+                                }
+                                val imported = withContext(Dispatchers.IO) {
+                                    RuleRepository.importRules(appContext, sanitizedInput, RuleSource.MANUAL)
+                                }
+                                if (!isAdded) return@launch
+                                handleManualRuleBatchImportResult(appContext, imported)
+                            }
+                        }
+                    )
+                    return@launch
+                }
+                val imported = withContext(Dispatchers.IO) {
+                    RuleRepository.importRules(appContext, rawInput, RuleSource.MANUAL)
+                }
+                if (!isAdded) return@launch
+                handleManualRuleBatchImportResult(appContext, imported)
+            } finally {
+                isAddManualRuleInFlight = false
+                _binding?.btnAddRule?.isEnabled = true
+            }
         }
-        val imported = RuleRepository.importRules(ctx, rawInput, RuleSource.MANUAL)
-        handleManualRuleBatchImportResult(ctx, imported)
     }
 
     private fun handleManualRuleBatchImportResult(ctx: Context, imported: Int) {
@@ -460,8 +528,8 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             showShortToast("未识别到可导入规则，或规则已存在")
             return
         }
-        binding.inputRule.setText("")
-        LogRepository.append(ctx, "Imported $imported manual batch rules")
+        _binding?.inputRule?.setText("")
+        LogRepository.append(ctx.applicationContext, "Imported $imported manual batch rules")
         showShortToast("已导入 $imported 条规则")
         invalidateRuleListCache()
         refreshListSoon(800L)
@@ -473,8 +541,8 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             showShortToast("未识别到可添加的有效域名，或规则已存在")
             return
         }
-        binding.inputRule.setText("")
-        LogRepository.append(ctx, "Added ${added.size} manual rules")
+        _binding?.inputRule?.setText("")
+        LogRepository.append(ctx.applicationContext, "Added ${added.size} manual rules")
         showShortToast("已添加 ${added.size} 条规则")
         invalidateRuleListCache()
         refreshListSoon()
@@ -711,15 +779,28 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     when (which) {
                         0 -> {
                             val enabling = !source.enabled
-                            RuleRepository.updateRemoteRuleSource(dialogContext, source.copy(enabled = enabling, lastError = null))
-                            if (enabling) {
-                                syncRemoteRuleSources(source.id, manual = true)
-                            } else {
-                                val removedCount = RuleRepository.removeRulesForRemoteSource(dialogContext, source.id)
-                                invalidateRuleListCache()
-                                refreshListSoon()
-                                reloadVpnIfRunning(removedCount > 0)
-                                Toast.makeText(dialogContext, "规则源已停用并移除对应规则", Toast.LENGTH_SHORT).show()
+                            val appContext = dialogContext.applicationContext
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                val updatedOk = runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        RuleRepository.updateRemoteRuleSource(appContext, source.copy(enabled = enabling, lastError = null))
+                                    }
+                                }.onFailure {
+                                    LogRepository.append(appContext, "Update remote source enabled flag failed: ${it.message ?: it.javaClass.simpleName}")
+                                    Toast.makeText(appContext, "切换规则源失败：${it.message ?: it.javaClass.simpleName}", Toast.LENGTH_SHORT).show()
+                                }.isSuccess
+                                if (!updatedOk) return@launch
+                                if (enabling) {
+                                    syncRemoteRuleSources(source.id, manual = true)
+                                } else {
+                                    val removedCount = withContext(Dispatchers.IO) {
+                                        runCatching { RuleRepository.removeRulesForRemoteSource(appContext, source.id) }.getOrDefault(0)
+                                    }
+                                    invalidateRuleListCache()
+                                    refreshListSoon()
+                                    reloadVpnIfRunning(removedCount > 0)
+                                    Toast.makeText(appContext, "规则源已停用并移除对应规则", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         }
                         1 -> syncRemoteRuleSources(source.id, manual = true)
@@ -800,7 +881,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             url = url,
             enabled = true
         )
-        RuleRepository.addRemoteRuleSource(ctx, source)
+        val addOk = runCatching { RuleRepository.addRemoteRuleSource(ctx.applicationContext, source) }
+            .onFailure {
+                LogRepository.append(ctx.applicationContext, "Add remote rule source failed: ${it.message ?: it.javaClass.simpleName}")
+                showShortToast("添加规则源失败：${it.message ?: it.javaClass.simpleName}")
+            }
+            .isSuccess
+        if (!addOk) return
         syncRemoteRuleSources(source.id, manual = true, justAdded = true)
     }
 
@@ -890,7 +977,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     val importedCount = results.sumOf { result -> result.addedCount }
                     if (successCount == 0) {
                         val firstError = results.firstOrNull()?.errorMessage ?: "规则源更新失败"
-                        Toast.makeText(ctx, firstError, Toast.LENGTH_LONG).show()
+                        Toast.makeText(appContext, firstError, Toast.LENGTH_LONG).show()
                     } else {
                         val suffix = when {
                             conflictCount <= 0 -> ""
@@ -902,14 +989,14 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                             }
                             else -> ""
                         }
-                        Toast.makeText(ctx, "规则源更新完成，成功 $successCount / ${results.size}，导入 $importedCount 条规则$suffix", Toast.LENGTH_LONG).show()
+                        Toast.makeText(appContext, "规则源更新完成，成功 $successCount / ${results.size}，导入 $importedCount 条规则$suffix", Toast.LENGTH_LONG).show()
                     }
                 }
             }.onFailure {
                 dismissProgressDialog(progress)
                 LogRepository.append(appContext, "Remote rule source sync failed from rules page: ${it.message ?: it.javaClass.simpleName}")
-                if (manual) {
-                    Toast.makeText(ctx, it.message ?: "规则源更新失败", Toast.LENGTH_LONG).show()
+                if (manual && isAdded) {
+                    Toast.makeText(appContext, it.message ?: "规则源更新失败", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -1150,9 +1237,15 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
     }
 
     private fun selectAllVisible() {
-        visibleRules().forEach { rule ->
+        val visible = visibleRules()
+        val visibleTotal = visible.size
+        visible.forEach { rule ->
             selectedIds += rule.id
             selectedRulesById[rule.id] = rule
+        }
+        if (visibleTotal > 0) {
+            // visibleRules 限定最多 2000 条, 超过时给出提示让用户知道不是一次性全选
+            showShortToast("已选中 $visibleTotal 条可见规则")
         }
         refreshList()
     }
@@ -1210,22 +1303,23 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 .setMessage(message)
                 .setPositiveButton("删除") { _, _ ->
                     val actionContext = context ?: return@setPositiveButton
+                    val appContext = actionContext.applicationContext
                     val selectedIdsSnapshot = snapshot.asSequence()
                         .map { it.id.trim() }
                         .filter { it.isNotEmpty() }
                         .toSet()
                     viewLifecycleOwner.lifecycleScope.launch {
                         val removedCount = withContext(Dispatchers.IO) {
-                            RuleRepository.removeRules(actionContext.applicationContext, selectedIdsSnapshot, snapshot)
+                            RuleRepository.removeRules(appContext, selectedIdsSnapshot, snapshot)
                         }
-                        LogRepository.append(actionContext, "Requested remove=${snapshot.size} actualRemoved=$removedCount")
+                        LogRepository.append(appContext, "Requested remove=${snapshot.size} actualRemoved=$removedCount")
                         if (removedCount <= 0) {
-                            Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(appContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
                             invalidateRuleListCache()
                             refreshListSoon(0L)
                             return@launch
                         }
-                        Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(appContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
                         invalidateRuleListCache()
                         exitSelection(invokeRefresh = false)
                         refreshListSoon(0L)
@@ -1246,24 +1340,25 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun confirmDeleteAllRules() {
         val ctx = context ?: return
+        val appContext = ctx.applicationContext
         val progress = showProgressDialog("删除所有规则", "正在读取规则列表...")
         viewLifecycleOwner.lifecycleScope.launch {
             val allRules = runCatching {
-                withContext(Dispatchers.IO) { RuleRepository.getRules(ctx.applicationContext) }
+                withContext(Dispatchers.IO) { RuleRepository.getRules(appContext) }
             }.onFailure { error ->
                 dismissProgressDialog(progress)
-                LogRepository.append(ctx, "Load rules for delete all failed: ${error.message ?: error.javaClass.simpleName}")
-                if (isAdded) Toast.makeText(ctx, "读取规则失败：${error.message ?: error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                LogRepository.append(appContext, "Load rules for delete all failed: ${error.message ?: error.javaClass.simpleName}")
+                if (isAdded) Toast.makeText(appContext, "读取规则失败：${error.message ?: error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
             }.getOrNull() ?: return@launch
             dismissProgressDialog(progress)
             if (!isAdded) return@launch
-            showDeleteAllRulesDialog(ctx, allRules)
+            showDeleteAllRulesDialog(appContext, allRules)
         }
     }
 
     private fun showDeleteAllRulesDialog(ctx: Context, allRules: List<BlockRule>) {
         if (allRules.isEmpty()) {
-            Toast.makeText(ctx, "当前没有规则可删除", Toast.LENGTH_SHORT).show()
+            if (isAdded) Toast.makeText(ctx, "当前没有规则可删除", Toast.LENGTH_SHORT).show()
             return
         }
         val dialogContext = safeDialogActivity() ?: return
@@ -1318,18 +1413,19 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                 .setMessage(message)
                 .setPositiveButton("删除全部") { _, _ ->
                     val actionContext = context ?: return@setPositiveButton
-                    lifecycleScope.launch {
+                    val appContext = actionContext.applicationContext
+                    viewLifecycleOwner.lifecycleScope.launch {
                         val removedCount = withContext(Dispatchers.IO) {
-                            RuleRepository.removeAllRules(actionContext.applicationContext)
+                            RuleRepository.removeAllRules(appContext)
                         }
-                        LogRepository.append(actionContext, "Requested removeAll actualRemoved=$removedCount")
+                        LogRepository.append(appContext, "Requested removeAll actualRemoved=$removedCount")
                         if (removedCount <= 0) {
-                            Toast.makeText(actionContext, "未删除任何规则，请重试一次", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(appContext, "未删除任何规则，请重试一次", Toast.LENGTH_SHORT).show()
                             invalidateRuleListCache()
                             refreshListSoon(0L)
                             return@launch
                         }
-                        Toast.makeText(actionContext, "已删除全部 $removedCount 条规则", Toast.LENGTH_LONG).show()
+                        Toast.makeText(appContext, "已删除全部 $removedCount 条规则", Toast.LENGTH_LONG).show()
                         invalidateRuleListCache()
                         exitSelection(invokeRefresh = false)
                         refreshListSoon(0L)
@@ -1352,13 +1448,16 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             ruleExportPermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             return
         }
+        // 内部所有 IO 与 Toast 都用 ApplicationContext，避免持有 Activity 引用导致 Activity destroyed 后阻塞与泄漏
+        val appContext = ctx.applicationContext
+        val dialogContext = safeDialogActivity() ?: ctx
 
         val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.CHINA)
             .format(java.util.Date())
         val fileName = "hanfeng_rules_$timestamp.txt"
 
-        lifecycleScope.launch {
-            val progressDialog = android.app.ProgressDialog(ctx).apply {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val progressDialog = android.app.ProgressDialog(dialogContext).apply {
                 setTitle("导出规则")
                 setMessage("正在准备导出规则...")
                 isIndeterminate = true
@@ -1368,34 +1467,35 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             try {
                 val exported = withContext(Dispatchers.IO) {
                     com.HanFeng.data.RuleRepositoryExport.buildRulesText(
-                        context = ctx,
+                        context = appContext,
                         includeWhitelist = true,
                         includeSmartScored = true
                     )
                 }
                 val exportPath = withContext(Dispatchers.IO) {
                     com.HanFeng.security.CertificateAuthorityManager.exportTextFileToDownloads(
-                        context = ctx,
+                        context = appContext,
                         fileName = fileName,
                         content = exported.content
                     )
                 }
+                if (!isAdded) return@launch
                 if (exported.count > 0 && exportPath != null) {
                     Toast.makeText(
-                        ctx,
+                        appContext,
                         "导出成功：${exported.count} 条规则\n文件位置：$exportPath",
                         Toast.LENGTH_LONG
                     ).show()
                     LogRepository.append(
-                        ctx,
+                        appContext,
                         "规则导出成功：文件=$exportPath, 规则数=${exported.count}"
                     )
                 } else {
-                    Toast.makeText(ctx, "导出失败：未写入任何规则", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(appContext, "导出失败：未写入任何规则", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                LogRepository.append(ctx, "导出规则失败：${e.message ?: e.javaClass.simpleName}")
-                Toast.makeText(ctx, "导出失败：${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                LogRepository.append(appContext, "导出规则失败：${e.message ?: e.javaClass.simpleName}")
+                if (isAdded) Toast.makeText(appContext, "导出失败：${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
             } finally {
                 runCatching { progressDialog.dismiss() }
             }
@@ -1404,9 +1504,10 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun deleteSelectedRulesDirectly() {
         val actionContext = context ?: return
+        val appContext = actionContext.applicationContext
         val snapshot = resolveSelectedRules().distinctBy { it.id.ifBlank { it.domain } }
         if (snapshot.isEmpty()) {
-            Toast.makeText(actionContext, "请至少选择一条规则", Toast.LENGTH_SHORT).show()
+            Toast.makeText(appContext, "请至少选择一条规则", Toast.LENGTH_SHORT).show()
             return
         }
         val selectedIdsSnapshot = snapshot.asSequence()
@@ -1416,13 +1517,13 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         binding.btnDeleteSelected.isEnabled = false
         viewLifecycleOwner.lifecycleScope.launch {
             val removedCount = withContext(Dispatchers.IO) {
-                RuleRepository.removeRules(actionContext.applicationContext, selectedIdsSnapshot, snapshot)
+                RuleRepository.removeRules(appContext, selectedIdsSnapshot, snapshot)
             }
             if (!isAdded) return@launch
             _binding?.btnDeleteSelected?.isEnabled = true
-            LogRepository.append(actionContext, "Requested direct remove=${snapshot.size} actualRemoved=$removedCount")
+            LogRepository.append(appContext, "Requested direct remove=${snapshot.size} actualRemoved=$removedCount")
             if (removedCount <= 0) {
-                Toast.makeText(actionContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
+                Toast.makeText(appContext, "未删除任何规则，旧规则数据已自动修复，请重试一次", Toast.LENGTH_SHORT).show()
                 invalidateRuleListCache()
                 refreshListSoon(0L)
                 return@launch
@@ -1431,7 +1532,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             invalidateRuleListCache()
             refreshListSoon(0L)
             reloadVpnIfRunning(true)
-            Toast.makeText(actionContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
+            Toast.makeText(appContext, "已删除 $removedCount 条规则", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1450,27 +1551,31 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
     private fun deduplicateRules() {
         val actionContext = safeContext() ?: return
+        val appContext = actionContext.applicationContext
         binding.btnFilter.isEnabled = false
         viewLifecycleOwner.lifecycleScope.launch {
             try {
                 val removed = withContext(Dispatchers.IO) {
-                    RuleRepository.deduplicateRules(actionContext.applicationContext)
+                    RuleRepository.deduplicateRules(appContext)
                 }
                 if (!isAdded) return@launch
                 _binding?.btnFilter?.isEnabled = true
                 if (removed == 0) {
-                    Toast.makeText(actionContext, "没有检测到重复规则", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(appContext, "没有检测到重复规则", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
-                LogRepository.append(actionContext, "Removed $removed duplicate rules")
+                LogRepository.append(appContext, "Removed $removed duplicate rules")
                 invalidateRuleListCache()
                 refreshListSoon()
                 reloadVpnIfRunning(true)
-                Toast.makeText(actionContext, "已清理 $removed 条重复规则", Toast.LENGTH_SHORT).show()
-            } catch (e: Throwable) {
+                Toast.makeText(appContext, "已清理 $removed 条重复规则", Toast.LENGTH_SHORT).show()
+            } catch (e: kotlinx.coroutines.CancellationException) {
                 _binding?.btnFilter?.isEnabled = true
-                LogRepository.append(actionContext, "Deduplicate rules failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
-                if (isAdded) Toast.makeText(actionContext, "清理失败：${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                throw e
+            } catch (e: Exception) {
+                _binding?.btnFilter?.isEnabled = true
+                LogRepository.append(appContext, "Deduplicate rules failed: ${e.message ?: e.javaClass.simpleName}\nStack: ${e.stackTraceToString()}")
+                if (isAdded) Toast.makeText(appContext, "清理失败：${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -1559,8 +1664,18 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                         showCreateVendorDialog(rule)
                     } else {
                         val actionContext = context ?: return@setItems
-                        RuleRepository.updateRuleVendor(actionContext, rule.id, options[which])
-                        refreshList()
+                        val appContext = actionContext.applicationContext
+                        val newVendor = options[which]
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) { RuleRepository.updateRuleVendor(appContext, rule.id, newVendor) }
+                            }.onSuccess {
+                                refreshList()
+                            }.onFailure {
+                                LogRepository.append(appContext, "Update rule vendor failed: ${it.message ?: it.javaClass.simpleName}")
+                                Toast.makeText(appContext, "修改分组失败：${it.message ?: it.javaClass.simpleName}", Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     }
                 }
                 .showSafely(dialogContext, "Show vendor picker dialog failed")
@@ -1594,9 +1709,19 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
                     return@setOnClickListener
                 }
                 val actionContext = context ?: return@setOnClickListener
-                RuleRepository.updateRuleVendor(actionContext, rule.id, vendor)
-                refreshList()
-                dialog.dismiss()
+                val appContext = actionContext.applicationContext
+                viewLifecycleOwner.lifecycleScope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) { RuleRepository.updateRuleVendor(appContext, rule.id, vendor) }
+                    }.onSuccess {
+                        refreshList()
+                        dialog.dismiss()
+                    }.onFailure {
+                        LogRepository.append(appContext, "Create vendor failed: ${it.message ?: it.javaClass.simpleName}")
+                        Toast.makeText(appContext, "保存分组失败：${it.message ?: it.javaClass.simpleName}", Toast.LENGTH_SHORT).show()
+                        runCatching { dialog.dismiss() }
+                    }
+                }
             }
         }
         runCatching {
@@ -1615,7 +1740,8 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         progress = showProgressDialog("导入规则", "正在打开规则文件...", showCancel = true, onCancel = {
             progress?.isCancelled = true
         }, showSilent = true, onSilent = {
-            progress?.dialog?.dismiss()
+            // 复用 dismissProgressDialog 的 runCatching 保护，避免 Activity 已 destroyed 时 dismiss 抛 IllegalArgumentException 导致崩溃
+            dismissProgressDialog(progress)
             progress = null
             showShortToast("已在后台静默导入，请稍候查看结果")
         })
@@ -1694,47 +1820,49 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         sourceUri: Uri,
         progress: ProgressDialogHandle?
     ) {
-        val appContext = context?.applicationContext
-        if (appContext == null) {
+        val ctx = context
+        if (ctx == null) {
             dismissProgressDialog(progress)
-            LogRepository.append(context?.applicationContext ?: return, "Import large rule file aborted: context is null")
+            // context 已 null 时只能用 applicationContext(也会是 null),这里没有 ApplicationContext 也就无法写日志
             return
         }
+        val appContext = ctx.applicationContext
         updateProgressDialog(progress, "正在以低内存模式导入规则...\n将跳过导入前分析以降低内存占用")
         val imported = runCatching {
             withContext(Dispatchers.IO) {
                 val stream = appContext.contentResolver.openInputStream(sourceUri)
                     ?: throw IllegalStateException("无法打开规则文件")
-                RuleRepository.importRulesStreaming(appContext, stream, allowWhitelistDomains = true, onProgress = { detail ->
-                    viewLifecycleOwner.lifecycleScope.launch {
-                        updateProgressDialog(progress, detail)
-                    }
-                }, isCancelled = {
-                    progress?.isCancelled ?: false
-                })
+                runCatching {
+                    RuleRepository.importRulesStreaming(appContext, stream, allowWhitelistDomains = true, onProgress = { detail ->
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            updateProgressDialog(progress, detail)
+                        }
+                    }, isCancelled = {
+                        progress?.isCancelled ?: false
+                    })
+                }.also {
+                    // 确保流被关闭，无论 importRulesStreaming 内部是否已经关闭
+                    runCatching { stream.close() }
+                }.getOrThrow()
             }
         }.onFailure { error ->
             dismissProgressDialog(progress)
             LogRepository.append(appContext, "Import large rule file failed: ${error.message ?: error.javaClass.simpleName}")
             if (isAdded) {
-                safeContext()?.let { ctx ->
-                    val message = when (error) {
-                        is java.io.FileNotFoundException -> "无法找到规则文件，请重新选择"
-                        is java.lang.SecurityException -> "没有权限读取该文件，请重新选择并授权"
-                        is OutOfMemoryError -> "规则文件过大，已停止导入以保护应用稳定"
-                        else -> "导入规则失败：${error.message ?: error.javaClass.simpleName}"
-                    }
-                    Toast.makeText(ctx, message, Toast.LENGTH_LONG).show()
+                val message = when (error) {
+                    is java.io.FileNotFoundException -> "无法找到规则文件，请重新选择"
+                    is java.lang.SecurityException -> "没有权限读取该文件，请重新选择并授权"
+                    is OutOfMemoryError -> "规则文件过大，已停止导入以保护应用稳定"
+                    else -> "导入规则失败：${error.message ?: error.javaClass.simpleName}"
                 }
+                Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
             }
             return
         }.getOrThrow()
         if (progress?.isCancelled == true) {
             dismissProgressDialog(progress)
             if (isAdded) {
-                safeContext()?.let { ctx ->
-                    Toast.makeText(ctx, "已取消导入", Toast.LENGTH_SHORT).show()
-                }
+                Toast.makeText(appContext, "已取消导入", Toast.LENGTH_SHORT).show()
             }
             return
         }
@@ -1747,15 +1875,16 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             source = RuleSource.IMPORTED,
             allowWhitelistDomains = true
         ) {
-            appContext.contentResolver.openInputStream(sourceUri)
+            // 后台线程才会有可能触发 SecurityException/FileNotFoundException; 用 runCatching 兜底, 避免进程级崩溃
+            runCatching { appContext.contentResolver.openInputStream(sourceUri) }
+                .onFailure { LogRepository.append(appContext, "scheduleBackgroundAdvancedImport reopen stream failed: ${it.message ?: it.javaClass.simpleName}") }
+                .getOrNull()
         }
         invalidateRuleListCache()
         refreshListSoon()
         reloadVpnIfRunning(true)
         dismissProgressDialog(progress)
-        context?.let {
-            Toast.makeText(it, "规则已导入，本次新增 $imported 条", Toast.LENGTH_LONG).show()
-        }
+        Toast.makeText(appContext, "规则已导入，本次新增 $imported 条", Toast.LENGTH_LONG).show()
     }
 
     private suspend fun readRuleContent(context: android.content.Context, uri: Uri): String? {
@@ -2067,7 +2196,7 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
             append(sampleText)
             append("\n\n你可以直接继续拦截，也可以只删除这些白名单候选，其余规则照常导入。")
         }
-        MaterialAlertDialogBuilder(activityHost)
+        MaterialAlertDialogBuilder(activityHost, R.style.ThemeOverlay_HanFeng_Dialog)
             .setTitle(title)
             .setMessage(message)
             .setPositiveButton("继续拦截") { _, _ -> onContinue() }
@@ -2109,7 +2238,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
 
         inner class ViewHolder(private val binding: ItemRuleDomainBinding) : RecyclerView.ViewHolder(binding.root) {
             fun bind(rule: BlockRule) {
-                binding.domainText.text = rule.domain
+                // 关键修复: 拼接修饰信息 (端口/keyword/regex/ipCidr/path/apps) 而不是只显示 domain,
+                // 让用户在 *:443$network、||*^ 等历史误导入规则上能看到原始语义, 便于识别和清理
+                binding.domainText.text = com.HanFeng.ui.RuleListFormat.formatRuleDisplayText(rule)
                 binding.sourceTag.text = rule.vendor
                 binding.sourceTag.visibility = View.VISIBLE
                 binding.selectBox.visibility = View.VISIBLE

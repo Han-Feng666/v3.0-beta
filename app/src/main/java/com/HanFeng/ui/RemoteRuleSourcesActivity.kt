@@ -75,7 +75,9 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             if (requestVersion != loadSourcesVersion || isFinishing || isDestroyed) return@launch
             allSources = sources.map { source ->
                 if (source.lastError?.isNotBlank() == true) {
-                    RuleRepository.updateRemoteRuleSource(applicationContext, source.copy(lastError = null))
+                    withContext(Dispatchers.IO) {
+                        RuleRepository.updateRemoteRuleSource(applicationContext, source.copy(lastError = null))
+                    }
                     source.copy(lastError = null)
                 } else source
             }
@@ -103,17 +105,25 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             return
         }
         val enabling = !source.enabled
-        RuleRepository.updateRemoteRuleSource(this, source.copy(enabled = enabling, lastError = null))
-        if (enabling) {
+        val appContext = applicationContext
+        // updateRemoteRuleSource/removeRulesForRemoteSource 会读 SP + 全量重写规则文件(可能数 MB)，放后台避免主线程卡顿
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                RuleRepository.updateRemoteRuleSource(appContext, source.copy(enabled = enabling, lastError = null))
+            }
+            if (enabling) {
+                loadSources()
+                showShortToast("规则源已启用，正在同步规则")
+                syncSources(sourceId, manual = true)
+                return@launch
+            }
+            val removedCount = withContext(Dispatchers.IO) {
+                RuleRepository.removeRulesForRemoteSource(appContext, sourceId)
+            }
             loadSources()
-            showShortToast("规则源已启用，正在同步规则")
-            syncSources(sourceId, manual = true)
-            return
+            reloadVpnIfRunning(removedCount > 0)
+            showShortToast("已停用规则源，并移除 $removedCount 条规则")
         }
-        val removedCount = RuleRepository.removeRulesForRemoteSource(this, sourceId)
-        loadSources()
-        reloadVpnIfRunning(removedCount > 0)
-        showShortToast("已停用规则源，并移除 $removedCount 条规则")
     }
 
     private fun syncSources(sourceId: String? = null, manual: Boolean = false, allowWhitelistDomains: Boolean = false) {
@@ -291,7 +301,9 @@ class RemoteRuleSourcesActivity : BaseActivity() {
                                 } else {
                                     val oldUrl = source.url.trim()
                                     val updated = source.copy(name = name, url = url, lastError = null)
-                                    RuleRepository.updateRemoteRuleSource(this@RemoteRuleSourcesActivity, updated)
+                                    withContext(Dispatchers.IO) {
+                                        RuleRepository.updateRemoteRuleSource(this@RemoteRuleSourcesActivity, updated)
+                                    }
                                     loadSources()
                                     if (!source.enabled) {
                                         showShortToast("规则源已更新，当前处于停用状态")
@@ -317,9 +329,14 @@ class RemoteRuleSourcesActivity : BaseActivity() {
             url = url,
             enabled = true
         )
-        RuleRepository.addRemoteRuleSource(this, source)
-        loadSources()
-        syncSources(source.id.trim(), manual = true, allowWhitelistDomains = true)
+        val appContext = applicationContext
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                RuleRepository.addRemoteRuleSource(appContext, source)
+            }
+            loadSources()
+            syncSources(source.id.trim(), manual = true, allowWhitelistDomains = true)
+        }
     }
 
     private fun showEditSourceDialog(source: RemoteRuleSourceConfig) {

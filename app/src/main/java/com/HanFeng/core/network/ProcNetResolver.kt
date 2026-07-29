@@ -29,6 +29,8 @@ object ProcNetResolver {
 
     private const val MAX_CACHE_SIZE = 2048
     private const val EVICTION_RATIO = 0.25
+    // 解析 /proc/net/{tcp,udp,tcp6,udp6} 每行的空白分隔符；纲领 Pattern 缓存，避免每行重编译
+    private val WS_REGEX = Regex("\\s+")
 
     private val cache = ConcurrentHashMap<String, Result>()
 
@@ -82,7 +84,7 @@ object ProcNetResolver {
     }
 
     private fun parseLine(line: String, source: String, protocol: Int): Entry? {
-        val parts = line.trim().split(Regex("\\s+"))
+        val parts = line.trim().split(WS_REGEX)
         if (parts.size < 8) return null
         val local = parts.getOrNull(1) ?: return null
         val remote = parts.getOrNull(2) ?: return null

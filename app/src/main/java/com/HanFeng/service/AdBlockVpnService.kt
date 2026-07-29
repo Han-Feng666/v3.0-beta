@@ -15,6 +15,7 @@ import android.net.NetworkRequest
 import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
+import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.Process
@@ -54,6 +55,7 @@ import com.HanFeng.core.network.TrafficDecisionEngine
 import com.HanFeng.core.network.UpstreamDnsSupport
 import com.HanFeng.core.network.MitmLearningEngine
 import com.HanFeng.core.network.SniInterceptor
+import com.HanFeng.core.network.TlsPortSet
 import com.HanFeng.core.network.ScoredBlockCache
 import com.HanFeng.core.network.ProcNetResolver
 import com.HanFeng.core.network.UserAdFeedbackManager
@@ -171,7 +173,7 @@ class AdBlockVpnService : VpnService() {
 
     private fun startDnsWorker(): Thread {
         val thread = Thread({
-            android.os.Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+            android.os.Process.setThreadPriority(Process.THREAD_PRIORITY_FOREGROUND)
             while (dnsWorkerActive && isRunning) {
                 try {
                     val task = dnsTaskIn.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -339,11 +341,12 @@ class AdBlockVpnService : VpnService() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
-                runCatching {
-                    if (FeatureSettingsRepository.isHotspotBlockEnabled(this) &&
-                        FeatureSettingsRepository.getHotspotBlockMode(this) == "dns"
-                    ) {
-                        HotspotInterceptor.refreshRules(this)
+                if (FeatureSettingsRepository.isHotspotBlockEnabled(this) &&
+                    FeatureSettingsRepository.getHotspotBlockMode(this) == "dns"
+                ) {
+                    // 放入协程跑，避免主线程同步加载几 MB 规则文件 + SuSession IO
+                    scope.launch {
+                        runCatching { HotspotInterceptor.refreshRules(this@AdBlockVpnService) }
                     }
                 }
                 scheduleVpnReload()
@@ -449,6 +452,7 @@ class AdBlockVpnService : VpnService() {
         if (httpDecryptEnabled && mitmCertificateInstalled) {
             HttpsMitmRepository.clearRuntimeState(this)
         }
+        com.HanFeng.service.FloatingBallService.startIfEnabled(this)
         packetJob = scope.launch {
             runCatching { runPacketLoop(tunGeneration) }
                 .onFailure { error ->
@@ -683,6 +687,7 @@ class AdBlockVpnService : VpnService() {
             HttpsMitmController.onVpnStarted(this@AdBlockVpnService)
             probeLocalProxyCoexistAsync()
             synchronized(dnsResponseCache) { dnsResponseCache.clear() }
+            ScoredBlockCache.clear()
             runCatching { prewarmDnsAdSinkhole() }
             LogRepository.append(this@AdBlockVpnService, "VPN seamlessly reloaded")
         }
@@ -1343,7 +1348,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private suspend fun runPacketLoop(tunGeneration: Long) {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+        Process.setThreadPriority(Process.THREAD_PRIORITY_FOREGROUND)
         dnsWorkerActive = true
         dnsTaskIn.clear()
         dnsResultOut.clear()
@@ -1520,33 +1525,40 @@ class AdBlockVpnService : VpnService() {
                 32 * 1024,
                 source = StatsRepository.BlockSource.LEARNING_CANDIDATE
             )
+            val ipStr = formatAddress(info.destinationAddress)
             logDecisionOnce(
-                key = "learning-ip-block:${formatAddress(info.destinationAddress)}:${info.destinationPort}",
-                message = "Blocked learning-feedback IP ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} score=${learnedIpHit.score} reason=${learnedIpHit.reason}",
+                key = "learning-ip-block:$ipStr:${info.destinationPort}",
                 minIntervalMillis = 5_000L
-            )
+            ) {
+                "Blocked learning-feedback IP ip=$ipStr port=${info.destinationPort} score=${learnedIpHit.score} reason=${learnedIpHit.reason}"
+            }
             return true
         }
         findMatchingIpRule(info)?.let { match ->
             StatsRepository.recordBlockedHttp(this, match.rule.vendor, match.appName, 32 * 1024)
+            val ipStr = formatAddress(info.destinationAddress)
             logDecisionOnce(
-                key = "ip-cidr-block:${match.rule.id}:${formatAddress(info.destinationAddress)}:${info.destinationPort}",
-                message = "Blocked IP-CIDR flow ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} app=${match.appName} vendor=${match.rule.vendor} cidr=${match.rule.ipCidr ?: "unknown"}",
+                key = "ip-cidr-block:${match.rule.id}:$ipStr:${info.destinationPort}",
                 minIntervalMillis = 5_000L
-            )
+            ) {
+                "Blocked IP-CIDR flow ip=$ipStr port=${info.destinationPort} app=${match.appName} vendor=${match.rule.vendor} cidr=${match.rule.ipCidr ?: "unknown"}"
+            }
             return true
         }
         findMatchingPortOnlyRule(info)?.let { match ->
             StatsRepository.recordBlockedHttp(this, match.rule.vendor, match.appName, 32 * 1024)
+            val ipStr = formatAddress(info.destinationAddress)
             logDecisionOnce(
-                key = "port-only-block:${match.rule.id}:${formatAddress(info.destinationAddress)}:${info.destinationPort}:${info.sourcePort}",
-                message = "Blocked port-only flow ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} sourcePort=${info.sourcePort} app=${match.appName} vendor=${match.rule.vendor}",
+                key = "port-only-block:${match.rule.id}:$ipStr:${info.destinationPort}:${info.sourcePort}",
                 minIntervalMillis = 5_000L
-            )
+            ) {
+                "Blocked port-only flow ip=$ipStr port=${info.destinationPort} sourcePort=${info.sourcePort} app=${match.appName} vendor=${match.rule.vendor}"
+            }
             return true
         }
         findAdIpTarget(info)?.let { target ->
             StatsRepository.recordBlockedHttp(this, target.vendor, target.appName, 32 * 1024)
+            val ipStr = formatAddress(info.destinationAddress)
             RuleRepository.reportUnknownVendorIfNeeded(
                 context = this,
                 vendor = target.vendor,
@@ -1554,13 +1566,14 @@ class AdBlockVpnService : VpnService() {
                 appName = target.appName,
                 signal = RuleRepository.SuspiciousSignal.HTTP_FLOW,
                 confidenceBoost = 2,
-                matchedPathHint = "direct-ip:${formatAddress(info.destinationAddress)}:${info.destinationPort}"
+                matchedPathHint = "direct-ip:$ipStr:${info.destinationPort}"
             )
             logDecisionOnce(
-                key = "ad-ip-block:${target.domain}:${formatAddress(info.destinationAddress)}:${info.destinationPort}",
-                message = "Blocked ad IP flow ip=${formatAddress(info.destinationAddress)} port=${info.destinationPort} domain=${target.domain} app=${target.appName} vendor=${target.vendor} source=${target.source}",
+                key = "ad-ip-block:${target.domain}:$ipStr:${info.destinationPort}",
                 minIntervalMillis = 5_000L
-            )
+            ) {
+                "Blocked ad IP flow ip=$ipStr port=${info.destinationPort} domain=${target.domain} app=${target.appName} vendor=${target.vendor} source=${target.source}"
+            }
             return true
         }
         return false
@@ -1574,11 +1587,13 @@ class AdBlockVpnService : VpnService() {
         if (!(isUdp && info.destinationPort == 53)) return false
         VpnHealthChecker.onDnsQuery(this)
         if (!shouldHandleDns(info.destinationAddress)) {
+            val ipStr = formatAddress(info.destinationAddress)
             logDecisionOnce(
-                key = "dns-non-local-endpoint:${formatAddress(info.destinationAddress)}",
-                message = "Observed DNS query to non-local endpoint ip=${formatAddress(info.destinationAddress)}, fallback to local DNS handler",
+                key = "dns-non-local-endpoint:$ipStr",
                 minIntervalMillis = 5_000L
-            )
+            ) {
+                "Observed DNS query to non-local endpoint ip=$ipStr, fallback to local DNS handler"
+            }
         }
         val question = DnsMessageParser.parseQuestion(info.payload) ?: return true
         if (lightweightPassThroughMode) {
@@ -1600,10 +1615,12 @@ class AdBlockVpnService : VpnService() {
             return true
         }
         // Slow path: 缓存未命中 → 派发到异步 Worker，主线程继续处理后续包
+        // 复用同一个 ByteArray 实例，避免 info.copy(payload=...) + 顶层 payload.copyOf() 双重分配
+        val payloadCopy = info.payload.copyOf()
         dnsTaskIn.offer(DnsAsyncTask(
             generation = activeTunGeneration,
-            payload = info.payload.copyOf(),
-            info = info.copy(payload = info.payload.copyOf()),
+            payload = payloadCopy,
+            info = info.copy(payload = payloadCopy),
             question = question
         ))
         return true
@@ -1664,7 +1681,7 @@ class AdBlockVpnService : VpnService() {
         val rewriteResponse = DnsMessageParser.buildRewriteResponse(info.payload, question, rewriteIp)
         if (rewriteResponse != null) {
             output.write(PacketCodec.buildUdpResponse(info, rewriteResponse))
-            StatsRepository.recordBlockedDns(this, vendor, appName, 512, source = StatsRepository.BlockSource.DNS_RULE)
+            StatsRepository.recordBlockedAuto(this, vendor, appName, question.domain, 512, StatsRepository.BlockSource.DNS_RULE, StatsRepository.ProtocolHint.DNS)
             logDecisionOnce(
                 key = "dns-rewrite:${question.domain}:${question.qType}:${appName}",
                 message = "DNS rewrite domain=${question.domain} -> $rewriteTarget ($rewriteIp) qType=${question.qType} app=$appName vendor=$vendor",
@@ -1672,7 +1689,7 @@ class AdBlockVpnService : VpnService() {
             )
         } else {
             output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
-            StatsRepository.recordBlockedDns(this, vendor, appName, 512, source = StatsRepository.BlockSource.DNS_RULE)
+            StatsRepository.recordBlockedAuto(this, vendor, appName, question.domain, 512, StatsRepository.BlockSource.DNS_RULE, StatsRepository.ProtocolHint.DNS)
         }
     }
 
@@ -1792,31 +1809,16 @@ class AdBlockVpnService : VpnService() {
     private fun looksLikeAdFreeRewardDomain(domain: String): Boolean {
         val lower = domain.trim().lowercase()
         if (lower.isBlank()) return false
-        val hasRewardToken = adFreeRewardDomainTokens.any { lower.contains(it) }
-        if (hasRewardToken) return true
-        val vendorMatch = adFreeRewardVendorTokens.any { lower.contains(it) }
-        if (!vendorMatch) return false
-        val rewardKeywords = listOf(
-            "reward", "verify", "callback", "unlock", "confirm",
-            "complete", "completed", "finish", "finished", "grant", "claim",
-            "incentive", "inspire", "earned", "bonus",
-            "coin", "cash", "point", "score", "diamond", "gold",
-            "gift", "prize", "lottery", "spin", "wheel",
-            "daily", "checkin", "login", "share", "invite",
-            "referral", "level", "achievement", "milestone", "combo",
-            "s2s", "postback", "server_to_server", "verified",
-            "task", "survey", "offer", "install", "click",
-            "conversion", "attribution", "milestone",
-            "chest", "box", "pack", "loot", "card",
-            "ticket", "key", "token", "badge",
-            "energy", "stamina", "lives", "hearts", "hp",
-            "exp", "experience", "xp",
-            "redpacket", "hongbao", "angpao", "lucky",
-            "draw", "scratch", "raffle",
-            "sign", "mission", "quest", "challenge", "event"
-        )
-        val hitCount = rewardKeywords.count { lower.contains(it) }
-        return hitCount >= 2
+        if (adFreeRewardDomainTokens.any { lower.contains(it) }) return true
+        if (!adFreeRewardVendorTokens.any { lower.contains(it) }) return false
+        // early-exit 取代 count() >= 2，避免遍历完整个表
+        var hits = 0
+        for (kw in AD_FREE_REWARD_KEYWORDS) {
+            if (lower.contains(kw)) {
+                if (++hits >= 2) return true
+            }
+        }
+        return false
     }
 
     private fun resolveAdFreeRewardProtection(
@@ -1881,7 +1883,7 @@ class AdBlockVpnService : VpnService() {
                 return
             }
             output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
-            StatsRepository.recordBlockedDns(this, vendor, appName, 512, source = StatsRepository.BlockSource.DNS_RULE)
+            StatsRepository.recordBlockedAuto(this, vendor, appName, question.domain, 512, StatsRepository.BlockSource.DNS_RULE, StatsRepository.ProtocolHint.DNS)
             logDecisionOnce(
                 key = "dns-block:${question.domain}:${question.qType}:${appName}",
                 message = "Blocked DNS domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
@@ -1892,7 +1894,7 @@ class AdBlockVpnService : VpnService() {
 
         if (!protectedQuestion && !adFreeRewardProtection && shouldTreatAsGeneralAdTraffic(question.domain, vendor, appName)) {
             output.write(PacketCodec.buildUdpResponse(info, DnsMessageParser.buildSinkholeResponse(info.payload, question) ?: return))
-            StatsRepository.recordBlockedDns(this, vendor, appName, 512, source = StatsRepository.BlockSource.URL_HEURISTIC)
+            StatsRepository.recordBlockedAuto(this, vendor, appName, question.domain, 512, StatsRepository.BlockSource.URL_HEURISTIC, StatsRepository.ProtocolHint.DNS)
             logDecisionOnce(
                 key = "dns-heuristic-block:${question.domain}:${question.qType}:${appName}",
                 message = "Blocked DNS by ad heuristic domain=${question.domain} qType=${question.qType} app=$appName vendor=$vendor reason=${domainContext.reason}",
@@ -2356,14 +2358,14 @@ class AdBlockVpnService : VpnService() {
             observeHttpsTransparentProxyFlow(info)
             return handleHttpsProxyHandshake(info, output)
         }
-        return isUdp && info.destinationPort == 443 && shouldBlockQuicFlow(info)
+        return isUdp && TlsPortSet.isQuicUdpPort(info.destinationPort) && shouldBlockQuicFlow(info)
     }
 
     private fun shouldBlockBySniWithoutMitm(
         info: com.HanFeng.model.PacketInfo,
         output: FileOutputStream
     ): Boolean {
-        if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return false
+        if (info.protocol != OsConstants.IPPROTO_TCP || !TlsPortSet.isTlsTcpPort(info.destinationPort)) return false
         return shouldBlockBySni(info, output)
     }
 
@@ -2371,7 +2373,7 @@ class AdBlockVpnService : VpnService() {
         info: com.HanFeng.model.PacketInfo,
         output: FileOutputStream
     ): Boolean {
-        if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return false
+        if (info.protocol != OsConstants.IPPROTO_TCP || !TlsPortSet.isTlsTcpPort(info.destinationPort)) return false
         val payload = info.payload
         if (payload.isEmpty()) return false
         // 只在有 SYN 或带 payload 的包中尝试解析 ClientHello
@@ -2394,7 +2396,7 @@ class AdBlockVpnService : VpnService() {
 
         // 发 TCP RST 让连接快速失败，App 不会持续重试
         writeTcpRst(info)
-        StatsRepository.recordBlockedDns(this, decision.vendor, appName, 0, source = StatsRepository.BlockSource.SNI_BLOCK)
+        StatsRepository.recordBlockedAuto(this, decision.vendor, appName, sniHost, 0, StatsRepository.BlockSource.SNI_BLOCK, StatsRepository.ProtocolHint.DNS)
         logDecisionOnce(
             key = "sni-block:$sniHost:$destinationIp",
             message = "Blocked by SNI domain=$sniHost app=$appName vendor=${decision.vendor} reason=${decision.reason} ip=$destinationIp",
@@ -2436,23 +2438,22 @@ class AdBlockVpnService : VpnService() {
         val payload = info.payload
         val payloadLooksLikeQuic = looksLikeQuicPacket(payload)
 
-        // MITM 模式启用时才拦截 QUIC
-        if (!httpDecryptEnabled) return false
-
-        val cacheKeys = buildCacheKeys(info)
-        val localProxyTarget = belongsToLocalProxyTargetUid(cacheKeys)
+        // 加密 DNS 守卫：即使未开 MITM 也应阻断，否则 App 走 DoH/DoQ 隐藏广告解析路径
+        if (forceEncryptedDnsFallbackEnabled) {
+            val destinationIpEarly = formatAddress(info.destinationAddress)
+            if (EncryptedDnsBlocker.matchesKnownEncryptedDnsIp(destinationIpEarly)) {
+                StatsRepository.recordBlockedHttp(this, "加密DNS", "QUIC-DNS", 8 * 1024, source = StatsRepository.BlockSource.QUIC_BLOCK)
+                logDecisionOnce(
+                    key = "quic-encrypted-dns-ip-block:$destinationIpEarly:${info.sourcePort}",
+                    message = "Blocked QUIC/HTTP3 flow to known encrypted DNS IP ip=$destinationIpEarly sourcePort=${info.sourcePort} via=quic-encrypted-dns-guard",
+                    minIntervalMillis = 5_000L
+                )
+                return true
+            }
+        }
 
         val destinationIp = formatAddress(info.destinationAddress)
-        if (forceEncryptedDnsFallbackEnabled && EncryptedDnsBlocker.matchesKnownEncryptedDnsIp(destinationIp)) {
-            StatsRepository.recordBlockedHttp(this, "加密DNS", "QUIC-DNS", 8 * 1024, source = StatsRepository.BlockSource.QUIC_BLOCK)
-            logDecisionOnce(
-                key = "quic-encrypted-dns-ip-block:$destinationIp:${info.sourcePort}",
-                message = "Blocked QUIC/HTTP3 flow to known encrypted DNS IP ip=$destinationIp sourcePort=${info.sourcePort} via=quic-encrypted-dns-guard",
-                minIntervalMillis = 5_000L
-            )
-            return true
-        }
-        maybePruneRouteCaches()
+        // 即使未开 MITM 也应识别 QUIC SNI 段以判定广告域名 / ECH：QUIC Initial 包 SNI 段可不解密拿到
         if (payloadLooksLikeQuic) {
             val quicSni = QuicSniParser.extractQuicSni(payload)
             if (quicSni != null) {
@@ -2466,7 +2467,7 @@ class AdBlockVpnService : VpnService() {
                     return true
                 }
                 val quicSniHost = quicSni.sniHost
-                if (quicSniHost != null && quicSniHost.isNotBlank()) {
+                if (!quicSniHost.isNullOrBlank()) {
                     val routeEntry = synchronized(quicRouteCache) { quicRouteCache[destinationIp] }
                     if (routeEntry?.domain.isNullOrBlank()) {
                         val newRoute = QuicRouteTarget(
@@ -2480,15 +2481,55 @@ class AdBlockVpnService : VpnService() {
                             ExpiringTargetCacheSupport.putAllPrunedLocked(quicRouteCache, listOf(destinationIp to newRoute), 1024)
                         }
                     }
+                    // 未开 MITM 时直接走 SNI 识别 + 规则判定：QUIC 丢包后 App 会回退 TCP，TCP SNI 拦截再处理一次
+                    if (!httpDecryptEnabled) {
+                        val appName = resolveAppName(quicSniHost, info)
+                        val decision = SniInterceptor.evaluate(
+                            context = this,
+                            sniHost = quicSniHost,
+                            appName = appName,
+                            isProtectedDomain = isProtectedTrafficDomain(quicSniHost)
+                        )
+                        if (decision.shouldBlock) {
+                            StatsRepository.recordBlockedAuto(this, decision.vendor.ifBlank { GENERIC_AD_VENDOR_LABEL }, appName, quicSniHost, 0, StatsRepository.BlockSource.SNI_BLOCK, StatsRepository.ProtocolHint.DNS)
+                            logDecisionOnce(
+                                key = "quic-sni-block:$quicSniHost:$destinationIp",
+                                message = "Blocked by SNI domain=$quicSniHost app=$appName vendor=${decision.vendor} reason=${decision.reason} ip=$destinationIp via=quic-sni-without-mitm",
+                                minIntervalMillis = 5_000L
+                            )
+                            UserAdFeedbackManager.recordNetworkActivity(
+                                this,
+                                UserAdFeedbackManager.NetworkActivity(
+                                    appName = appName,
+                                    host = quicSniHost,
+                                    sni = quicSniHost,
+                                    ip = destinationIp,
+                                    protocol = "QUIC",
+                                    source = "quic_sni_block",
+                                    score = 10
+                                )
+                            )
+                            return true
+                        }
+                    }
                 }
             }
         }
 
-        val route = synchronized(quicRouteCache) {
-            quicRouteCache[destinationIp]
-        }
-        val httpsTarget = synchronized(httpsDecryptIpCache) {
-            httpsDecryptIpCache[destinationIp]
+        // 未开 MITM 模式时，剩余分支（local-proxy / global-mitm / domain-aware HTTPS 路由）都依赖 MITM 路由，跳过
+        if (!httpDecryptEnabled) return false
+
+        val cacheKeys = buildCacheKeys(info)
+        val localProxyTarget = belongsToLocalProxyTargetUid(cacheKeys)
+        maybePruneRouteCaches()
+        if (forceEncryptedDnsFallbackEnabled && EncryptedDnsBlocker.matchesKnownEncryptedDnsIp(destinationIp)) {
+            StatsRepository.recordBlockedHttp(this, "加密DNS", "QUIC-DNS", 8 * 1024, source = StatsRepository.BlockSource.QUIC_BLOCK)
+            logDecisionOnce(
+                key = "quic-encrypted-dns-ip-block:$destinationIp:${info.sourcePort}",
+                message = "Blocked QUIC/HTTP3 flow to known encrypted DNS IP ip=$destinationIp sourcePort=${info.sourcePort} via=quic-encrypted-dns-guard",
+                minIntervalMillis = 5_000L
+            )
+            return true
         }
         if (localProxyTarget) {
             UserAdFeedbackManager.recordNetworkActivity(
@@ -2507,6 +2548,12 @@ class AdBlockVpnService : VpnService() {
                 minIntervalMillis = 15_000L
             )
             return true
+        }
+        val route = synchronized(quicRouteCache) {
+            quicRouteCache[destinationIp]
+        }
+        val httpsTarget = synchronized(httpsDecryptIpCache) {
+            httpsDecryptIpCache[destinationIp]
         }
         val domain = httpsTarget?.domain ?: route?.domain
         if (domain == null && TrafficDecisionEngine.isInQuicBlockedCidr(destinationIp)) {
@@ -2722,7 +2769,15 @@ class AdBlockVpnService : VpnService() {
             targetPort = info.destinationPort,
             lastSeenAt = System.currentTimeMillis()
         )
-        FlowCacheSupport.putPruned(passthroughUdpSessionCache, flowKey, session, 256)
+        FlowCacheSupport.putPruned(
+            cache = passthroughUdpSessionCache,
+            key = flowKey,
+            value = session,
+            maxSize = VpnConstants.PASSTHROUGH_UDP_SESSION_CACHE_MAX_SIZE
+        ) { evicted ->
+            // LRU 驱逐时关闭 socket，避免 fd 泄漏导致长时间运行后崩进程
+            runCatching { evicted.socket.close() }
+        }
         scope.launch { runPassthroughUdpReader(session) }
         return session
     }
@@ -2774,7 +2829,7 @@ class AdBlockVpnService : VpnService() {
         if ((destinationIp == localProxyCoexistConfig.host || destinationIp == "127.0.0.1" || destinationIp == "::1") && info.destinationPort == localProxyCoexistConfig.port) {
             return
         }
-        val flavor = if (info.destinationPort == 443 && looksLikeQuicPacket(info.payload)) {
+        val flavor = if (TlsPortSet.isQuicUdpPort(info.destinationPort) && looksLikeQuicPacket(info.payload)) {
             "quic"
         } else {
             "plain-udp"
@@ -3012,7 +3067,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun observeHttpsClientHello(info: com.HanFeng.model.PacketInfo) {
-        if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return
+        if (info.protocol != OsConstants.IPPROTO_TCP || !TlsPortSet.isTlsTcpPort(info.destinationPort)) return
         if (info.payload.isEmpty()) return
         val destinationIp = formatAddress(info.destinationAddress)
         if (isLocalLoopOrProxyEndpoint(destinationIp, info.destinationPort)) {
@@ -3211,7 +3266,7 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun observeHttpsTransparentProxyFlow(info: com.HanFeng.model.PacketInfo) {
-        if (info.protocol != OsConstants.IPPROTO_TCP || info.destinationPort != 443) return
+        if (info.protocol != OsConstants.IPPROTO_TCP || !TlsPortSet.isTlsTcpPort(info.destinationPort)) return
         val flowKey = buildCacheKeys(info).flowKey
         val ip = formatAddress(info.destinationAddress)
         if (shouldSkipHttpsTransparentProxyTracking(flowKey, ip, info.destinationPort)) return
@@ -3380,7 +3435,9 @@ class AdBlockVpnService : VpnService() {
                 request = request,
                 stage = "connect",
                 target = "${flow.targetIp}:${flow.targetPort}"
-            )
+            ),
+            maxSize = VpnConstants.LOCAL_PROXY_BRIDGE_SOCKET_CACHE_MAX_SIZE,
+            closeSession = { it.close() }
         )
     }
 
@@ -3457,7 +3514,9 @@ class AdBlockVpnService : VpnService() {
                 request = request,
                 stage = "connect",
                 target = "${flow.targetIp}:${flow.targetPort}"
-            )
+            ),
+            maxSize = VpnConstants.PASSTHROUGH_TCP_SOCKET_CACHE_MAX_SIZE,
+            closeSession = { it.close() }
         )
     }
 
@@ -3592,9 +3651,7 @@ class AdBlockVpnService : VpnService() {
         validateCurrent: T.() -> Boolean = { true },
         buildHandlers: (SyntheticPacketState, T) -> SyntheticHandshakeHandlers
     ): Boolean {
-        val current = synchronized(flowCache) {
-            flowCache[flowKey]
-        } ?: return false
+        val current = flowCache[flowKey] ?: return false
         return executeSyntheticHandshake(
             info = info,
             destinationPort = destinationPort,
@@ -3659,7 +3716,9 @@ class AdBlockVpnService : VpnService() {
                 flowKey = flowKey,
                 request = request,
                 stage = "connect"
-            )
+            ),
+            maxSize = VpnConstants.HTTPS_BRIDGE_SOCKET_CACHE_MAX_SIZE,
+            closeSession = { it.close() }
         )
     }
 
@@ -4606,9 +4665,7 @@ class AdBlockVpnService : VpnService() {
         serverInitialSequenceOf: (TFlow) -> Long?,
         updateFlow: (TFlow, Long, Long) -> TFlow
     ) {
-        val current = synchronized(flowCache) {
-            flowCache[flowKey]
-        } ?: return
+        val current = flowCache[flowKey] ?: return
         val serverSeq = serverInitialSequenceOf(current) ?: synthesizeServerSequence(flowKey)
         FlowCacheSupport.putPruned(flowCache, flowKey, updateFlow(current, serverSeq, now), 512)
         writeTunPacket(
@@ -4647,9 +4704,7 @@ class AdBlockVpnService : VpnService() {
         updateFlow: (TFlow, BridgeLifecycleSupport.ClientFinTransition) -> TFlow,
         closeSession: (TSession) -> Unit
     ) {
-        val current = synchronized(flowCache) {
-            flowCache[flowKey]
-        } ?: return
+        val current = flowCache[flowKey] ?: return
         val transition = BridgeLifecycleSupport.resolveClientFinTransition(
             serverInitialSequence = serverInitialSequenceOf(current),
             serverNextSequence = serverNextSequenceOf(current),
@@ -5333,7 +5388,9 @@ class AdBlockVpnService : VpnService() {
         connectBridge: (String, Int) -> TConnected,
         createSession: (TConnected) -> TSession,
         onConnected: (TSession, TConnected) -> Unit,
-        onFailure: (Throwable) -> Unit
+        onFailure: (Throwable) -> Unit,
+        maxSize: Int = Int.MAX_VALUE,
+        closeSession: (TSession) -> Unit = {}
     ) {
         synchronized(sessionCache) {
             if (sessionCache.containsKey(flowKey)) return
@@ -5344,7 +5401,13 @@ class AdBlockVpnService : VpnService() {
             runCatching {
                 val connected = connectBridge(host, port)
                 val session = createSession(connected)
-                BridgeLifecycleSupport.registerConnectedSession(sessionCache, flowKey, session)
+                BridgeLifecycleSupport.registerConnectedSession(
+                    cache = sessionCache,
+                    flowKey = flowKey,
+                    session = session,
+                    maxSize = maxSize,
+                    onEvict = { evicted -> runCatching { closeSession(evicted) } }
+                )
                 onConnected(session, connected)
             }.onFailure(onFailure)
         }
@@ -7304,9 +7367,7 @@ class AdBlockVpnService : VpnService() {
         clientInitialSequenceOf: (TFlow) -> Long?,
         clientNextSequenceOf: (TFlow) -> Long?
     ): BridgeFlowSequenceContext<TFlow>? {
-        val flow = synchronized(flowCache) {
-            flowCache[flowKey]
-        } ?: return null
+        val flow = flowCache[flowKey] ?: return null
         return BridgeFlowSequenceContext(
             flow = flow,
             sequenceState = resolveBridgeSequenceState(
@@ -7323,9 +7384,8 @@ class AdBlockVpnService : VpnService() {
         flowCache: MutableMap<String, TFlow>,
         flowKey: String
     ): TFlow? {
-        return synchronized(flowCache) {
-            flowCache[flowKey]
-        }
+        // Collections.synchronizedMap 内部已经对每个 get/put 加锁；外层再加 synchronized 是冗余双锁
+        return flowCache[flowKey]
     }
 
     private fun closeBridgeSession(session: Any) {
@@ -8775,12 +8835,9 @@ class AdBlockVpnService : VpnService() {
 
     private fun looksLikeObfuscatedDomain(domain: String): Boolean {
         if (domain.length < 10) return false
-        val consonantClusters = Regex("[bcdfghjklmnpqrstvwxyz]{4,}")
-        if (consonantClusters.find(domain) != null) return true
-        val digitClusters = Regex("[0-9]{5,}")
-        if (digitClusters.find(domain) != null) return true
-        val alternatingPattern = Regex("([a-z][0-9]){4,}")
-        if (alternatingPattern.find(domain) != null) return true
+        if (OBFUS_CONSONANT_PATTERN.find(domain) != null) return true
+        if (OBFUS_DIGIT_PATTERN.find(domain) != null) return true
+        if (OBFUS_ALTERNATING_PATTERN.find(domain) != null) return true
         return false
     }
 
@@ -9018,7 +9075,11 @@ class AdBlockVpnService : VpnService() {
         return out.toByteArray()
     }
 
-    private fun logDecisionOnce(key: String, message: String, minIntervalMillis: Long) {
+    private inline fun logDecisionOnce(
+        key: String,
+        minIntervalMillis: Long,
+        message: () -> String
+    ) {
         val now = System.currentTimeMillis()
         val shouldLog = synchronized(decisionLogCache) {
             DecisionLogSupport.shouldLogLocked(
@@ -9029,7 +9090,12 @@ class AdBlockVpnService : VpnService() {
             )
         }
         if (!shouldLog) return
-        LogRepository.append(this, message)
+        LogRepository.append(this, message())
+    }
+
+    /** 保留 String 重载用于已有调用点 */
+    private fun logDecisionOnce(key: String, message: String, minIntervalMillis: Long) {
+        logDecisionOnce(key = key, minIntervalMillis = minIntervalMillis) { message }
     }
 
     private fun looksLikeAdIpTargetForQuicBlock(domain: String, appName: String, vendor: String): Boolean {
@@ -9460,7 +9526,7 @@ class AdBlockVpnService : VpnService() {
             cacheAppName(cacheKeys, normalizedDomain, it)
             return it
         }
-        if (info.protocol == OsConstants.IPPROTO_UDP && info.destinationPort != 53 && info.destinationPort != 443) {
+        if (info.protocol == OsConstants.IPPROTO_UDP && info.destinationPort != 53 && !TlsPortSet.isQuicUdpPort(info.destinationPort)) {
             return readCachedPortAppName(cacheKeys) ?: "未知应用"
         }
         val resolved = resolveAppNameByUid(info, cacheKeys)
@@ -9888,7 +9954,8 @@ class AdBlockVpnService : VpnService() {
             setOnClickPendingIntent(R.id.notificationRoot, contentPendingIntent)
             setOnClickPendingIntent(R.id.btnNotificationToggle, togglePendingIntent)
         }
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_warning)
             .setContentTitle(notificationStatusText())
             .setContentText(notificationModeText())
@@ -9898,7 +9965,8 @@ class AdBlockVpnService : VpnService() {
             .setCustomContentView(customView)
             .setCustomBigContentView(customView)
             .addAction(android.R.drawable.ic_menu_report_image, "此页面有广告", reportAdPendingIntent)
-            .build()
+
+        return builder.build()
     }
 
     private fun showPendingForegroundNotification() {
@@ -10212,6 +10280,7 @@ class AdBlockVpnService : VpnService() {
         const val ACTION_START = "com.HanFeng.START"
         const val ACTION_STOP = "com.HanFeng.STOP"
         const val ACTION_RELOAD = "com.HanFeng.RELOAD"
+        const val ACTION_TOGGLE_BLOCK = "com.HanFeng.TOGGLE_BLOCK"
         const val ACTION_REPORT_AD = "com.HanFeng.REPORT_AD"
         const val ACTION_STATUS_CHANGED = "com.HanFeng.STATUS_CHANGED"
         const val EXTRA_USER_INITIATED = "extra_user_initiated"
@@ -10221,6 +10290,30 @@ class AdBlockVpnService : VpnService() {
         private const val PENDING_GLOBAL_MITM_DOMAIN = "pending.global-mitm.local"
         private const val REACQUIRE_ATTEMPT_COUNT = 48
         private const val LOCAL_PROXY_CONNECT_TIMEOUT_MILLIS = 1200
+        // 热路径内重复编译的 Pattern 提为常量，避免每次 DNS 解析重新构造
+        private val OBFUS_CONSONANT_PATTERN = Regex("[bcdfghjklmnpqrstvwxyz]{4,}")
+        private val OBFUS_DIGIT_PATTERN = Regex("[0-9]{5,}")
+        private val OBFUS_ALTERNATING_PATTERN = Regex("([a-z][0-9]){4,}")
+        // 免广告奖励域名关键词条目（_once_ allocate 而非每次调 listOf）
+        private val AD_FREE_REWARD_KEYWORDS = arrayOf(
+            "reward", "verify", "callback", "unlock", "confirm",
+            "complete", "completed", "finish", "finished", "grant", "claim",
+            "incentive", "inspire", "earned", "bonus",
+            "coin", "cash", "point", "score", "diamond", "gold",
+            "gift", "prize", "lottery", "spin", "wheel",
+            "daily", "checkin", "login", "share", "invite",
+            "referral", "level", "achievement", "milestone", "combo",
+            "s2s", "postback", "server_to_server", "verified",
+            "task", "survey", "offer", "install", "click",
+            "conversion", "attribution",
+            "chest", "box", "pack", "loot", "card",
+            "ticket", "key", "token", "badge",
+            "energy", "stamina", "lives", "hearts", "hp",
+            "exp", "experience", "xp",
+            "redpacket", "hongbao", "angpao", "lucky",
+            "draw", "scratch", "raffle",
+            "sign", "mission", "quest", "challenge", "event"
+        )
         private const val TCP_FLAG_FIN = 0x01
         private const val TCP_FLAG_SYN = 0x02
         private const val TCP_FLAG_RST = 0x04

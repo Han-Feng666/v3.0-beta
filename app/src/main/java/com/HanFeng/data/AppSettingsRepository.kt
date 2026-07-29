@@ -9,6 +9,9 @@ object AppSettingsRepository {
     private const val KEY_HIDE_BACKGROUND_CONFIGURED = "hide_background_configured"
     private const val KEY_SHIZUKU_STRICT_APP_AD_BLOCK = "shizuku_strict_app_ad_block"
 
+    // 内存缓存：BaseActivity.onCreate/onResume 每次都 read 3 个 SP key，加 @Volatile 内存布尔避免每次走 binder
+    @Volatile private var cachedHideBackground: Boolean? = null
+
     fun isShizukuEnabled(context: Context): Boolean {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_USE_SHIZUKU, false)
@@ -22,12 +25,11 @@ object AppSettingsRepository {
     }
 
     fun isHideBackgroundEnabled(context: Context): Boolean {
+        cachedHideBackground?.let { return it }
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val configured = prefs.getBoolean(KEY_HIDE_BACKGROUND_CONFIGURED, false)
-        if (!configured) {
-            return false
-        }
-        val enabled = prefs.getBoolean(KEY_HIDE_BACKGROUND, false)
+        val enabled = if (!configured) false else prefs.getBoolean(KEY_HIDE_BACKGROUND, false)
+        cachedHideBackground = enabled
         return enabled
     }
 
@@ -38,6 +40,7 @@ object AppSettingsRepository {
             .putBoolean(KEY_HIDE_BACKGROUND_CONFIGURED, true)
             .putBoolean(KEY_HIDE_BACKGROUND, enabled)
             .apply()
+        cachedHideBackground = enabled
     }
 
     fun resetHideBackground(context: Context) {

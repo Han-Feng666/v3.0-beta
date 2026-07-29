@@ -78,7 +78,11 @@ class RuleListAdapter(
 
     inner class DomainHolder(private val binding: ItemRuleDomainBinding) : RecyclerView.ViewHolder(binding.root) {
         fun bind(item: RuleListItem.Domain) {
-            binding.domainText.text = item.rule.domain
+            // 关键修复: 当 rule.domain == "*" 或不含 "." 时 (来自历史误导入的 ||*^、*:443$network 等),
+            // 直接显示 "*" 用户会困惑 ("只剩一个 * 号, 也找不到原规则")。
+            // 改为拼接 destinationPorts / keywordPattern / regexPattern / ipCidr / pathPattern 等修饰信息,
+            // 让用户能看到完整的原始规则语义, 便于识别和处理。
+            binding.domainText.text = RuleListFormat.formatRuleDisplayText(item.rule)
             binding.sourceTag.text = item.rule.source.label
             binding.sourceTag.visibility = android.view.View.VISIBLE
             binding.domainText.setTextColor(ContextCompat.getColor(binding.root.context, R.color.hf_text_primary))
@@ -123,3 +127,59 @@ class RuleListAdapter(
         }
     }
 }
+
+/**
+ * 统一格式化 BlockRule 作为列表条目的显示文本。
+ *
+ * 关键背景: 用户反馈"导入规则后列表里只剩一个星号, 也搜不到原规则" —
+ * 历史遗留的星号端口规则、双竖线星号通配、纯 modifier 等规则入库后 domain 字段是 "*",
+ * 单纯显示星号用户完全无法识别原始意图。这里把所有可识别的修饰信息拼接出来,
+ * 例如端口、关键字、正则、IP CIDR、路径修饰等都附加展示。
+ *
+ * 普通域名规则无修饰时, 直接返回 domain, 行为不变。
+ */
+object RuleListFormat {
+    fun formatRuleDisplayText(rule: com.HanFeng.model.BlockRule): String {
+        if (!rule.rawText.isNullOrBlank()) return rule.rawText
+        val domain = rule.domain
+        val hasModifier = rule.destinationPorts.isNotEmpty() ||
+            rule.destinationPortRanges.isNotEmpty() ||
+            rule.sourcePorts.isNotEmpty() ||
+            rule.sourcePortRanges.isNotEmpty() ||
+            rule.keywordPattern != null ||
+            rule.regexPattern != null ||
+            rule.ipCidr != null ||
+            rule.pathPattern != null ||
+            rule.thirdParty || rule.firstParty || rule.important ||
+            rule.exceptionRule ||
+            rule.appPackages.isNotEmpty() || rule.dnsTypes != null ||
+            rule.network
+        if (!hasModifier) return domain
+
+        val sb = StringBuilder()
+        sb.append(domain)
+        if (rule.destinationPorts.isNotEmpty()) {
+            sb.append(":").append(rule.destinationPorts.sorted().joinToString(","))
+        }
+        if (rule.destinationPortRanges.isNotEmpty()) {
+            sb.append(" dst[").append(rule.destinationPortRanges.joinToString(",") { "${it.first}-${it.last}" }).append("]")
+        }
+        if (rule.sourcePorts.isNotEmpty()) {
+            sb.append(" src:").append(rule.sourcePorts.sorted().joinToString(","))
+        }
+        if (rule.sourcePortRanges.isNotEmpty()) {
+            sb.append(" src[").append(rule.sourcePortRanges.joinToString(",") { "${it.first}-${it.last}" }).append("]")
+        }
+        if (rule.keywordPattern != null) sb.append(" keyword=").append(rule.keywordPattern)
+        if (rule.regexPattern != null) sb.append(" regex=").append(rule.regexPattern)
+        if (rule.ipCidr != null) sb.append(" ip-cidr=").append(rule.ipCidr)
+        if (rule.pathPattern != null) sb.append(" path=").append(rule.pathPattern)
+        if (rule.appPackages.isNotEmpty()) sb.append(" apps=").append(rule.appPackages.joinToString(","))
+        if (rule.important) sb.append(" §important")
+        if (rule.exceptionRule) sb.append(" §exception")
+        if (rule.network) sb.append(" §network")
+        if (rule.thirdParty) sb.append(" §3p")
+        return sb.toString()
+    }
+}
+

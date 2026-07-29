@@ -30,6 +30,12 @@ object QuicSniParser {
     }
     private var keyCacheExpiresAt = 0L
 
+    // JCE Cipher / Mac 实例化开销大（provider lookup + native init），每包新建是 QUIC hot path 的最大开销。
+    // ThreadLocal 缓存实例 + 每次 init 重置 key/iv，与官方推荐做法一致（Cipher/Mac 是线程不安全，需 ThreadLocal）。
+    private val macSha256Local = ThreadLocal.withInitial { Mac.getInstance("HmacSHA256") }
+    private val cipherAesGcmLocal = ThreadLocal.withInitial { Cipher.getInstance("AES/GCM/NoPadding") }
+    private val cipherAesEcbLocal = ThreadLocal.withInitial { Cipher.getInstance("AES/ECB/NoPadding") }
+
     fun extractSniHost(quicPacket: ByteArray): String? {
         return extractQuicSni(quicPacket)?.sniHost
     }
@@ -153,7 +159,7 @@ object QuicSniParser {
     }
 
     private fun hkdfExtract(salt: ByteArray, ikm: ByteArray): ByteArray {
-        val mac = Mac.getInstance("HmacSHA256")
+        val mac = macSha256Local.get()
         mac.init(SecretKeySpec(salt, "HmacSHA256"))
         return mac.doFinal(ikm)
     }
@@ -193,7 +199,7 @@ object QuicSniParser {
     }
 
     private fun hkdfExpand(prk: ByteArray, info: ByteArray, length: Int): ByteArray {
-        val mac = Mac.getInstance("HmacSHA256")
+        val mac = macSha256Local.get()
         mac.init(SecretKeySpec(prk, "HmacSHA256"))
         val hashLen = 32 // SHA-256
 
@@ -256,20 +262,20 @@ object QuicSniParser {
 
         // AES-GCM decrypt with associated data (the header up to payload start)
         val aad = rawPacket.copyOfRange(0, pktNumOffset + unmaskedPktNumLen)
-        try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        return try {
+            val cipher = cipherAesGcmLocal.get()
             val spec = GCMParameterSpec(128, fullIv)
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.key, "AES"), spec)
             cipher.updateAAD(aad)
-            return cipher.doFinal(ciphertext)
+            cipher.doFinal(ciphertext)
         } catch (_: Exception) {
-            return null
+            null
         }
     }
 
     private fun aesEcbEncrypt(key: ByteArray, input: ByteArray): ByteArray? {
         return try {
-            val cipher = Cipher.getInstance("AES/ECB/NoPadding")
+            val cipher = cipherAesEcbLocal.get()
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
             val padded = if (input.size % 16 == 0) input else {
                 val p = ByteArray((input.size / 16 + 1) * 16)

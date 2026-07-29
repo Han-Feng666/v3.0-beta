@@ -7,6 +7,7 @@ data class BlockRule(
     val domain: String,
     val vendor: String,
     val source: RuleSource,
+    val rawText: String? = null,
     val dnsTypes: Set<Int>? = null,
     val excludedDnsTypes: Set<Int>? = null,
     val thirdParty: Boolean = false,
@@ -21,6 +22,8 @@ data class BlockRule(
     val appPackages: Set<String> = emptySet(),
     val destinationPorts: Set<Int> = emptySet(),
     val sourcePorts: Set<Int> = emptySet(),
+    val destinationPortRanges: Set<IntRange> = emptySet(),
+    val sourcePortRanges: Set<IntRange> = emptySet(),
     val keywordPattern: String? = null,
     val pathPattern: String? = null,
     val ipCidr: String? = null,
@@ -54,7 +57,10 @@ data class BlockRule(
     val generichideException: Boolean = false,
     val remoteSourceId: String? = null,
     val jsonPrunePaths: Set<String> = emptySet(),
-    val hlsRules: Set<String> = emptySet()
+    val hlsRules: Set<String> = emptySet(),
+    val methods: Set<String> = emptySet(),
+    val headerMatchRules: Set<String> = emptySet(),
+    val permissions: Set<String> = emptySet()
 )
 
 enum class RuleSource(val label: String) {

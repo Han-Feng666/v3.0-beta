@@ -11,7 +11,9 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.HanFeng.data.PromoComponentCandidate
 import com.HanFeng.data.PromoGovernActionRepository
@@ -34,6 +36,11 @@ class PromoComponentGovernActivity : BaseActivity() {
     private var allActivities: List<PromoComponentCandidate> = emptyList()
     private var showAllActivities = false
     private var searchDebounceJob: Job? = null
+
+    override fun onDestroy() {
+        searchDebounceJob?.cancel()
+        super.onDestroy()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -253,31 +260,29 @@ class PromoComponentGovernActivity : BaseActivity() {
 
     private class ComponentAdapter(
         private val onSelectionChanged: () -> Unit
-    ) : RecyclerView.Adapter<ComponentAdapter.Holder>() {
-        private var items: List<PromoComponentCandidate> = emptyList()
+    ) : ListAdapter<PromoComponentCandidate, ComponentAdapter.Holder>(DIFF) {
         private val selected = linkedSetOf<String>()
 
         fun submit(next: List<PromoComponentCandidate>) {
-            items = next
             selected.retainAll(next.map { it.componentName }.toSet())
-            notifyDataSetChanged()
+            submitList(next)
             onSelectionChanged()
         }
 
         fun selectedCandidates(): List<PromoComponentCandidate> {
-            return items.filter { selected.contains(it.componentName) }
+            return currentList.filter { selected.contains(it.componentName) }
         }
 
         fun clearSelection() {
             selected.clear()
-            notifyDataSetChanged()
+            notifyItemRangeChanged(0, itemCount, PAYLOAD_SELECT)
             onSelectionChanged()
         }
 
         fun selectRecommendedVisible() {
             selected.clear()
-            items.filter { it.enabled && it.score > 0 }.forEach { selected += it.componentName }
-            notifyDataSetChanged()
+            currentList.filter { it.enabled && it.score > 0 }.forEach { selected += it.componentName }
+            notifyItemRangeChanged(0, itemCount, PAYLOAD_SELECT)
             onSelectionChanged()
         }
 
@@ -287,14 +292,17 @@ class PromoComponentGovernActivity : BaseActivity() {
         }
 
         override fun onBindViewHolder(holder: Holder, position: Int) {
-            val item = items[position]
-            holder.bind(item, selected.contains(item.componentName)) { checked ->
-                if (checked) selected += item.componentName else selected -= item.componentName
+            onBindViewHolder(holder, position, mutableListOf())
+        }
+
+        override fun onBindViewHolder(holder: Holder, position: Int, payloads: MutableList<Any>) {
+            val item = getItem(position)
+            val checked = selected.contains(item.componentName)
+            holder.bind(item, checked) { newChecked ->
+                if (newChecked) selected += item.componentName else selected -= item.componentName
                 onSelectionChanged()
             }
         }
-
-        override fun getItemCount(): Int = items.size
 
         class Holder(private val binding: ItemPromoComponentBinding) : RecyclerView.ViewHolder(binding.root) {
             fun bind(item: PromoComponentCandidate, checked: Boolean, onChecked: (Boolean) -> Unit) {
@@ -307,6 +315,17 @@ class PromoComponentGovernActivity : BaseActivity() {
                 binding.recommendText.text = item.recommendation
                 binding.checkBox.setOnCheckedChangeListener { _, isChecked -> onChecked(isChecked) }
                 binding.root.setOnClickListener { binding.checkBox.isChecked = !binding.checkBox.isChecked }
+            }
+        }
+
+        companion object {
+            private const val PAYLOAD_SELECT = 1
+            private val DIFF = object : DiffUtil.ItemCallback<PromoComponentCandidate>() {
+                override fun areItemsTheSame(oldItem: PromoComponentCandidate, newItem: PromoComponentCandidate): Boolean =
+                    oldItem.componentName == newItem.componentName
+
+                override fun areContentsTheSame(oldItem: PromoComponentCandidate, newItem: PromoComponentCandidate): Boolean =
+                    oldItem == newItem
             }
         }
     }

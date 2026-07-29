@@ -5,6 +5,7 @@
     <color name="hf_border">#33000000</color>
     <color name="hf_text_primary">#DE000000</color>
     <color name="hf_text_secondary">#99000000</color>
+    <color name="hf_text_hint">#66000000</color>
     <color name="hf_manual_rule">#CC0D47A1</color>
     <color name="hf_import_rule">#CC2E7D32</color>
     <color name="hf_selected">#33FFB300</color>

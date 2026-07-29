@@ -2,14 +2,6 @@ package com.HanFeng.data
 
 /**
  * Bloom Filter 实现，用于快速预筛选域名是否在规则集中
- *
- * 特点：
- * - 极小的内存占用（100万条规则只需 1-2MB）
- * - O(k) 查询时间复杂度，k 为哈希函数个数
- * - 允许误判（可能将非广告域名误判为广告），但不会漏判
- *
- * @param size 位数组大小
- * @param hashCount 哈希函数个数
  */
 class BloomFilter private constructor(
     private val size: Int,
@@ -18,85 +10,77 @@ class BloomFilter private constructor(
     private val bits = LongArray((size + 63) / 64)
 
     companion object {
-        /**
-         * 根据预期元素数量和误判率计算最优的位数组大小和哈希函数个数
-         *
-         * @param expectedElements 预期插入的元素数量
-         * @param falsePositiveRate 可接受的误判率（0.01 = 1%）
-         */
         fun create(expectedElements: Int, falsePositiveRate: Double = 0.01): BloomFilter {
-            val size = optimalSize(expectedElements, falsePositiveRate)
-            val hashCount = optimalHashCount(size, expectedElements)
-            return BloomFilter(size, hashCount)
+            val m = optimalSize(expectedElements, falsePositiveRate)
+            val k = optimalHashCount(m, expectedElements)
+            return BloomFilter(m.coerceAtLeast(1), k)
         }
 
         private fun optimalSize(n: Int, p: Double): Int {
-            return ceil((-n * ln(p)) / (ln(2.0) * ln(2.0))).toInt()
+            if (n <= 0) return 1
+            val value = (-n * kotlin.math.ln(p)) / (kotlin.math.ln(2.0) * kotlin.math.ln(2.0))
+            return kotlin.math.ceil(value).toInt().coerceAtLeast(1)
         }
 
         private fun optimalHashCount(m: Int, n: Int): Int {
-            return maxOf(1, round((m.toDouble() / n) * ln(2.0)).toInt())
+            if (n <= 0 || m <= 0) return 1
+            val value = (m.toDouble() / n) * kotlin.math.ln(2.0)
+            val k = kotlin.math.round(value).toInt()
+            return k.coerceIn(1, 30)
         }
-
-        private fun ceil(d: Double) = kotlin.math.ceil(d)
-        private fun ln(d: Double) = kotlin.math.ln(d)
-        private fun round(d: Double) = kotlin.math.round(d)
     }
 
-    /**
-     * 添加元素到位数组
-     */
     fun put(element: String) {
-        val hash1 = hash1(element)
-        val hash2 = hash2(element)
+        val h1 = hash1(element)
+        val h2 = hash2(element)
         for (i in 0 until hashCount) {
-            val bitIndex = ((hash1 + i * hash2) and 0x7FFFFFFF) % size
-            bits[bitIndex / 64] = bits[bitIndex / 64] or (1L shl (bitIndex % 64))
+            val bitIndex = safeBitIndex(h1, i, h2)
+            val wordIndex = bitIndex / 64
+            val bitInWord = bitIndex % 64
+            bits[wordIndex] = bits[wordIndex] or (1L shl bitInWord)
         }
     }
 
-    /**
-     * 检查元素是否可能在集合中
-     * @return true 表示可能存在（需要进一步验证），false 表示肯定不存在
-     */
     fun mightContain(element: String): Boolean {
-        val hash1 = hash1(element)
-        val hash2 = hash2(element)
+        val h1 = hash1(element)
+        val h2 = hash2(element)
         for (i in 0 until hashCount) {
-            val bitIndex = ((hash1 + i * hash2) and 0x7FFFFFFF) % size
-            if (bits[bitIndex / 64] and (1L shl (bitIndex % 64)) == 0L) {
+            val bitIndex = safeBitIndex(h1, i, h2)
+            val wordIndex = bitIndex / 64
+            val bitInWord = bitIndex % 64
+            if (bits[wordIndex] and (1L shl bitInWord) == 0L) {
                 return false
             }
         }
         return true
     }
 
-    /**
-     * 获取位数组占用的字节数
-     */
     fun getMemoryBytes(): Int = bits.size * 8
 
     /**
-     * MurmurHash3 变体 - 哈希函数 1
+     * 计算位索引，使用 Math.floorMod 保证结果在 [0, size) 范围内
+     * 防止 (h1 + i * h2) 整数溢出变成负数导致 % 返回负值
      */
-    private fun hash1(data: String): Long {
-        var hash = 0xcbf29ce484222325L
-        for (i in 0 until data.length) {
-            hash = hash xor data[i].code.toLong()
-            hash = hash * 0x100000001b3L
-        }
-        return hash
+    private fun safeBitIndex(h1: Int, i: Int, h2: Int): Int {
+        val combined = h1.toLong() + i.toLong() * h2.toLong()
+        return Math.floorMod(combined.toInt(), size)
     }
 
-    /**
-     * FNV-1a 变体 - 哈希函数 2
-     */
-    private fun hash2(data: String): Long {
-        var hash = 0x811c9dc5L
+    private fun hash1(data: String): Int {
+        var hash: Int = -2128832299
         for (i in 0 until data.length) {
-            hash = hash xor data[i].code.toLong()
-            hash = hash * 0x01000193
+            hash = hash xor data[i].code
+            hash = hash * 16777619
         }
-        return hash
+        return hash and Int.MAX_VALUE
+    }
+
+    private fun hash2(data: String): Int {
+        var hash: Int = -375076303
+        for (i in 0 until data.length) {
+            hash = hash xor data[i].code
+            hash = hash * 1099511628
+        }
+        return hash and Int.MAX_VALUE
     }
 }

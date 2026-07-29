@@ -15,6 +15,7 @@
             android:orientation="vertical"
             android:padding="20dp">
 
+            <!-- 标题栏 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -46,104 +47,105 @@
                     android:textSize="14sp" />
             </LinearLayout>
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                android:background="@drawable/bg_panel"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="使用 Shizuku 增强"
-                    android:textColor="@color/hf_text_primary"
-                    android:textSize="16sp" />
-
-                <Switch
-                    android:id="@+id/switchUseShizuku"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content" />
-            </LinearLayout>
-
+            <!-- ========== 基础区域 ========== -->
             <TextView
-                android:id="@+id/textShizukuStatus"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="-8dp"
-                android:layout_marginBottom="16dp"
-                android:text="Shizuku 状态：检测中"
-                android:textColor="@color/hf_text_secondary"
-                android:textSize="14sp" />
+                android:layout_marginBottom="12dp"
+                android:text="基础区域"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="17sp"
+                android:textStyle="bold" />
 
+            <!-- 自定义背景图 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
                 android:background="@drawable/bg_panel"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
+                android:orientation="vertical"
                 android:padding="16dp">
 
                 <LinearLayout
-                    android:layout_width="0dp"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
 
-                    <TextView
-                        android:layout_width="wrap_content"
+                    <LinearLayout
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:text="自定义背景图"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="自定义背景图"
+                            android:textColor="@color/hf_text_primary"
+                            android:textSize="16sp" />
+
+                        <TextView
+                            android:id="@+id/textCustomBgPreview"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="未设置自定义背景图"
+                            android:textColor="@color/hf_text_secondary"
+                            android:textSize="12sp" />
+
+                    </LinearLayout>
+
+                    <Button
+                        android:id="@+id/btnChooseBackground"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:background="@drawable/bg_button"
+                        android:backgroundTint="@null"
+                        android:minWidth="64dp"
+                        android:paddingLeft="12dp"
+                        android:paddingRight="12dp"
+                        android:text="选择图片"
+                        android:textAllCaps="false"
                         android:textColor="@color/hf_text_primary"
-                        android:textSize="16sp" />
-
-                    <TextView
-                        android:id="@+id/textCustomBgPreview"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:text="未设置自定义背景图"
-                        android:textColor="@color/hf_text_secondary"
                         android:textSize="12sp" />
 
+                    <Button
+                        android:id="@+id/btnRemoveBackground"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_button"
+                        android:backgroundTint="@null"
+                        android:minWidth="56dp"
+                        android:paddingLeft="12dp"
+                        android:paddingRight="12dp"
+                        android:text="移除"
+                        android:textAllCaps="false"
+                        android:textColor="@color/hf_text_primary"
+                        android:textSize="12sp"
+                        android:visibility="gone" />
                 </LinearLayout>
 
-                <Button
-                    android:id="@+id/btnChooseBackground"
-                    android:layout_width="wrap_content"
-                    android:layout_height="36dp"
-                    android:background="@drawable/bg_button"
-                    android:backgroundTint="@null"
-                    android:minWidth="64dp"
-                    android:paddingLeft="12dp"
-                    android:paddingRight="12dp"
-                    android:text="选择图片"
-                    android:textAllCaps="false"
-                    android:textColor="@color/hf_text_primary"
-                    android:textSize="12sp" />
+                <HorizontalScrollView
+                    android:id="@+id/bgSwitcherScroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:scrollbars="none">
 
-                <Button
-                    android:id="@+id/btnRemoveBackground"
-                    android:layout_width="wrap_content"
-                    android:layout_height="36dp"
-                    android:layout_marginStart="8dp"
-                    android:background="@drawable/bg_button"
-                    android:backgroundTint="@null"
-                    android:minWidth="56dp"
-                    android:paddingLeft="12dp"
-                    android:paddingRight="12dp"
-                    android:text="移除"
-                    android:textAllCaps="false"
-                    android:textColor="@color/hf_text_primary"
-                    android:textSize="12sp"
-                    android:visibility="gone" />
+                    <LinearLayout
+                        android:id="@+id/bgSwitcherRow"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal" />
+
+                </HorizontalScrollView>
 
             </LinearLayout>
 
+            <!-- 隐藏后台 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -167,6 +169,222 @@
                     android:layout_height="wrap_content" />
             </LinearLayout>
 
+            <!-- 悬浮球 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                android:background="@drawable/bg_panel"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="16dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="悬浮球"
+                        android:textColor="@color/hf_text_primary"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="屏幕悬浮窗，显示拦截数量或内存占用"
+                        android:textColor="@color/hf_text_secondary"
+                        android:textSize="12sp" />
+
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnFloatingBall"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:background="@drawable/bg_button"
+                    android:backgroundTint="@null"
+                    android:minWidth="64dp"
+                    android:paddingLeft="12dp"
+                    android:paddingRight="12dp"
+                    android:text="设置"
+                    android:textAllCaps="false"
+                    android:textColor="@color/hf_text_primary"
+                    android:textSize="12sp" />
+
+            </LinearLayout>
+
+            <!-- 内存监控 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                android:background="@drawable/bg_panel"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="16dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="应用进程监控"
+                        android:textColor="@color/hf_text_primary"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="查看手机运行中 APP 的运存和 CPU 占用"
+                        android:textColor="@color/hf_text_secondary"
+                        android:textSize="12sp" />
+
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnRunningApps"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:background="@drawable/bg_button"
+                    android:backgroundTint="@null"
+                    android:minWidth="64dp"
+                    android:paddingLeft="12dp"
+                    android:paddingRight="12dp"
+                    android:text="打开"
+                    android:textAllCaps="false"
+                    android:textColor="@color/hf_text_primary"
+                    android:textSize="12sp" />
+
+            </LinearLayout>
+
+             <!-- 空闲自动关闭 -->
+             <LinearLayout
+                 android:layout_width="match_parent"
+                 android:layout_height="wrap_content"
+                 android:layout_marginBottom="16dp"
+                 android:background="@drawable/bg_panel"
+                 android:gravity="center_vertical"
+                 android:orientation="horizontal"
+                 android:padding="16dp">
+
+                 <LinearLayout
+                     android:layout_width="0dp"
+                     android:layout_height="wrap_content"
+                     android:layout_weight="1"
+                     android:orientation="vertical">
+
+                     <TextView
+                         android:layout_width="wrap_content"
+                         android:layout_height="wrap_content"
+                         android:text="空闲自动关闭"
+                         android:textColor="@color/hf_text_primary"
+                         android:textSize="16sp" />
+
+                     <TextView
+                         android:id="@+id/textIdleShutdownDesc"
+                         android:layout_width="wrap_content"
+                         android:layout_height="wrap_content"
+                         android:layout_marginTop="4dp"
+                         android:text="未开启拦截且 APP 在后台空闲一定时长后自动结束进程，省电省内存"
+                         android:textColor="@color/hf_text_secondary"
+                         android:textSize="12sp" />
+
+                     <LinearLayout
+                         android:layout_width="wrap_content"
+                         android:layout_height="wrap_content"
+                         android:layout_marginTop="8dp"
+                         android:gravity="center_vertical"
+                         android:orientation="horizontal">
+
+                         <TextView
+                             android:layout_width="wrap_content"
+                             android:layout_height="wrap_content"
+                             android:text="空闲时长: "
+                             android:textColor="@color/hf_text_secondary"
+                             android:textSize="12sp" />
+
+                         <Spinner
+                             android:id="@+id/spinnerIdleShutdownInterval"
+                             android:layout_width="wrap_content"
+                             android:layout_height="wrap_content"
+                             android:minWidth="100dp" />
+                     </LinearLayout>
+
+                 </LinearLayout>
+
+                 <Switch
+                     android:id="@+id/switchIdleShutdown"
+                     android:layout_width="wrap_content"
+                     android:layout_height="wrap_content" />
+             </LinearLayout>
+
+             <!-- 通知拦截 -->
+             <LinearLayout
+                 android:layout_width="match_parent"
+                 android:layout_height="wrap_content"
+                 android:layout_marginBottom="16dp"
+                 android:background="@drawable/bg_panel"
+                 android:gravity="center_vertical"
+                 android:orientation="horizontal"
+                 android:padding="16dp">
+
+                 <LinearLayout
+                     android:layout_width="0dp"
+                     android:layout_height="wrap_content"
+                     android:layout_weight="1"
+                     android:orientation="vertical">
+
+                     <TextView
+                         android:layout_width="wrap_content"
+                         android:layout_height="wrap_content"
+                         android:text="通知栏广告拦截"
+                         android:textColor="@color/hf_text_primary"
+                         android:textSize="16sp" />
+
+                     <TextView
+                         android:id="@+id/textNotificationAdBlockDesc"
+                         android:layout_width="wrap_content"
+                         android:layout_height="wrap_content"
+                         android:layout_marginTop="4dp"
+                         android:text="实时监听通知栏，已治理 APP 与含广告关键字的通知会被自动移除"
+                         android:textColor="@color/hf_text_secondary"
+                         android:textSize="12sp" />
+
+                     <Button
+                         android:id="@+id/btnOpenNotificationAccess"
+                         android:layout_width="wrap_content"
+                         android:layout_height="36dp"
+                         android:layout_marginTop="8dp"
+                         android:background="@drawable/bg_button"
+                         android:backgroundTint="@null"
+                         android:minWidth="100dp"
+                         android:paddingLeft="12dp"
+                         android:paddingRight="12dp"
+                         android:text="授予通知访问权限"
+                         android:textAllCaps="false"
+                         android:textColor="@color/hf_text_primary"
+                         android:textSize="12sp" />
+
+                 </LinearLayout>
+
+                 <Switch
+                     android:id="@+id/switchNotificationAdBlock"
+                     android:layout_width="wrap_content"
+                     android:layout_height="wrap_content" />
+             </LinearLayout>
+
+
+             <!-- 免广告领奖励 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -206,6 +424,7 @@
                     android:layout_height="wrap_content" />
             </LinearLayout>
 
+            <!-- 隐身模式 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -239,6 +458,7 @@
                 android:textColor="@color/hf_text_secondary"
                 android:textSize="14sp" />
 
+            <!-- 隐身模式子选项 -->
             <LinearLayout
                 android:id="@+id/stealthSubLayout"
                 android:layout_width="match_parent"
@@ -354,41 +574,7 @@
                 android:text="重置隐藏后台设置"
                 android:visibility="gone" />
 
-            <Button
-                android:id="@+id/btnShizukuAdControl"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="推广治理" />
-
-            <Button
-                android:id="@+id/btnAppFreeze"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="应用冻结" />
-
-            <Button
-                android:id="@+id/btnCoexistSettings"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="加速器共存设置" />
-
-            <Button
-                android:id="@+id/btnTrafficCardSettings"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="免费领流量卡" />
-
-            <Button
-                android:id="@+id/btnJoinGroupSettings"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="加入群聊" />
-
+            <!-- 导出工具 -->
             <Button
                 android:id="@+id/btnExportLogs"
                 android:layout_width="match_parent"
@@ -410,101 +596,25 @@
                 android:layout_marginBottom="12dp"
                 android:text="导出 MITM 证书" />
 
+            <Button
+                android:id="@+id/btnJoinGroupSettings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="加入群聊" />
+
+            <Button
+                android:id="@+id/btnTrafficCardSettings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                android:text="免费领流量卡" />
+
+            <!-- ========== 热点广告拦截 ========== -->
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:layout_marginBottom="12dp"
-                android:text="Shizuku 增强"
-                android:textColor="@color/hf_text_primary"
-                android:textSize="17sp"
-                android:textStyle="bold" />
-
-            <Button
-                android:id="@+id/btnHostsEditor"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="Hosts 编辑 - 系统级域名拦截" />
-
-            <Button
-                android:id="@+id/btnNetworkPermission"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="应用网络权限管理 - 禁用流氓应用联网" />
-
-            <Button
-                android:id="@+id/btnBackgroundRestrict"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="后台限制管理 - 省电省流量" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:layout_marginBottom="12dp"
-                android:text="Root区（试验）"
-                android:textColor="@color/hf_text_primary"
-                android:textSize="17sp"
-                android:textStyle="bold" />
-
-            <Button
-                android:id="@+id/btnRootScript"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="SH 文件执行" />
-
-            <Button
-                android:id="@+id/btnRootHide"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="模块隐藏" />
-
-            <Button
-                android:id="@+id/btnInstallSystemCert"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="安装证书到系统 (Root)" />
-
-            <CheckBox
-                android:id="@+id/cbAutoInstallSystemCert"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="每次启动自动安装证书到系统（需 Root）"
-                android:textSize="13sp" />
-
-            <Button
-                android:id="@+id/btnModifyDeviceId"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="修改 Android ID (Root)" />
-
-            <Button
-                android:id="@+id/btnModifySerial"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="修改主板序列号 (Root)" />
-
-            <Button
-                android:id="@+id/btnGameAntiMark"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:text="腾讯游戏防设备标记 (Root)" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
+                android:layout_marginTop="8dp"
                 android:layout_marginBottom="12dp"
                 android:text="热点广告拦截"
                 android:textColor="@color/hf_text_primary"
@@ -593,7 +703,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
-                        android:text="DNS 劫持（Root）"
+                        android:text="DNS 劫持（需要 Root）"
                         android:textColor="@color/hf_text_primary"
                         android:textSize="14sp" />
 
@@ -653,6 +763,176 @@
 
             </LinearLayout>
 
+            <!-- ========== Shizuku 区域 ========== -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="12dp"
+                android:text="Shizuku 区域"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <!-- Shizuku 权限管理按钮 -->
+            <Button
+                android:id="@+id/btnShizukuPermissionManage"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:layout_marginBottom="12dp"
+                android:background="@drawable/bg_panel"
+                android:text="Shizuku 权限管理"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="15sp" />
+
+            <!-- Shizuku 功能入口 -->
+            <Button
+                android:id="@+id/btnShizukuAdControl"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="推广治理" />
+
+            <Button
+                android:id="@+id/btnAppFreeze"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="应用冻结" />
+
+            <Button
+                android:id="@+id/btnCoexistSettings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="加速器共存设置" />
+
+            <Button
+                android:id="@+id/btnHostsEditor"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="Hosts 编辑" />
+
+            <Button
+                android:id="@+id/btnNetworkPermission"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="网络权限管理" />
+
+            <Button
+                android:id="@+id/btnBackgroundRestrict"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                android:text="后台限制管理" />
+
+            <!-- ========== Root 区域 ========== -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="12dp"
+                android:text="Root 工具"
+                android:textColor="@color/hf_text_primary"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/btnRootScript"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="SH 文件执行" />
+
+            <Button
+                android:id="@+id/btnRootHide"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="模块隐藏" />
+
+            <Button
+                android:id="@+id/btnInstallSystemCert"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:text="安装证书到系统" />
+
+            <CheckBox
+                android:id="@+id/cbAutoInstallSystemCert"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="每次启动自动安装证书到系统"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnModifyDeviceId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="修改 Android ID" />
+
+            <Button
+                android:id="@+id/btnModifySerial"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="修改主板序列号" />
+
+            <Button
+                android:id="@+id/btnModifySn"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="修改 SN 码" />
+
+            <Button
+                android:id="@+id/btnModifyImei"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="修改 IMEI" />
+
+            <Button
+                android:id="@+id/btnModifyMeid"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="修改 MEID" />
+
+            <Button
+                android:id="@+id/btnConvertSystemApp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="第三方应用转系统应用" />
+
+            <Button
+                android:id="@+id/btnModifyMainboardId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="修改 CPUID 和 CELLID" />
+
+            <Button
+                android:id="@+id/btnModifyModel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:text="修改手机型号" />
+
+            <Button
+                android:id="@+id/btnGameAntiMark"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                android:text="腾讯游戏防设备标记" />
+
+            <!-- 赞助 -->
             <Button
                 android:id="@+id/btnRewardDeveloper"
                 android:layout_width="match_parent"

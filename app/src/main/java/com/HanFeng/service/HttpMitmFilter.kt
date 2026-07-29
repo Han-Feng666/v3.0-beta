@@ -23,11 +23,11 @@ object HttpMitmFilter {
     private const val MAX_DECODED_BODY_BYTES = 512 * 1024
     
     // 正则表达式缓存（P1 优化）
+    private const val MAX_COMPILED_REGEX_CACHE = 1024
     private val compiledReplaceRules = object : LinkedHashMap<String, Regex>(MAX_COMPILED_REGEX_CACHE, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Regex>?): Boolean = size > MAX_COMPILED_REGEX_CACHE
     }
     private val compiledReplaceRulesLock = Any()
-    private const val MAX_COMPILED_REGEX_CACHE = 1024
     private val http2ImmediateBlockReasons = setOf(
         "blocked-host", "blocked-url", "general-ad-traffic", "novel-app-aggressive", "novel-protected-path",
         "domestic-sdk-signal", "reward-unlock-path", "doh-request", "json-ad-field", "json-ad-array",
@@ -103,6 +103,21 @@ object HttpMitmFilter {
         "promotion_card", "promo_card", "discover_card", "recommend_card", "message_center_ad"
     )
     private val requestMethods = listOf("GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ")
+
+    // hot path 上 .none { text.startsWith(it) } 要做 7 次字符串startsWith 比对。
+    // 用首字符 HashSet dispatch + 命中后 regionMatches 精确比对，O(1) 平均开销。
+    private val requestMethodStartCharSet = hashSetOf('G', 'P', 'D', 'H', 'O')
+    private fun looksLikeHttpRequest(text: String): Boolean {
+        if (text.isEmpty()) return false
+        val first = text[0]
+        if (first !in requestMethodStartCharSet) return false
+        for (method in requestMethods) {
+            if (text.length >= method.length && text.regionMatches(0, method, 0, method.length, ignoreCase = false)) {
+                return true
+            }
+        }
+        return false
+    }
     private val compressibleEncodings = listOf("gzip", "br", "deflate", "zstd")
     private val responseAdKeywords = listOf(
         "adview", "adslot", "adunit", "advert", "banner", "splash", "reward", "preload", "promo", "promotion", "tracker", "tracking",
@@ -1289,37 +1304,70 @@ object HttpMitmFilter {
         val text = decodeAscii(chunk) ?: return null
         val headerEnd = text.indexOf("\r\n\r\n")
         if (headerEnd <= 0) return null
-        if (requestMethods.none { text.startsWith(it) }) return null
-        val lines = text.substring(0, headerEnd).split("\r\n")
-        if (lines.isEmpty()) return null
-        val requestLine = lines.firstOrNull()?.split(' ') ?: return null
-        if (requestLine.size < 2) return null
-        val hostHeader = lines.firstOrNull { it.startsWith("Host:", ignoreCase = true) }
-            ?.substringAfter(':', "")
-            ?.trim()
-            ?.let(::normalizeAuthority)
-            ?.ifBlank { null }
-        val referer = lines.firstOrNull { it.startsWith("Referer:", ignoreCase = true) }
-            ?.substringAfter(':', "")
-            ?.trim()
-            ?.ifBlank { null }
-        val origin = lines.firstOrNull { it.startsWith("Origin:", ignoreCase = true) }
-            ?.substringAfter(':', "")
-            ?.trim()
-            ?.ifBlank { null }
-        val upgrade = lines.firstOrNull { it.startsWith("Upgrade:", ignoreCase = true) }
-            ?.substringAfter(':', "")
-            ?.trim()
-            ?.lowercase()
-            ?.ifBlank { null }
+        if (!looksLikeHttpRequest(text)) return null
+
+        // 单遍扫描 header 区块，避免 4 次 firstOrNull 全表扫描 + 1 次大 split。
+        // 同时直接找出 request line 起止与已抽取关键字段。
+        var method: String? = null
+        var path: String? = null
+        var httpVersion: String? = null
+        var host: String? = null
+        var referer: String? = null
+        var origin: String? = null
+        var upgrade: String? = null
+        val requestHeaders = LinkedHashMap<String, String>(16, 0.75f)
+
+        var lineStart = 0
+        var lineIdx = 0
+        while (lineStart <= headerEnd) {
+            val lineEnd = text.indexOf("\r\n", lineStart)
+            if (lineEnd < 0 || lineEnd > headerEnd) {
+                // 最后一行没有 \r\n（应该是但兜底处理）
+                break
+            }
+            if (lineIdx == 0) {
+                // request line: METHOD PATH HTTP/x
+                var sp1 = text.indexOf(' ', lineStart)
+                if (sp1 < 0 || sp1 >= lineEnd) break
+                var sp2 = text.indexOf(' ', sp1 + 1)
+                if (sp2 < 0 || sp2 >= lineEnd) sp2 = lineEnd
+                method = text.substring(lineStart, sp1)
+                path = text.substring(sp1 + 1, sp2)
+                httpVersion = if (sp2 < lineEnd) text.substring(sp2 + 1, lineEnd) else "HTTP/1.1"
+            } else {
+                val colonIdx = text.indexOf(':', lineStart)
+                if (colonIdx <= 0 || colonIdx >= lineEnd) {
+                    lineStart = lineEnd + 2
+                    lineIdx++
+                    continue
+                }
+                val nameLower = text.substring(lineStart, colonIdx).trim().lowercase()
+                val value = text.substring(colonIdx + 1, lineEnd).trim()
+                if (nameLower.isNotEmpty() && value.isNotEmpty()) {
+                    requestHeaders[nameLower] = value
+                    when (nameLower) {
+                        "host" -> host = normalizeAuthority(value).ifBlank { null }
+                        "referer" -> referer = value.ifBlank { null }
+                        "origin" -> origin = value.ifBlank { null }
+                        "upgrade" -> upgrade = value.lowercase().ifBlank { null }
+                    }
+                }
+            }
+            lineStart = lineEnd + 2
+            lineIdx++
+        }
+
+        val finalMethod = method ?: return null
+        val finalPath = path ?: return null
         return RequestInspection(
-            method = requestLine[0],
-            path = requestLine[1],
-            host = hostHeader ?: session.host,
-            httpVersion = requestLine.getOrNull(2) ?: "HTTP/1.1",
+            method = finalMethod,
+            path = finalPath,
+            host = host ?: session.host,
+            httpVersion = httpVersion ?: "HTTP/1.1",
             referer = referer,
             origin = origin,
-            upgrade = upgrade
+            upgrade = upgrade,
+            requestHeaders = requestHeaders
         )
     }
 
@@ -1331,7 +1379,7 @@ object HttpMitmFilter {
         val text = decodeAscii(chunk) ?: return chunk
         val headerEnd = text.indexOf("\r\n\r\n")
         if (headerEnd <= 0) return chunk
-        if (requestMethods.none { text.startsWith(it) }) return chunk
+        if (!looksLikeHttpRequest(text)) return chunk
         val requestDomain = extractRequestDomain(inspection)
         val context = TlsMitmSessionManager.getContextOrNull() ?: return chunk
         val directives = RuleRepository.getRequestRewriteDirectives(
@@ -1584,7 +1632,9 @@ object HttpMitmFilter {
                 path = it.path,
                 appName = session.appName,
                 requestDomain = extractRequestDomain(it),
-                requestType = effectiveRequestType
+                requestType = effectiveRequestType,
+                httpMethod = it.method,
+                requestHeaders = it.requestHeaders
             )
         } ?: RuleRepository.RequestRewriteDirectives()
         if (responseHeaders.statusCode == 101 && requestInspection?.isWebSocket == true && directives.block) {
@@ -1822,14 +1872,51 @@ object HttpMitmFilter {
         if (contentType.isNotBlank() && !targetedContentType) {
             return null
         }
+        val contentEncoding = headerInspection.contentEncoding.orEmpty()
+        val encodingSupported = contentEncoding.isEmpty() ||
+            "gzip" in contentEncoding ||
+            "br" in contentEncoding ||
+            "deflate" in contentEncoding ||
+            "zstd" in contentEncoding
+        if (!encodingSupported) {
+            return null
+        }
+        val decodedBytes = if (contentEncoding.isEmpty()) combinedSample
+            else decodeContentEncodedBody(combinedSample, contentEncoding) ?: run {
+            return Http2DataInspection(
+                suspiciousScore = 1,
+                suspiciousReasons = listOf("content-encoding-decode-failed:$contentEncoding"),
+                confidence = "",
+                samplePreview = "",
+                vendor = headerInspection.vendor,
+                combinedSample = combinedSample,
+                contentType = contentType
+            )
+        }
         val directives = RuleRepository.getRequestRewriteDirectives(
             context = context,
             host = headerInspection.authority,
             path = headerInspection.path.orEmpty(),
             appName = session.appName,
-            requestDomain = extractRequestDomain(headerInspection)
+            requestDomain = extractRequestDomain(headerInspection),
+            requestType = if (headerInspection.isWebSocket) "websocket" else null,
+            httpMethod = headerInspection.method,
+            requestHeaders = null
         )
-        val decoded = decodeAscii(combinedSample) ?: return null
+        val decoded = decodeAscii(decodedBytes) ?: run {
+            if (contentEncoding.isNotEmpty()) {
+                return Http2DataInspection(
+                    suspiciousScore = 1,
+                    suspiciousReasons = listOf("binary-encoded-body:$contentEncoding"),
+                    confidence = "",
+                    samplePreview = "",
+                    vendor = headerInspection.vendor,
+                    combinedSample = combinedSample,
+                    contentType = contentType
+                )
+            }
+            return null
+        }
         val bodyRewrite = if (completeResponse) {
             rewriteHttp2CompleteTextBody(contentType, decoded, directives)
         } else {
@@ -6156,7 +6243,9 @@ object HttpMitmFilter {
             path = environment.lowerPath,
             appName = session.appName,
             requestDomain = requestDomain,
-            requestType = effectiveRequestType
+            requestType = effectiveRequestType,
+            httpMethod = environment.method,
+            requestHeaders = environment.requestHeaders
         )
         reportSuspiciousRedirectDomain(
             host = environment.lowerAuthority,
@@ -6423,6 +6512,7 @@ object HttpMitmFilter {
         val status: String?,
         val protocol: String?,
         val contentType: String?,
+        val contentEncoding: String?,
         val referer: String?,
         val userAgent: String?,
         val location: String?,
@@ -6434,7 +6524,8 @@ object HttpMitmFilter {
         val lowerLocation: String,
         val lowerSetCookie: String,
         val lowerUserAgent: String,
-        val lowerAccept: String
+        val lowerAccept: String,
+        val requestHeaders: Map<String, String>
     )
 
     private fun buildAllowHttp2ActionDecision(
@@ -6525,11 +6616,18 @@ object HttpMitmFilter {
         val status = normalized[":status"]?.firstOrNull()?.ifBlank { null }
         val protocol = normalized[":protocol"]?.firstOrNull()?.ifBlank { null }
         val contentType = normalized["content-type"]?.firstOrNull()?.ifBlank { null }
+        val contentEncoding = normalized["content-encoding"]?.firstOrNull()?.ifBlank { null }?.lowercase()
         val referer = normalized["referer"]?.firstOrNull()?.ifBlank { null }
         val userAgent = normalized["user-agent"]?.firstOrNull()?.ifBlank { null }
         val location = normalized["location"]?.firstOrNull()?.ifBlank { null }
         val setCookie = normalized["set-cookie"]?.firstOrNull()?.ifBlank { null }
         val lowerAuthority = normalizeAuthority(authority)
+        val requestHeaders = buildMap {
+            normalized.forEach { (name, values) ->
+                val first = values.firstOrNull { it.isNotBlank() }
+                if (first != null) put(name.lowercase(), first)
+            }
+        }
         return Http2HeaderEnvironment(
             method = method,
             authority = lowerAuthority,
@@ -6538,6 +6636,7 @@ object HttpMitmFilter {
             status = status,
             protocol = protocol,
             contentType = contentType,
+            contentEncoding = contentEncoding,
             referer = referer,
             userAgent = userAgent,
             location = location,
@@ -6549,7 +6648,8 @@ object HttpMitmFilter {
             lowerLocation = location?.lowercase().orEmpty(),
             lowerSetCookie = setCookie?.lowercase().orEmpty(),
             lowerUserAgent = userAgent?.lowercase().orEmpty(),
-            lowerAccept = normalized["accept"]?.firstOrNull()?.lowercase().orEmpty()
+            lowerAccept = normalized["accept"]?.firstOrNull()?.lowercase().orEmpty(),
+            requestHeaders = requestHeaders
         )
     }
 
@@ -6587,6 +6687,7 @@ object HttpMitmFilter {
             status = environment.status,
             protocol = environment.protocol,
             contentType = environment.contentType,
+            contentEncoding = environment.contentEncoding,
             referer = environment.referer,
             userAgent = environment.userAgent,
             location = environment.location,

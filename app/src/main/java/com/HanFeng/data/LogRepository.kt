@@ -28,8 +28,8 @@ object LogRepository {
     private const val LOG_EXPORT_FILE = "HanFeng-logs.zip"
     private const val LOG_CHANNEL_CAPACITY = 2048
     private const val LOG_SNAPSHOT_MAX_BYTES = 512 * 1024
-    private const val MAX_LOG_FILE_BYTES = 2L * 1024 * 1024
-    private const val LOG_TRUNCATE_KEEP_BYTES = 512L * 1024
+    private const val MAX_LOG_FILE_BYTES = 8L * 1024 * 1024
+    private const val LOG_TRUNCATE_KEEP_BYTES = 2L * 1024 * 1024
     private val legacyLogExportNames = setOf("hanfeng-adblock-logs.zip")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var logChannel = Channel<String>(capacity = LOG_CHANNEL_CAPACITY)
@@ -71,6 +71,16 @@ object LogRepository {
     private val blockedDomainPattern = Pattern.compile("Blocked [^\\n]* domain=([^\\s]+)")
     private val passedDomainPattern = Pattern.compile("Passed [^\\n]* domain=([^\\s]+)")
     private val appPattern = Pattern.compile(" app=([^\\n]+?)(?: vendor=| reason=| source=| route=| bypass=|$)")
+    // 加密 DNS ClientHello 拦截用 sni= 字段
+    private val blockedSniPattern = Pattern.compile("Blocked [^\\n]*?\\bsni=([^\\s]+)")
+    // BY-SNI 走 domain= 已被 blockedDomainPattern 命中；以下兜底处理无 domain= 的事件
+    private val blockedIpCidrPattern = Pattern.compile("Blocked IP-CIDR flow ip=([^\\s]+).*?cidr=([^\\s]+)")
+    private val blockedPortOnlyPattern = Pattern.compile("Blocked port-only flow ip=([^\\s]+).*?sourcePort=([^\\s]+)")
+    private val blockedQuicCidrPattern = Pattern.compile("Blocked QUIC/HTTP3 via CIDR block list ip=([^\\s]+)")
+    private val blockedQuicFlowIpPattern = Pattern.compile("Blocked QUIC/HTTP3 flow ip=([^\\s]+).*?route=global-mitm")
+    private val blockedEncryptedDnsSniPattern = Pattern.compile("Blocked encrypted DNS .*?\\bsni=([^\\s]+)")
+    private val blockedLearningFeedbackIpPattern = Pattern.compile("Blocked learning-feedback IP ip=([^\\s]+)")
+    private val blockedAdIpCidrPattern = Pattern.compile("Blocked QUIC/HTTP3 via CIDR|Blocked IP-CIDR flow")
 
     fun append(context: Context, message: String) {
         if (shouldDropNoisyLog(message)) return
@@ -215,24 +225,67 @@ object LogRepository {
                 val timestamp = rawLine.substring(0, firstSpace).toLongOrNull() ?: return@forEachLine
                 val message = rawLine.substring(firstSpace + 1)
                 parseDomainDecision(timestamp, message)?.let { entry ->
-                    latestByKey["${entry.type}:${entry.domain}"] = entry
+                    // 用 (type, scope, identifier) 作 key 去重，避免不同 scope 但相同字符串的条目相互覆盖
+                    latestByKey["${entry.type}:${entry.scope}:${entry.identifier}"] = entry
                 }
             }
         } catch (e: Exception) {
             append(context, "getDomainDecisionEntries parse error: ${e.message ?: e.javaClass.simpleName}")
         }
-        return latestByKey.values.sortedByDescending(DomainDecisionEntry::timestamp)
+        // 用 RuleRepository 当前 exceptionRule 状态纠正显示：日志只反映历史决策，
+        // 规则库才是真相。若状态不一致则按规则库改判并回写一条日志以便下次直接命中。
+        // 仅 DOMAIN scope 才能被规则库 toggle，IP/CIDR/Port/EncryptedDNS/Learning 类别
+        // 不参与 rule-sync（规则库不支持），按日志原值返回。
+        val exceptionDomains = runCatching { RuleRepository.getExceptedDomains(context) }.getOrDefault(emptySet())
+        val userOwnedBlockedDomains = runCatching { RuleRepository.getUserOwnedBlockedDomains(context) }.getOrDefault(emptySet())
+        val corrected = linkedMapOf<String, DomainDecisionEntry>()
+        val seenKeys = linkedSetOf<String>()
+        // 先放 ALLOWED（用户主动放行的优先显示在上方更直观），再放 BLOCKED
+        latestByKey.values.forEach { entry ->
+            val key = "${entry.type}:${entry.scope}:${entry.identifier}"
+            if (key in seenKeys) return@forEach
+            // 仅 DOMAIN 类型做 rule overlay 纠正
+            if (entry.scope != DecisionScope.DOMAIN) {
+                corrected[key] = entry
+                seenKeys += key
+                return@forEach
+            }
+            val now = System.currentTimeMillis()
+            val correctedType = when {
+                entry.domain in exceptionDomains -> DomainDecisionType.ALLOWED
+                entry.domain in userOwnedBlockedDomains -> DomainDecisionType.BLOCKED
+                else -> entry.type
+            }
+            if (correctedType != entry.type) {
+                append(context, if (correctedType == DomainDecisionType.ALLOWED) {
+                    "Passed request domain=${entry.domain} via rule-sync app=user"
+                } else {
+                    "Blocked request domain=${entry.domain} via rule-sync app=user"
+                })
+                val newKey = "${correctedType}:${entry.scope}:${entry.identifier}"
+                corrected[newKey] = entry.copy(timestamp = now, type = correctedType)
+                seenKeys += newKey
+            } else {
+                corrected[key] = entry
+                seenKeys += key
+            }
+        }
+        return corrected.values.sortedByDescending(DomainDecisionEntry::timestamp)
     }
 
     private fun parseDomainDecision(timestamp: Long, message: String): DomainDecisionEntry? {
+        val appName = extractAppName(message)
+        // 1) 带 domain= 字段的拦截（DNS / SNI / HTTP / HTTPS / ad-IP / QUIC-with-domain 等）— 最常见
         val blockedMatcher = blockedDomainPattern.matcher(message)
         if (blockedMatcher.find()) {
             return DomainDecisionEntry(
                 timestamp = timestamp,
                 domain = blockedMatcher.group(1).orEmpty(),
                 type = DomainDecisionType.BLOCKED,
-                appName = extractAppName(message),
-                message = message
+                appName = appName,
+                message = message,
+                identifier = blockedMatcher.group(1).orEmpty(),
+                scope = DecisionScope.DOMAIN
             )
         }
         val passedMatcher = passedDomainPattern.matcher(message)
@@ -241,8 +294,96 @@ object LogRepository {
                 timestamp = timestamp,
                 domain = passedMatcher.group(1).orEmpty(),
                 type = DomainDecisionType.ALLOWED,
-                appName = extractAppName(message),
-                message = message
+                appName = appName,
+                message = message,
+                identifier = passedMatcher.group(1).orEmpty(),
+                scope = DecisionScope.DOMAIN
+            )
+        }
+        // 2) IP-CIDR 拦截
+        val ipCidrMatcher = blockedIpCidrPattern.matcher(message)
+        if (ipCidrMatcher.find()) {
+            val ip = ipCidrMatcher.group(1).orEmpty()
+            val cidr = ipCidrMatcher.group(2).orEmpty()
+            return DomainDecisionEntry(
+                timestamp = timestamp,
+                domain = ip,
+                type = DomainDecisionType.BLOCKED,
+                appName = appName,
+                message = message,
+                identifier = "$ip ($cidr)",
+                scope = DecisionScope.IP_CIDR
+            )
+        }
+        // 3) Port-only 拦截
+        val portOnlyMatcher = blockedPortOnlyPattern.matcher(message)
+        if (portOnlyMatcher.find()) {
+            val ip = portOnlyMatcher.group(1).orEmpty()
+            val sourcePort = portOnlyMatcher.group(2).orEmpty()
+            return DomainDecisionEntry(
+                timestamp = timestamp,
+                domain = ip,
+                type = DomainDecisionType.BLOCKED,
+                appName = appName,
+                message = message,
+                identifier = "$ip:sourcePort=$sourcePort",
+                scope = DecisionScope.PORT_ONLY
+            )
+        }
+        // 4) QUIC CIDR block list 拦截
+        val quicCidrMatcher = blockedQuicCidrPattern.matcher(message)
+        if (quicCidrMatcher.find()) {
+            val ip = quicCidrMatcher.group(1).orEmpty()
+            return DomainDecisionEntry(
+                timestamp = timestamp,
+                domain = ip,
+                type = DomainDecisionType.BLOCKED,
+                appName = appName,
+                message = message,
+                identifier = ip,
+                scope = DecisionScope.IP_CIDR
+            )
+        }
+        // 5) QUIC global-mitm flow 拦截（未带 domain=，仅 IP）
+        val quicFlowIpMatcher = blockedQuicFlowIpPattern.matcher(message)
+        if (quicFlowIpMatcher.find()) {
+            val ip = quicFlowIpMatcher.group(1).orEmpty()
+            return DomainDecisionEntry(
+                timestamp = timestamp,
+                domain = ip,
+                type = DomainDecisionType.BLOCKED,
+                appName = appName,
+                message = message,
+                identifier = ip,
+                scope = DecisionScope.IP_CIDR
+            )
+        }
+        // 6) 加密 DNS ClientHello by blocker sni= 拦截
+        val encDnsSniMatcher = blockedEncryptedDnsSniPattern.matcher(message)
+        if (encDnsSniMatcher.find()) {
+            val sni = encDnsSniMatcher.group(1).orEmpty()
+            return DomainDecisionEntry(
+                timestamp = timestamp,
+                domain = sni,
+                type = DomainDecisionType.BLOCKED,
+                appName = appName,
+                message = message,
+                identifier = sni,
+                scope = DecisionScope.ENCRYPTED_DNS_SNI
+            )
+        }
+        // 7) Learning feedback IP 拦截
+        val learningMatcher = blockedLearningFeedbackIpPattern.matcher(message)
+        if (learningMatcher.find()) {
+            val ip = learningMatcher.group(1).orEmpty()
+            return DomainDecisionEntry(
+                timestamp = timestamp,
+                domain = ip,
+                type = DomainDecisionType.BLOCKED,
+                appName = appName,
+                message = message,
+                identifier = ip,
+                scope = DecisionScope.LEARNING_FEEDBACK
             )
         }
         return null
@@ -321,20 +462,30 @@ object LogRepository {
         ALLOWED
     }
 
+    enum class DecisionScope {
+        DOMAIN,
+        IP_CIDR,
+        PORT_ONLY,
+        ENCRYPTED_DNS_SNI,
+        LEARNING_FEEDBACK
+    }
+
     data class DomainDecisionEntry(
         val timestamp: Long,
         val domain: String,
         val type: DomainDecisionType,
         val appName: String,
-        val message: String
+        val message: String,
+        val identifier: String = domain,
+        val scope: DecisionScope = DecisionScope.DOMAIN
     )
 
     fun toggleDomainDecision(context: Context, domain: String, currentType: DomainDecisionType) {
         val newType = if (currentType == DomainDecisionType.BLOCKED) DomainDecisionType.ALLOWED else DomainDecisionType.BLOCKED
         val message = if (newType == DomainDecisionType.BLOCKED) {
-            "Blocked request host=$domain via manual-toggle app=user"
+            "Blocked request domain=$domain via manual-toggle app=user"
         } else {
-            "Passed request host=$domain via manual-toggle app=user"
+            "Passed request domain=$domain via manual-toggle app=user"
         }
         append(context, "[DecisionToggle] 域名 $domain 已从 ${if (currentType == DomainDecisionType.BLOCKED) "拦截" else "放行"} 切换为 ${if (newType == DomainDecisionType.BLOCKED) "拦截" else "放行"}")
         append(context, message)

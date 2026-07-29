@@ -17,6 +17,8 @@ object ShizukuAdControlRepository {
     private const val BIND_RETRY_INTERVAL_MILLIS = 1500L
     private const val BIND_WAIT_TIMEOUT_MILLIS = 1500L
     private const val BIND_WAIT_STEP_MILLIS = 40L
+    // 主线程 getService 快速失败超时：远小于 1.5s，避免 ANR；具体重连在后台异步触发
+    private const val BIND_FAST_FAIL_TIMEOUT_MILLIS = 200L
     private const val BIND_STALE_TIMEOUT_MILLIS = 3000L
     @Volatile private var service: IAdControlService? = null
     @Volatile private var binding = false
@@ -113,7 +115,31 @@ object ShizukuAdControlRepository {
         binding = false
     }
 
+    /**
+     * 快速检查服务健康状态 — 主线程用,不触发绑定,不阻塞。
+     *
+     * 关键修复:之前的 checkServiceHealth 内部调 getService(),getService() 在没有
+     * alive service 时 runBlocking 最多 1.5s。每次 onResume 调一次就阻塞 1.5s,
+     * 这是「点击进入功能或返回上一界面卡 1-2 秒」的主因。
+     *
+     * 本方法只看缓存里的 service 是否还活着,需要绑定时让调用方走 IO 协程。
+     */
     fun checkServiceHealth(context: Context): Boolean {
+        val cached = liveService()
+        val healthy = runCatching { cached?.ping() == true }.getOrDefault(false)
+        if (!healthy) {
+            // 不强制 invalidate,让后台 ensureBound 异步重连
+            if (cached != null) {
+                invalidateService()
+            }
+        }
+        return healthy
+    }
+
+    /**
+     * 阻塞版重试 — 仅供 IO 协程调用,UI 线程禁止调用。
+     */
+    fun checkServiceHealthBlocking(context: Context): Boolean {
         val healthy = runCatching { getService(context)?.ping() == true }.getOrDefault(false)
         if (!healthy) {
             invalidateService()
@@ -124,7 +150,9 @@ object ShizukuAdControlRepository {
     fun isServiceAlive(): Boolean = liveService() != null
 
     fun getLastOperationSummary(context: Context): String {
-        return runCatching { localizeOperationSummary(getService(context)?.getLastOperationSummary().orEmpty()) }
+        // 只查缓存里的 service,不阻塞触发 runBlocking 绑定流程
+        val svc = liveService()
+        return runCatching { localizeOperationSummary(svc?.getLastOperationSummary().orEmpty()) }
             .getOrDefault("")
     }
 
@@ -348,9 +376,13 @@ object ShizukuAdControlRepository {
     private fun getService(context: Context): IAdControlService? {
         liveService()?.let { return it }
         ensureBound(context)
+        // 主线程调用方： DataService 等待只允许 200ms，避免 ANR；
+        // caller 应当在外层调 ensureBoundAndWait(context)（IO 协程）以充分等待 binder 绑定。
+        val isMainThread = android.os.Looper.getMainLooper().thread === Thread.currentThread()
+        val timeoutMs = if (isMainThread) BIND_FAST_FAIL_TIMEOUT_MILLIS else BIND_WAIT_TIMEOUT_MILLIS
         val result = runBlocking {
             try {
-                withTimeout(BIND_WAIT_TIMEOUT_MILLIS) {
+                withTimeout(timeoutMs) {
                     while (binding) {
                         liveService()?.let { return@withTimeout it }
                         delay(BIND_WAIT_STEP_MILLIS)
@@ -362,7 +394,7 @@ object ShizukuAdControlRepository {
             }
         }
         if (result == null && binding) {
-            maybeLog(context, "Wait Shizuku ad control service timeout after ${BIND_WAIT_TIMEOUT_MILLIS}ms")
+            maybeLog(context, "Wait Shizuku ad control service timeout after ${timeoutMs}ms on ${if (isMainThread) "main" else "worker"}")
         }
         return result ?: liveService()
     }
@@ -431,5 +463,49 @@ object ShizukuAdControlRepository {
         if (now - lastBindLogAt < 1500L) return
         lastBindLogAt = now
         LogRepository.append(context, message)
+    }
+
+    /**
+     * 周期复核：遍历 promo govern 治理名单，把每个 APP 的通知开关 / 渠道 importance / appops
+     * 重新打一遍 ignore。APP 重发或新建通道不会再被绕过。
+     *
+     * 关键点：blockPackageNotifications 本身是幂等的（set_enabled / set_importance / appops set
+     * 都允许重复写），因此重复调用不会产生副作用、也不会误伤未被治理的 APP。
+     *
+     * @param context 任意 context
+     * @return 成功复核（包括跳过）的 APP 数
+     */
+    fun refreshBlockedPackagesNotifications(context: Context): Int {
+        val pkgs = PromoGovernSnapshotRepository.getGovernedPackages(context)
+        if (pkgs.isEmpty()) return 0
+        val pm = context.packageManager
+        var touched = 0
+        var uninstalled = 0
+        for (pkg in pkgs) {
+            if (pkg.isBlank()) continue
+            // 先用 PackageManager 过滤已卸载的包，跳过远端命令，避免 Shizuku 长时间空跑
+            val installedNow = runCatching {
+                pm.getPackageInfo(pkg, 0) != null
+            }.getOrDefault(false)
+            if (!installedNow) {
+                uninstalled++
+                continue
+            }
+            runCatching { blockPackageNotifications(context, pkg) }.onSuccess { ok ->
+                if (ok) touched++
+            }.onFailure {
+                LogRepository.append(context, "Shizuku refresh notification block failed pkg=$pkg err=${it.message ?: it.javaClass.simpleName}")
+            }
+        }
+        if (uninstalled > 0) {
+            // 顺手把已卸载的包名从治理名单移除，避免名单长期累积
+            pkgs.filter { pkg ->
+                pkg.isNotBlank() && runCatching { pm.getPackageInfo(pkg, 0) != null }.getOrDefault(true).not()
+            }.forEach { PromoGovernSnapshotRepository.unmarkPackageGoverned(context, it) }
+        }
+        if (touched > 0) {
+            LogRepository.append(context, "Shizuku refresh notification block touched=$touched total=${pkgs.size} uninstalled=$uninstalled")
+        }
+        return touched
     }
 }

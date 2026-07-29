@@ -7,4 +7,12 @@
     <dimen name="home_button_horizontal_padding">20dp</dimen>
     <dimen name="rank_row_height">24dp</dimen>
     <dimen name="rank_card_collapsed_height">120dp</dimen>
+
+    <!-- 悬浮球 -->
+    <dimen name="floating_ball_circle_size">72dp</dimen>
+    <dimen name="floating_ball_capsule_width">104dp</dimen>
+    <dimen name="floating_ball_capsule_height">38dp</dimen>
+    <dimen name="floating_ball_padding">8dp</dimen>
+    <dimen name="floating_ball_title_size">9sp</dimen>
+    <dimen name="floating_ball_value_size">13sp</dimen>
 </resources>

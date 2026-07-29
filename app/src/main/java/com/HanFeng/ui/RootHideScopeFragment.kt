@@ -199,9 +199,11 @@ class RootHideScopeFragment : Fragment() {
     }
 
     private fun renderList() {
+        if (!isAdded || context == null) return
         val container = appsContainer ?: return
         container.removeAllViews()
-        val inflater = LayoutInflater.from(requireContext())
+        val ctx = context ?: return
+        val inflater = LayoutInflater.from(ctx)
         val visible = filteredApps()
         for (item in visible) {
             val binding = com.HanFeng.databinding.ItemAppBinding.inflate(inflater, container, false)
@@ -212,13 +214,14 @@ class RootHideScopeFragment : Fragment() {
             binding.whitelistBox.setOnCheckedChangeListener(null)
             binding.whitelistBox.isChecked = item.rootHideSelected
             binding.whitelistBox.setOnCheckedChangeListener { _, checked ->
-                RootHideRepository.toggleScope(requireContext(), item.packageName, checked)
+                if (!isAdded || context == null) return@setOnCheckedChangeListener
+                RootHideRepository.toggleScope(ctx, item.packageName, checked)
                 updateAppState(item.packageName, checked)
             }
             container.addView(binding.root)
         }
         if (visible.isEmpty() && allApps.isNotEmpty()) {
-            val tv = TextView(requireContext()).apply {
+            val tv = TextView(ctx).apply {
                 text = "搜索无结果"
                 setPadding(0, 12.dp, 0, 12.dp)
                 setTextColor(resources.getColor(R.color.hf_text_secondary, null))
@@ -233,6 +236,8 @@ class RootHideScopeFragment : Fragment() {
     }
 
     private fun toggleScope(selectAll: Boolean, invert: Boolean = false) {
+        if (!isAdded || context == null) return
+        val ctx = context ?: return
         val visible = filteredApps()
         if (visible.isEmpty()) return
         val updated = mutableSetOf<String>()
@@ -240,10 +245,10 @@ class RootHideScopeFragment : Fragment() {
             val target = if (invert) !app.rootHideSelected else selectAll
             if (target) updated += app.packageName
         }
-        val base = RootHideRepository.getScopePackages(requireContext()).toMutableSet()
+        val base = RootHideRepository.getScopePackages(ctx).toMutableSet()
         visible.forEach { base.remove(it.packageName) }
         base += updated
-        RootHideRepository.replaceScopePackages(requireContext(), base)
+        RootHideRepository.replaceScopePackages(ctx, base)
 
         val visibleNames = visible.mapTo(hashSetOf()) { it.packageName }
         allApps = allApps.map {
@@ -252,7 +257,7 @@ class RootHideScopeFragment : Fragment() {
         }
         renderList()
         updateCount()
-        Toast.makeText(requireContext(), if (invert) "已反选" else "已全选", Toast.LENGTH_SHORT).show()
+        Toast.makeText(ctx, if (invert) "已反选" else "已全选", Toast.LENGTH_SHORT).show()
     }
 
     fun getSelectedScopePackages(): Set<String> {

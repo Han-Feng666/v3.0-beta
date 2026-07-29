@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    广告拦截磁贴图标: 告示牌 + 禁止斜杠
+    - 告示牌(圆角矩形 + 立柱)代表广告
+    - 右上到左下贯穿的斜杠代表拦截/禁止
+    SystemUI 在磁贴里会以单色 tint 渲染,fillColor 用纯白即可
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M3.5,4.5 h17 a1.5,1.5 0 0 1 1.5,1.5 v9 a1.5,1.5 0 0 1 -1.5,1.5 h-17 a1.5,1.5 0 0 1 -1.5,-1.5 v-9 a1.5,1.5 0 0 1 1.5,-1.5 z M10,16.5 h4 v3 a1,1 0 0 1 -1,1 h-2 a1,1 0 0 1 -1,-1 z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20.5,3.5 L3.5,20.5 A1.2,1.2 0 0 0 5.2,22.3 L22.2,5.3 A1.2,1.2 0 0 0 20.5,3.5 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="0" />
+</vector>

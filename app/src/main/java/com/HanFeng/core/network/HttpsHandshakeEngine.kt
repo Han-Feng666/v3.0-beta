@@ -32,7 +32,7 @@ object HttpsHandshakeEngine {
     )
 
     fun decide(input: Input): Decision {
-        if (input.protocol != 6 || (input.destinationPort != 443 && input.destinationPort != input.bridgePort)) {
+        if (input.protocol != 6 || (!TlsPortSet.isTlsTcpPort(input.destinationPort) && input.destinationPort != input.bridgePort)) {
             return Decision(false, Event.NONE)
         }
         if (!input.hasFlow) {

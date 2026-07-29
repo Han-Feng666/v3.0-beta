@@ -1,6 +1,14 @@
 package com.HanFeng.data
 
 object RuleVendorSupport {
+    private val bypassKeywords = listOf(
+        "httpdns", "doh", "doq", "dot", "dns-query", "dnsquery", "resolver", "encrypted-dns"
+    )
+    private val trustedDnsHints = listOf(
+        "alidns", "aliyuncs", "cloudflare-dns", "nextdns", "adguard-dns", "quad9", "opendns",
+        "cleanbrowsing", "umbrella", "dns.sb", "dns0", "google", "baidu"
+    )
+
     fun isBypassProtectionDomain(
         domain: String,
         sanitizeDomain: (String) -> String?,
@@ -10,13 +18,6 @@ object RuleVendorSupport {
         val normalized = sanitizeDomain(domain) ?: return false
         if (buildDomainCandidates(normalized).any(bypassProtectionDomains::contains)) return true
         val lower = normalized.lowercase()
-        val bypassKeywords = listOf(
-            "httpdns", "doh", "doq", "dot", "dns-query", "dnsquery", "resolver", "encrypted-dns"
-        )
-        val trustedDnsHints = listOf(
-            "alidns", "aliyuncs", "cloudflare-dns", "nextdns", "adguard-dns", "quad9", "opendns",
-            "cleanbrowsing", "umbrella", "dns.sb", "dns0", "google", "baidu"
-        )
         return bypassKeywords.any(lower::contains) && trustedDnsHints.any(lower::contains)
     }
 

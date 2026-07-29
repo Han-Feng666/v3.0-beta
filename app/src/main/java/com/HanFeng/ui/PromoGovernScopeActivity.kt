@@ -83,6 +83,13 @@ class PromoGovernScopeActivity : BaseActivity() {
         binding.btnScopeSystem.visibility = View.GONE
         binding.btnScopeThirdParty.setOnClickListener { applyScope(PromoGovernScope.THIRD_PARTY_ONLY) }
         binding.btnGovernVisible.setOnClickListener { showBatchGovernDialog() }
+
+        // 打开页面时复核一次治理名单通知 (后台 IO)，让治理状态保持一一对应
+        lifecycleScope.launch(Dispatchers.IO) {
+            if (ShizukuAdControlRepository.checkServiceHealth(this@PromoGovernScopeActivity)) {
+                runCatching { ShizukuAdControlRepository.refreshBlockedPackagesNotifications(this@PromoGovernScopeActivity) }
+            }
+        }
         binding.searchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {

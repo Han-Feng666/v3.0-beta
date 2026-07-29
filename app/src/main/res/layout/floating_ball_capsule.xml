@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:clipChildren="false"
+    android:clipToPadding="false">
+
+    <LinearLayout
+        android:id="@+id/ballRootCapsule"
+        android:layout_width="@dimen/floating_ball_capsule_width"
+        android:layout_height="@dimen/floating_ball_capsule_height"
+        android:background="@drawable/bg_floating_ball_capsule"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="@dimen/floating_ball_padding">
+
+        <TextView
+            android:id="@+id/tvBallLabelCapsule"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="拦截"
+            android:textColor="#99FFFFFF"
+            android:textSize="@dimen/floating_ball_title_size"
+            android:maxLines="1"
+            android:ellipsize="none" />
+
+        <TextView
+            android:id="@+id/tvBallValueCapsule"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:gravity="center"
+            android:text="1555"
+            android:textColor="#FFFFFFFF"
+            android:textSize="@dimen/floating_ball_value_size"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="none"
+            android:textAlignment="center" />
+
+    </LinearLayout>
+</FrameLayout>

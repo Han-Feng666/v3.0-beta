@@ -1,6 +1,7 @@
 package com.HanFeng.adblocker.shizuku
 
 import android.content.Context
+import android.util.Log
 import com.HanFeng.data.LogRepository
 import com.HanFeng.data.RuleRepository
 import java.io.File

@@ -21,9 +21,12 @@ object UserAdFeedbackManager {
     private const val WINDOW_MILLIS = 60_000L
     private const val MAX_EVENTS = 256
     private const val MAX_FEEDBACK_FILE_BYTES = 50L * 1024 * 1024
+    private const val BACKLOG_CAPACITY = 1024
     private val gson = Gson()
     private val lock = Any()
     private val events = ArrayDeque<NetworkActivity>()
+    private val backlog = java.util.concurrent.LinkedBlockingQueue<NetworkActivity>(BACKLOG_CAPACITY)
+    @Volatile private var workerStarted = false
 
     data class NetworkActivity(
         val appName: String,
@@ -40,6 +43,38 @@ object UserAdFeedbackManager {
     )
 
     fun recordNetworkActivity(context: Context, activity: NetworkActivity) {
+        // offer 失败表示队列已满（容量 1024），直接保留并丢弃最老的；这是网络热路径上的非关键丢弃
+        if (!backlog.offer(activity)) {
+            backlog.poll()
+            backlog.offer(activity)
+        }
+        if (!workerStarted) ensureWorkerStarted()
+    }
+
+    private fun drainBacklog() {
+        while (true) {
+            var drained = 0
+            while (drained < 256) {
+                // poll(timeout) 而不是 sleep：长时间无事件时把线程挂起，省电省 CPU
+                val activity = backlog.poll(60, java.util.concurrent.TimeUnit.SECONDS) ?: break
+                handleNetworkActivity(activity)
+                drained++
+            }
+        }
+    }
+
+    @Synchronized
+    private fun ensureWorkerStarted() {
+        if (workerStarted) return
+        workerStarted = true
+        val runnable = Runnable { drainBacklog() }
+        val thread = Thread(runnable, "AdFeedbackDrain")
+        thread.isDaemon = true
+        thread.priority = Thread.MIN_PRIORITY
+        thread.start()
+    }
+
+    private fun handleNetworkActivity(activity: NetworkActivity) {
         val normalized = normalize(activity) ?: return
         if (isProtected(normalized.host ?: normalized.sni)) return
         synchronized(lock) {

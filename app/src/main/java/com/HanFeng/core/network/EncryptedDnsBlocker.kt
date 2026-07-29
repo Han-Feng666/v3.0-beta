@@ -181,7 +181,7 @@ object EncryptedDnsBlocker {
         if (matchesKnownEncryptedDnsIp(destinationIp) && isDnsTransportPort(packet.destinationPort)) {
             return Decision(true, Reason.KNOWN_DNS_IP)
         }
-        if (packet.protocol == OsConstants.IPPROTO_UDP && packet.destinationPort == 443 && looksLikeDnsOverQuic(packet.payload, destinationIp)) {
+        if (packet.protocol == OsConstants.IPPROTO_UDP && TlsPortSet.isQuicUdpPort(packet.destinationPort) && looksLikeDnsOverQuic(packet.payload, destinationIp)) {
             return Decision(true, Reason.DNS_LIKE_QUIC)
         }
         return Decision(false, null)

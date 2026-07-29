@@ -73,7 +73,7 @@ object TrafficDecisionEngine {
     )
 
     fun shouldBlockQuicFlow(input: QuicBlockInput): QuicDecision {
-        if (input.packet.protocol != OsConstants.IPPROTO_UDP || input.packet.destinationPort != 443) {
+        if (input.packet.protocol != OsConstants.IPPROTO_UDP || !TlsPortSet.isQuicUdpPort(input.packet.destinationPort)) {
             return QuicDecision(blocked = false, reason = null)
         }
         if (input.packet.payload.isEmpty()) return QuicDecision(blocked = false, reason = null)
