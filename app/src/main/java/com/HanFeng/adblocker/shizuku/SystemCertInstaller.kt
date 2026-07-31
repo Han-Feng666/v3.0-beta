@@ -2,9 +2,7 @@ package com.HanFeng.adblocker.shizuku
 
 import android.content.Context
 import android.util.Log
-import com.HanFeng.data.HttpsMitmRepository
 import com.HanFeng.security.CertificateAuthorityManager
-import java.io.File
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
 
@@ -62,20 +60,28 @@ class SystemCertInstaller(private val context: Context) {
         val diagnostics = LinkedHashMap<String, String>()
         val session = SuSession.getInstance()
 
-        // 确保证书已导出（root 可从 shared storage 读取）
+        // 确保证书已生成并落盘到 app 内部 filesDir/certs/HanFeng.cer
+        // 关键修复: 用 app 内部绝对路径而非 MediaStore Downloads 路径.
+        // Android 10+ MediaStore 返回的展示路径是中文"下载/HanFeng/HanFeng.crt",
+        // 但 root shell 工作目录是 / 且真实路径是英文 Download/, 直接 cp 中文相对路径必失败.
+        // root 可以读 /data/data/com.HanFeng/files/certs/HanFeng.cer (绝对路径全国统一).
         CertificateAuthorityManager.ensureCaInstalledFiles(context)
-        val downloadCertPath = HttpsMitmRepository.getCertificateExportPath(context)
-            ?: run {
-                val downloadFile = File(android.os.Environment.getExternalStoragePublicDirectory(
-                    android.os.Environment.DIRECTORY_DOWNLOADS), "HanFeng/HanFeng.cer")
-                if (downloadFile.isFile) downloadFile.absolutePath else null
-            }
-            ?: return InstallResult.Failure("找不到已导出的证书文件，请先导出 MITM 证书", triedMethods, diagnostics)
+        val srcCertPath = CertificateAuthorityManager.getPublicCertAbsolutePath(context)
+            ?: return InstallResult.Failure("找不到 app 内部证书文件, 请先在 MITM 设置中生成证书", triedMethods, diagnostics)
+
+        // 预检源文件 root 可读, 失败给出明确诊断而非让 cp 信息一闪而过
+        val srcCheck = session.execute("test -f '$srcCertPath' && echo FOUND || echo MISSING", timeoutSeconds = 3)
+        if (!srcCheck.output.contains("FOUND")) {
+            return InstallResult.Failure(
+                "app 内部证书路径不可读: $srcCertPath (root 无法访问 app 私有目录, 可能 SELinux 限制)",
+                triedMethods, diagnostics
+            )
+        }
 
         val tmpPath = "/data/local/tmp/hf_cert_$certFileName"
 
         // 1. root cp 证书到 /data/local/tmp
-        val copyCmd = "cp -f '$downloadCertPath' '$tmpPath' && chmod 644 '$tmpPath' && " +
+        val copyCmd = "cp -f '$srcCertPath' '$tmpPath' && chmod 644 '$tmpPath' && " +
             "chcon u:object_r:system_security_file:s0 '$tmpPath' 2>/dev/null; " +
             "test -s '$tmpPath' && echo OK || echo FAIL"
         val copyResult = session.execute(copyCmd, timeoutSeconds = 6)

@@ -450,6 +450,22 @@ object CertificateAuthorityManager {
         }.getOrNull()
     }
 
+    /**
+     * 公开证书在 app 内部存储的绝对路径 (filesDir/certs/HanFeng.cer)。
+     *
+     * 这个路径 root 可直接读, 用于 system cert install 流程绕开 MediaStore 路径的不确定性
+     * (Android 10+ Downloads 真实路径是英文 Download 而非中文"下载", root shell cp
+     * 拿到 MediaStore 返回的展示路径 "下载/HanFeng/HanFeng.crt" 会找不到文件).
+     */
+    fun getPublicCertAbsolutePath(context: Context): String? {
+        return runCatching {
+            val certDir = File(context.filesDir, CERT_DIR)
+            val publicCertFile = File(certDir, CERT_PUBLIC_FILE_NAME)
+            if (!isValidCertificateFile(publicCertFile)) return null
+            publicCertFile.absolutePath
+        }.getOrNull()
+    }
+
     fun getPublicCertificateX509(context: Context): X509Certificate? {
         return runCatching {
             val certDir = File(context.filesDir, CERT_DIR)
