@@ -110,6 +110,19 @@ class RunningAppsActivity : AppCompatActivity() {
                 }
             }
         }
+
+        // 监听 sampleError, 进程列表空白时把真实根因显示在 summary 行
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                monitor.sampleError.collect { err ->
+                    if (err == null) return@collect
+                    val list = monitor.processFlow.value
+                    if (list.isEmpty()) {
+                        tvSummary.text = "无法读取进程列表 · ${err.message}"
+                    }
+                }
+            }
+        }
     }
 
     private fun stopCollection() {

@@ -287,6 +287,12 @@ class ShizukuPermissionManageActivity : BaseActivity() {
     }
 
     private fun applyAuthorizationChange(app: AppItem, isChecked: Boolean) {
+        if (!app.declaresClientPermission) {
+            // 这条 app 不支持 Shizuku —— 授权对它无效, 提示用户并恢复 UI, 不调 binder
+            showShortToast("${app.label} 未声明 Shizuku 客户端权限, 授权开关对它无效")
+            loadAuthorizedAppsAsync()
+            return
+        }
         val binderAlive = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
         val checkPerm = if (binderAlive) runCatching { Shizuku.checkSelfPermission() }.getOrNull() else null
         val selfAuthorized = binderAlive && checkPerm == PackageManager.PERMISSION_GRANTED
@@ -1143,7 +1149,8 @@ class ShizukuPermissionManageActivity : BaseActivity() {
         var statusHint = ""
         try {
             // 基础层: 本地 PackageManager 拿所有已安装应用, 排除本 app
-            val localPkgs = pm.getInstalledPackages(0)
+            // 关键修复: 用 GET_PERMISSIONS 拉 requestedPermissions, 否则无法判断哪些 app 真支持 Shizuku
+            val localPkgs = pm.getInstalledPackages(android.content.pm.PackageManager.GET_PERMISSIONS)
             val shizukuAlive = ShizukuAuthorizationRepository.isServerAlive()
             val selfAuthorized = shizukuAlive &&
                 runCatching { Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED }.getOrDefault(false)
@@ -1159,13 +1166,15 @@ class ShizukuPermissionManageActivity : BaseActivity() {
                     val isAllowed = (flags and 2) == 2
                     val label = runCatching { appInfo.loadLabel(pm).toString() }.getOrDefault(pkgName)
                     val icon = runCatching { appInfo.loadIcon(pm) }.getOrNull()
+                    val declared = ShizukuAuthorizationRepository.isClientPermissionDeclared(pkg)
                     result.add(AppItem(
                         label = label,
                         packageName = pkgName,
                         icon = icon,
                         isChecked = isAllowed,
                         isSystemApp = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0,
-                        uid = uid
+                        uid = uid,
+                        declaresClientPermission = declared
                     ))
                 }
                 statusHint = " · Shizuku 授权表"
@@ -1177,13 +1186,15 @@ class ShizukuPermissionManageActivity : BaseActivity() {
                     val appInfo = pkg.applicationInfo ?: continue
                     val label = runCatching { appInfo.loadLabel(pm).toString() }.getOrDefault(pkgName)
                     val icon = runCatching { appInfo.loadIcon(pm) }.getOrNull()
+                    val declared = ShizukuAuthorizationRepository.isClientPermissionDeclared(pkg)
                     result.add(AppItem(
                         label = label,
                         packageName = pkgName,
                         icon = icon,
                         isChecked = false,
                         isSystemApp = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0,
-                        uid = appInfo.uid
+                        uid = appInfo.uid,
+                        declaresClientPermission = declared
                     ))
                 }
                 statusHint = when {
@@ -1244,7 +1255,9 @@ class ShizukuPermissionManageActivity : BaseActivity() {
         val icon: android.graphics.drawable.Drawable?,
         var isChecked: Boolean,
         val isSystemApp: Boolean = false,
-        val uid: Int = -1
+        val uid: Int = -1,
+        /** 该 app 是否在 manifest 声明了 Shizuku 客户端 permission。false = 授权开关无效, 用户会被误导。 */
+        val declaresClientPermission: Boolean = true
     )
 
     class AppListAdapter : ListAdapter<AppItem, AppListAdapter.ViewHolder>(DIFF) {
@@ -1282,7 +1295,13 @@ class ShizukuPermissionManageActivity : BaseActivity() {
 
             fun bind(item: AppItem) {
                 labelView.text = if (item.isSystemApp) "${item.label} (系统)" else item.label
-                pkgView.text = "${item.packageName}  ·  uid=${item.uid}"
+                // 未声明客户端权限的 app 即使开关打开也不生效 —— 在副标题明示提示,
+                // 避免用户以为"我点开了为什么对方还说没权限"
+                pkgView.text = if (item.declaresClientPermission) {
+                    "${item.packageName}  ·  uid=${item.uid}"
+                } else {
+                    "${item.packageName}  ·  uid=${item.uid}  ·  该 app 未声明 Shizuku 客户端权限, 授权对其无效"
+                }
                 if (item.icon != null) {
                     iconView.setImageDrawable(item.icon)
                 } else {
@@ -1290,14 +1309,20 @@ class ShizukuPermissionManageActivity : BaseActivity() {
                 }
                 revokeBtn.setOnCheckedChangeListener(null)
                 revokeBtn.isChecked = item.isChecked
-                revokeBtn.isEnabled = switchesEnabled
+                // 未声明客户端权限的 app 开关禁用, 提示用户该 app 接口不支持 Shizuku
+                revokeBtn.isEnabled = switchesEnabled && item.declaresClientPermission
+                if (!item.declaresClientPermission) {
+                    revokeBtn.alpha = 0.35f
+                } else {
+                    revokeBtn.alpha = 1f
+                }
                 revokeBtn.setOnCheckedChangeListener { _, isChecked ->
-                    if (switchesEnabled) {
+                    if (switchesEnabled && item.declaresClientPermission) {
                         onAppCheckedChanged?.invoke(item, isChecked)
                     }
                 }
                 itemView.setOnClickListener {
-                    if (switchesEnabled) revokeBtn.toggle()
+                    if (switchesEnabled && item.declaresClientPermission) revokeBtn.toggle()
                 }
             }
         }

@@ -100,12 +100,53 @@ class ProcessMonitor private constructor(private val context: Context) {
         val jiffies: Long get() = utime + stime
     }
 
+    /** 采样失败原因,UI 显示"一片空白"时能看到具体根因 */
+    sealed class SampleError(val message: String) {
+        object ShizukuNotAuthorized : SampleError("Shizuku 服务已开但未授权本应用, 无法读取进程")
+        object NoBackingShell : SampleError("Shizuku 未激活且无 Root, 无 shell 可用取得进程列表")
+        data class ShizukuExecFailed(val detail: String) : SampleError("Shizuku 调用失败: $detail")
+        data class RootExecFailed(val detail: String) : SampleError("Root shell 不可用: $detail")
+    }
+
     private val _processFlow = MutableStateFlow<List<ProcessInfo>>(emptyList())
     val processFlow = _processFlow
+
+    private val _sampleError = MutableStateFlow<SampleError?>(null)
+    val sampleError = _sampleError
 
     private val lastSnapshots = mutableMapOf<Int, ProcSnapshot>()
     private var samplingJob: kotlinx.coroutines.Job? = null
     private val uidPkgCache = mutableMapOf<Int, String>()
+
+    /**
+     * 反射 Shizuku.newProcess 的 Method 句柄,在第一次成功时缓存,减少每次采样的反射开销。
+     * Shizuku SDK 中 newProcess 是 private static (SDK 13+ 已标 @Deprecated),签名稳定:
+     * (String[], String[], String) -> ShizukuRemoteProcess。下个版本会改成必走 bindUserService,
+     * 但短期内 fork api 仍保留该 private 方法,反射拿得到。
+     */
+    private val newProcessMethod: java.lang.reflect.Method? by lazy {
+        runCatching {
+            val m = Shizuku::class.java.getDeclaredMethod(
+                "newProcess",
+                Array<String>::class.java,
+                Array<String>::class.java,
+                String::class.java
+            )
+            m.isAccessible = true
+            m
+        }.getOrNull()
+    }
+
+    /**
+     * 检测本应用 Shizuku 自授权状态。
+     * 必须 PERMISSION_GRANTED,不能只用 pingBinder —— binder 活着不代表本应用被授权,
+     * 误用会让反射 newProcess 直接抛 SecurityException,然后再回退到 root,造成混乱。
+     */
+    private val selfShizukuAuthorized: Boolean
+        get() = runCatching {
+            Shizuku.pingBinder() &&
+                Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }.getOrDefault(false)
 
     /**
      * 启动采样。mode 决定采样策略：
@@ -435,48 +476,81 @@ class ProcessMonitor private constructor(private val context: Context) {
     }
 
     /**
-     * Execute a shell command via Shizuku (preferred) or root fallback.
-     * Uses reflection to call private Shizuku.newProcess() method.
-     * Falls back to SuSession if Shizuku binder is unavailable.
+     * Execute a shell command via Shizuku (preferred, 要求本应用已自授权) or root fallback.
+     * 失败时把错误写入 _sampleError, 上层 UI 可据此告知用户根因.
+     *
+     * 不再仅用 pingBinder() 判活 —— binder 活着不代表本应用已授权, 误判会让反射 newProcess 抛
+     * SecurityException, 然后又被 catch 当作"Shizuku 不可用"走 root. 实际只是没授权, 隐藏了真实根因.
      */
     private suspend fun executeShell(command: String): List<String> {
         return withContext(Dispatchers.IO) {
-            // 优先走 Shizuku
-            if (Shizuku.pingBinder()) {
-                try {
-                    val newProcessMethod = Shizuku::class.java.getDeclaredMethod("newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java)
-                    newProcessMethod.isAccessible = true
-                    val process = newProcessMethod.invoke(null, arrayOf("sh", "-c", command), null, null) as ShizukuRemoteProcess
-                    val writer = OutputStreamWriter(process.outputStream)
-                    writer.flush()
-                    writer.close()
-                    val reader = BufferedReader(InputStreamReader(process.inputStream))
-                    val output = mutableListOf<String>()
-                    var line: String?
-                    while (reader.readLine().also { line = it } != null) {
-                        output.add(line!!)
+            // 1. Shizuku 路径: 必须本应用已自授权
+            if (selfShizukuAuthorized) {
+                val method = newProcessMethod
+                if (method != null) {
+                    try {
+                        val process = method.invoke(
+                            null,
+                            arrayOf("sh", "-c", command),
+                            null,
+                            null
+                        ) as ShizukuRemoteProcess
+                        // stdin 立即关闭, 避免远程 shell 因等待输入而阻塞
+                        try {
+                            val writer = OutputStreamWriter(process.outputStream)
+                            writer.flush()
+                            writer.close()
+                        } catch (_: Exception) {}
+                        val output = mutableListOf<String>()
+                        try {
+                            val reader = BufferedReader(InputStreamReader(process.inputStream))
+                            var line: String?
+                            while (reader.readLine().also { line = it } != null) {
+                                output.add(line!!)
+                            }
+                            reader.close()
+                        } catch (_: Exception) {}
+                        process.waitForTimeout(5, TimeUnit.SECONDS)
+                        // 成功一次就清掉从前一次失败留下的 error
+                        _sampleError.value = null
+                        return@withContext output
+                    } catch (e: SecurityException) {
+                        _sampleError.value = SampleError.ShizukuNotAuthorized
+                        Log.w(TAG, "Shizuku newProcess SecurityException: ${e.message}")
+                    } catch (e: Exception) {
+                        _sampleError.value = SampleError.ShizukuExecFailed(e.message ?: "unknown")
+                        Log.w(TAG, "Shizuku newProcess failed, trying root: ${e.message}")
                     }
-                    reader.close()
-                    process.waitForTimeout(5, TimeUnit.SECONDS)
-                    return@withContext output
-                } catch (e: Exception) {
-                    Log.w(TAG, "Shizuku newProcess failed, trying root: ${e.message}")
+                } else {
+                    // fork api 里 newProcess 是 private, 远程反射可能找不到 —— 此时显式告知"Shizuku SDK 版本不匹配"
+                    _sampleError.value = SampleError.ShizukuExecFailed("newProcess 反射拿不到, SDK 版本不兼容")
+                    Log.w(TAG, "newProcess method not found via reflection")
                 }
+            } else if (Shizuku.pingBinder()) {
+                // binder 活着但本应用没授权 —— 用户最常见的"一片空白"情况
+                _sampleError.value = SampleError.ShizukuNotAuthorized
             }
 
-            // 回退到 root
+            // 2. Root 回退: 仅当 Shizuku 路径不可用时
             try {
                 val session = com.HanFeng.adblocker.shizuku.SuSession.getInstance()
                 if (session.isSessionOpen() || session.open()) {
                     val result = session.execute(command, timeoutSeconds = 5)
                     if (result.exitCode == 0) {
+                        _sampleError.value = null
                         return@withContext result.output.lines()
                     }
+                    _sampleError.value = SampleError.RootExecFailed("exitCode=${result.exitCode}")
                 }
             } catch (e: Exception) {
+                _sampleError.value = SampleError.RootExecFailed(e.message ?: "root 不可用")
                 Log.w(TAG, "Root shell also failed: ${e.message}")
             }
 
+            // 3. 显式标记本次失败原因, 让上层 UI 弹"一片空白"时知道根因
+            if (_sampleError.value == null) {
+                _sampleError.value = SampleError.NoBackingShell
+            }
             emptyList()
         }
     }
