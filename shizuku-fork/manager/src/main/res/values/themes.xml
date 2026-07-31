@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Shizuku fork 不内嵌 Manager UI，AppTheme 让 RequestPermissionActivity 至少能跑。
+      不再依赖 Theme.Material3.*.Shizuku (那需 materialthemebuilder 生成)，直接用基础 Material3。
+    -->
+    <style name="AppTheme" parent="Theme.Material3.DayNight.NoActionBar" />
+</resources>

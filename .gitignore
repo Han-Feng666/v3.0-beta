@@ -79,6 +79,7 @@
 *.ear
 **/.gradle/
 app/local.properties
+**/.cxx/
 
 # C/C++/Go/Rust
 *.o

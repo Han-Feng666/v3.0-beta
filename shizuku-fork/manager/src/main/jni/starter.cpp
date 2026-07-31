@@ -1,0 +1,375 @@
+#include <cstdio>
+#include <cstdlib>
+#include <fcntl.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <ctime>
+#include <cstring>
+#include <libgen.h>
+#include <sys/stat.h>
+#include <sys/system_properties.h>
+#include <cerrno>
+#include <string>
+#include <termios.h>
+#include "android.h"
+#include "misc.h"
+#include "selinux.h"
+#include "cgroup.h"
+#include "logging.h"
+
+#ifdef DEBUG
+#define JAVA_DEBUGGABLE
+#endif
+
+#define perrorf(...) fprintf(stderr, __VA_ARGS__)
+
+#define EXIT_FATAL_SET_CLASSPATH 3
+#define EXIT_FATAL_FORK 4
+#define EXIT_FATAL_APP_PROCESS 5
+#define EXIT_FATAL_UID 6
+#define EXIT_FATAL_PM_PATH 7
+#define EXIT_FATAL_KILL 9
+#define EXIT_FATAL_BINDER_BLOCKED_BY_SELINUX 10
+
+#define PACKAGE_NAME "com.HanFeng.shizuku"
+#define SERVER_NAME "hanfeng_shizuku_server"
+#define SERVER_CLASS_PATH "rikka.shizuku.server.ShizukuService"
+
+#if defined(__arm__)
+#define ABI "armeabi-v7a"
+#elif defined(__i386__)
+#define ABI "x86"
+#elif defined(__x86_64__)
+#define ABI "x86_64"
+#elif defined(__aarch64__)
+#define ABI "arm64-v8a"
+#endif
+
+static void run_server(const char *dex_path, const char *main_class, const char *process_name) {
+    if (setenv("CLASSPATH", dex_path, true)) {
+        LOGE("can't set CLASSPATH\n");
+        exit(EXIT_FATAL_SET_CLASSPATH);
+    }
+
+#define ARG(v) char **v = nullptr; \
+    char buf_##v[PATH_MAX]; \
+    size_t v_size = 0; \
+    uintptr_t v_current = 0;
+#define ARG_PUSH(v, arg) v_size += sizeof(char *); \
+if (v == nullptr) { \
+    v = (char **) malloc(v_size); \
+} else { \
+    v = (char **) realloc(v, v_size);\
+} \
+v_current = (uintptr_t) v + v_size - sizeof(char *); \
+*((char **) v_current) = arg ? strdup(arg) : nullptr;
+
+#define ARG_END(v) ARG_PUSH(v, nullptr)
+
+#define ARG_PUSH_FMT(v, fmt, ...) snprintf(buf_##v, PATH_MAX, fmt, __VA_ARGS__); \
+    ARG_PUSH(v, buf_##v)
+
+#ifdef JAVA_DEBUGGABLE
+#define ARG_PUSH_DEBUG_ONLY(v, arg) ARG_PUSH(v, arg)
+#define ARG_PUSH_DEBUG_VM_PARAMS(v) \
+    if (android_get_device_api_level() >= 30) { \
+        ARG_PUSH(v, "-Xcompiler-option"); \
+        ARG_PUSH(v, "--debuggable"); \
+        ARG_PUSH(v, "-XjdwpProvider:adbconnection"); \
+        ARG_PUSH(v, "-XjdwpOptions:suspend=n,server=y"); \
+    } else if (android_get_device_api_level() >= 28) { \
+        ARG_PUSH(v, "-Xcompiler-option"); \
+        ARG_PUSH(v, "--debuggable"); \
+        ARG_PUSH(v, "-XjdwpProvider:internal"); \
+        ARG_PUSH(v, "-XjdwpOptions:transport=dt_android_adb,suspend=n,server=y"); \
+    } else { \
+        ARG_PUSH(v, "-Xcompiler-option"); \
+        ARG_PUSH(v, "--debuggable"); \
+        ARG_PUSH(v, "-agentlib:jdwp=transport=dt_android_adb,suspend=n,server=y"); \
+    }
+#else
+#define ARG_PUSH_DEBUG_VM_PARAMS(v)
+#define ARG_PUSH_DEBUG_ONLY(v, arg)
+#endif
+
+    char lib_path[PATH_MAX]{0};
+    // 优先推算 <apk_dir>/lib/<ABI> (旧版 Android 抽出的目录),
+    // 不存在再 fallback 到环境变量 HANFENG_SHIZUKU_LIB_DIR (Android 11+ 上没有抽 .so 时使用)
+    {
+        char candidate[PATH_MAX];
+        const char* apk_dir = dirname(dex_path);
+        snprintf(candidate, PATH_MAX, "%s/lib/%s", apk_dir, ABI);
+        if (access(candidate, R_OK | X_OK) == 0) {
+            strncpy(lib_path, candidate, PATH_MAX - 1);
+        } else {
+            // candidate 目录不存在或不可读, 用环境变量
+            const char* env_lib = getenv("HANFENG_SHIZUKU_LIB_DIR");
+            if (env_lib && *env_lib) {
+                strncpy(lib_path, env_lib, PATH_MAX - 1);
+            } else {
+                // 兜底: 仍用 candidate (空的不存在目录, dlopen 会 false)
+                strncpy(lib_path, candidate, PATH_MAX - 1);
+            }
+        }
+    }
+
+    ARG(argv)
+    ARG_PUSH(argv, "/system/bin/app_process")
+    ARG_PUSH_FMT(argv, "-Djava.class.path=%s", dex_path)
+    ARG_PUSH_FMT(argv, "-Dshizuku.library.path=%s", lib_path)
+    ARG_PUSH_DEBUG_VM_PARAMS(argv)
+    ARG_PUSH(argv, "/system/bin")
+    ARG_PUSH_FMT(argv, "--nice-name=%s", process_name)
+    ARG_PUSH(argv, main_class)
+    ARG_PUSH_DEBUG_ONLY(argv, "--debug")
+    ARG_END(argv)
+
+    LOGD("exec app_process");
+
+    if (execvp((const char *) argv[0], argv)) {
+        exit(EXIT_FATAL_APP_PROCESS);
+    }
+}
+
+static void start_server(const char *path, const char *main_class, const char *process_name) {
+    pid_t pid = fork();
+    switch (pid) {
+        case -1: {
+            perrorf("fatal: can't fork\n");
+            exit(EXIT_FATAL_FORK);
+        }
+        case 0: {
+            LOGD("child");
+            setsid();
+            chdir("/");
+            int fd = open("/dev/null", O_RDWR);
+            if (fd != -1) {
+                dup2(fd, STDIN_FILENO);
+                if (fd > 2) close(fd);
+            }
+            // 把 stdout / stderr 重定向到可读文件,方便诊断 app_process 启动失败
+            // 写到 /data/local/tmp 是 root/adb_shell 都可读可写的位置
+            const char* err_path = "/data/local/tmp/hanfeng_shizuku_starter.err";
+            int efd = open(err_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (efd != -1) {
+                dup2(efd, STDOUT_FILENO);
+                dup2(efd, STDERR_FILENO);
+                if (efd > 2) close(efd);
+            } else {
+                // fallback /dev/null
+                int nfd = open("/dev/null", O_RDWR);
+                if (nfd != -1) {
+                    dup2(nfd, STDOUT_FILENO);
+                    dup2(nfd, STDERR_FILENO);
+                    if (nfd > 2) close(nfd);
+                }
+            }
+            run_server(path, main_class, process_name);
+        }
+        default: {
+            printf("info: shizuku_server pid is %d\n", pid);
+            printf("info: shizuku_starter exit with 0\n");
+            exit(EXIT_SUCCESS);
+        }
+    }
+}
+
+static int check_selinux(const char *s, const char *t, const char *c, const char *p) {
+    int res = se::selinux_check_access(s, t, c, p, nullptr);
+#ifndef DEBUG
+    if (res != 0) {
+#endif
+    printf("info: selinux_check_access %s %s %s %s: %d\n", s, t, c, p, res);
+    fflush(stdout);
+#ifndef DEBUG
+    }
+#endif
+    return res;
+}
+
+static int switch_cgroup() {
+    int pid = getpid();
+    if (cgroup::switch_cgroup("/acct", pid)) {
+        printf("info: switch cgroup succeeded, cgroup in /acct\n");
+        return 0;
+    }
+    if (cgroup::switch_cgroup("/dev/cg2_bpf", pid)) {
+        printf("info: switch cgroup succeeded, cgroup in /dev/cg2_bpf\n");
+        return 0;
+    }
+    if (cgroup::switch_cgroup("/sys/fs/cgroup", pid)) {
+        printf("info: switch cgroup succeeded, cgroup in /sys/fs/cgroup\n");
+        return 0;
+    }
+    char buf[PROP_VALUE_MAX + 1];
+    if (__system_property_get("ro.config.per_app_memcg", buf) > 0 &&
+        strncmp(buf, "false", 5) != 0) {
+        if (cgroup::switch_cgroup("/dev/memcg/apps", pid)) {
+            printf("info: switch cgroup succeeded, cgroup in /dev/memcg/apps\n");
+            return 0;
+        }
+    }
+    printf("warn: can't switch cgroup\n");
+    fflush(stdout);
+    return -1;
+}
+
+int main(int argc, char *argv[]) {
+    std::string apk_path;
+    for (int i = 0; i < argc; ++i) {
+        if (strncmp(argv[i], "--apk=", 6) == 0) {
+            apk_path = argv[i] + 6;
+        }
+    }
+
+    uid_t uid = getuid();
+    if (uid != 0 && uid != 2000) {
+        perrorf("fatal: run Shizuku from non root nor adb user (uid=%d).\n", uid);
+        exit(EXIT_FATAL_UID);
+    }
+
+    se::init();
+
+    if (uid == 0) {
+        switch_cgroup();
+
+        if (android_get_device_api_level() >= 29) {
+            printf("info: switching mount namespace to init...\n");
+            switch_mnt_ns(1);
+        }
+    }
+
+    if (uid == 0) {
+        char *context = nullptr;
+        if (se::getcon(&context) == 0) {
+            int res = 0;
+
+            res |= check_selinux("u:r:untrusted_app:s0", context, "binder", "call");
+            res |= check_selinux("u:r:untrusted_app:s0", context, "binder", "transfer");
+
+            if (res != 0) {
+                // 这条断言原本是给官方 Magisk 做兼容性预警: 如果 su context 对 untrusted_app 没放行
+                // binder transfer,server 启了起来也无法把 binder 推回 app, 没意义就退出。
+                //
+                // 但 KernelSU/APatch 上 su context 跟 Magisk 不同, 这条策略可能没显式放行
+                // untrusted_app:s0 → su:s0 的 binder transfer (尽管实际 binder 推时走的是
+                // magisk:s0 ↔ magisk:s0 等其它放行规则, fallback 到 permissive 也允许)。
+                // 原版的硬退出会把 KSU 上本来可用的 root 激活路径封死。
+                //
+                // 这里降级为 warning, 让后续的 binder transfer 实际尝试一次:
+                // - 真不通的话 server 启起来了 binder 也推不回来, 由 waitForBinderAlive 超时给提示
+                // - 通的话用户少跑一次因 SELinux 假阳性而失败的弯路
+                perrorf("warn: selinux_check_access reports binder transfer may be blocked (res=%d, context=%s).\n"
+                        "warn: 这条断言在 KernelSU/APatch 上常因策略集与 Magisk 不同而误报, 继续启动 server 验证实际 binder 可达性。\n",
+                        res, context);
+            }
+            se::freecon(context);
+        }
+    }
+
+    printf("info: starter begin\n");
+    fflush(stdout);
+
+    // kill old server
+    printf("info: killing old process...\n");
+    fflush(stdout);
+
+    foreach_proc([](pid_t pid) {
+        if (pid == getpid()) return;
+
+        char name[1024];
+        if (get_proc_name(pid, name, 1024) != 0) return;
+
+        if (strcmp(SERVER_NAME, name) != 0)
+            return;
+
+        if (kill(pid, SIGKILL) == 0)
+            printf("info: killed %d (%s)\n", pid, name);
+        else if (errno == EPERM) {
+            perrorf("fatal: can't kill %d, please try to stop existing Shizuku from app first.\n", pid);
+            exit(EXIT_FATAL_KILL);
+        } else {
+            printf("warn: failed to kill %d (%s)\n", pid, name);
+        }
+    });
+
+    if (access(apk_path.c_str(), R_OK) == 0) {
+        printf("info: use apk path from argv\n");
+        fflush(stdout);
+    }
+
+    if (apk_path.empty()) {
+        auto f = popen("pm path " PACKAGE_NAME, "r");
+        if (f) {
+            char line[PATH_MAX]{0};
+            fgets(line, PATH_MAX, f);
+            trim(line);
+            if (strstr(line, "package:") == line) {
+                apk_path = line + strlen("package:");
+            }
+            pclose(f);
+        }
+    }
+
+    if (apk_path.empty()) {
+        perrorf("fatal: can't get path of manager\n");
+        exit(EXIT_FATAL_PM_PATH);
+    }
+
+    printf("info: apk path is %s\n", apk_path.c_str());
+    if (access(apk_path.c_str(), R_OK) != 0) {
+        perrorf("fatal: can't access manager %s\n", apk_path.c_str());
+        exit(EXIT_FATAL_PM_PATH);
+    }
+
+    printf("info: starting server...\n");
+    fflush(stdout);
+
+    // Android 11+ 上即便 manifest extractNativeLibs=true,PackageManager 也可能用 zip 内 .so
+    // 直接映射, 不实际抽到 /data/app/<pkg>/lib/<ABI>/librish.so 这种目录。
+    // 而中文 fork 里 RishConfig.loadLibrary 走 System.load(libraryPath + "/librish.so"),
+    // libraryPath 用 starter.cpp 推算的 <apk_dir>/lib/<ABI>, 该目录可能不存在导致 dlopen 失败。
+    //
+    // 保险做法: 在启动 server 之前, 用 unzip (toybox 内置) 把 APK 内 lib/<ABI>/librish.so
+    // 抽到 /data/local/tmp/hanfeng_shizuku_libs/<ABI>/librish.so, 修改 shizuku.library.path
+    // 指向这个目录。该目录 root + adb_shell 都可读可写。
+    {
+        const char* abi = ABI;
+        char tmp_lib_dir[PATH_MAX];
+        snprintf(tmp_lib_dir, PATH_MAX,
+                 "/data/local/tmp/hanfeng_shizuku_libs/%s", abi);
+        // mkdir -p 等价: 用 system() 走 shell 一次
+        char mkdir_cmd[PATH_MAX + 64];
+        snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p '%s'", tmp_lib_dir);
+        int mr = system(mkdir_cmd);
+        (void)mr;
+
+        // 抽 libshizuku.so 和 librish.so — 两者在 server 端都可能加.
+        const char* libs_to_extract[] = {"librish.so", "libshizuku.so", nullptr};
+        for (int li = 0; libs_to_extract[li]; ++li) {
+            const char* lib = libs_to_extract[li];
+            char src_entry[PATH_MAX];
+            snprintf(src_entry, PATH_MAX, "lib/%s/%s", abi, lib);
+            char dest_path[PATH_MAX];
+            snprintf(dest_path, PATH_MAX, "%s/%s", tmp_lib_dir, lib);
+
+            // 用 unzip -o 覆盖 (-o 是 toybox 标准 flag)
+            char unzip_cmd[PATH_MAX * 3];
+            snprintf(unzip_cmd, sizeof(unzip_cmd),
+                     "unzip -o -j '%s' '%s' -d '%s' >/dev/null 2>&1 && chmod 644 '%s'",
+                     apk_path.c_str(), src_entry, tmp_lib_dir, dest_path);
+            int ur = system(unzip_cmd);
+            if (ur != 0 || access(dest_path, R_OK) != 0) {
+                printf("warn: extract %s from apk failed\n", lib);
+            } else {
+                printf("info: extracted %s to %s\n", lib, dest_path);
+            }
+        }
+        // 把抽出的目录 export 给后续 run_server 用作 shizuku.library.path
+        setenv("HANFENG_SHIZUKU_LIB_DIR", tmp_lib_dir, 1);
+    }
+    fflush(stdout);
+
+    LOGD("start_server");
+    start_server(apk_path.c_str(), SERVER_CLASS_PATH, SERVER_NAME);
+}
