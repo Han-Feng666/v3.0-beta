@@ -31,7 +31,7 @@
 #define EXIT_FATAL_KILL 9
 #define EXIT_FATAL_BINDER_BLOCKED_BY_SELINUX 10
 
-#define PACKAGE_NAME "com.HanFeng.shizuku"
+#define PACKAGE_NAME "com.HanFeng"
 #define SERVER_NAME "hanfeng_shizuku_server"
 #define SERVER_CLASS_PATH "rikka.shizuku.server.ShizukuService"
 
@@ -93,25 +93,11 @@ v_current = (uintptr_t) v + v_size - sizeof(char *); \
 #endif
 
     char lib_path[PATH_MAX]{0};
-    // 优先推算 <apk_dir>/lib/<ABI> (旧版 Android 抽出的目录),
-    // 不存在再 fallback 到环境变量 HANFENG_SHIZUKU_LIB_DIR (Android 11+ 上没有抽 .so 时使用)
-    {
-        char candidate[PATH_MAX];
-        const char* apk_dir = dirname(dex_path);
-        snprintf(candidate, PATH_MAX, "%s/lib/%s", apk_dir, ABI);
-        if (access(candidate, R_OK | X_OK) == 0) {
-            strncpy(lib_path, candidate, PATH_MAX - 1);
-        } else {
-            // candidate 目录不存在或不可读, 用环境变量
-            const char* env_lib = getenv("HANFENG_SHIZUKU_LIB_DIR");
-            if (env_lib && *env_lib) {
-                strncpy(lib_path, env_lib, PATH_MAX - 1);
-            } else {
-                // 兜底: 仍用 candidate (空的不存在目录, dlopen 会 false)
-                strncpy(lib_path, candidate, PATH_MAX - 1);
-            }
-        }
-    }
+    // 与官方 RikkaApps 一致: 直接推算 <apk_dir>/lib/<ABI>.
+    // 主 app 主清单设置 useLegacyPackaging=true, 会在 nativeLibraryDir 抽出 .so,
+    // starter 是 root 在 init mount ns 下执行, dirname(dex_path) 就是 nativeLibDir 的父目录,
+    // 该路径下 lib/<ABI>/librish.so 对 server 进程可读.
+    snprintf(lib_path, PATH_MAX, "%s/lib/%s", dirname(dex_path), ABI);
 
     ARG(argv)
     ARG_PUSH(argv, "/system/bin/app_process")
@@ -323,51 +309,6 @@ int main(int argc, char *argv[]) {
     }
 
     printf("info: starting server...\n");
-    fflush(stdout);
-
-    // Android 11+ 上即便 manifest extractNativeLibs=true,PackageManager 也可能用 zip 内 .so
-    // 直接映射, 不实际抽到 /data/app/<pkg>/lib/<ABI>/librish.so 这种目录。
-    // 而中文 fork 里 RishConfig.loadLibrary 走 System.load(libraryPath + "/librish.so"),
-    // libraryPath 用 starter.cpp 推算的 <apk_dir>/lib/<ABI>, 该目录可能不存在导致 dlopen 失败。
-    //
-    // 保险做法: 在启动 server 之前, 用 unzip (toybox 内置) 把 APK 内 lib/<ABI>/librish.so
-    // 抽到 /data/local/tmp/hanfeng_shizuku_libs/<ABI>/librish.so, 修改 shizuku.library.path
-    // 指向这个目录。该目录 root + adb_shell 都可读可写。
-    {
-        const char* abi = ABI;
-        char tmp_lib_dir[PATH_MAX];
-        snprintf(tmp_lib_dir, PATH_MAX,
-                 "/data/local/tmp/hanfeng_shizuku_libs/%s", abi);
-        // mkdir -p 等价: 用 system() 走 shell 一次
-        char mkdir_cmd[PATH_MAX + 64];
-        snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p '%s'", tmp_lib_dir);
-        int mr = system(mkdir_cmd);
-        (void)mr;
-
-        // 抽 libshizuku.so 和 librish.so — 两者在 server 端都可能加.
-        const char* libs_to_extract[] = {"librish.so", "libshizuku.so", nullptr};
-        for (int li = 0; libs_to_extract[li]; ++li) {
-            const char* lib = libs_to_extract[li];
-            char src_entry[PATH_MAX];
-            snprintf(src_entry, PATH_MAX, "lib/%s/%s", abi, lib);
-            char dest_path[PATH_MAX];
-            snprintf(dest_path, PATH_MAX, "%s/%s", tmp_lib_dir, lib);
-
-            // 用 unzip -o 覆盖 (-o 是 toybox 标准 flag)
-            char unzip_cmd[PATH_MAX * 3];
-            snprintf(unzip_cmd, sizeof(unzip_cmd),
-                     "unzip -o -j '%s' '%s' -d '%s' >/dev/null 2>&1 && chmod 644 '%s'",
-                     apk_path.c_str(), src_entry, tmp_lib_dir, dest_path);
-            int ur = system(unzip_cmd);
-            if (ur != 0 || access(dest_path, R_OK) != 0) {
-                printf("warn: extract %s from apk failed\n", lib);
-            } else {
-                printf("info: extracted %s to %s\n", lib, dest_path);
-            }
-        }
-        // 把抽出的目录 export 给后续 run_server 用作 shizuku.library.path
-        setenv("HANFENG_SHIZUKU_LIB_DIR", tmp_lib_dir, 1);
-    }
     fflush(stdout);
 
     LOGD("start_server");

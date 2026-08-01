@@ -230,7 +230,7 @@
         <!-- 下拉通知栏快捷设置磁贴,快捷开关广告拦截 -->
         <service
             android:name="com.HanFeng.service.AdBlockTileService"
-            android:label="广告拦截"
+            android:label="寒枫"
             android:icon="@drawable/ic_ad_block_tile"
             android:exported="true"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">

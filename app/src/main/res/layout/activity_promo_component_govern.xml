@@ -88,6 +88,21 @@
                 android:layout_height="1dp" />
 
             <Button
+                android:id="@+id/btnSdkComponents"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:background="@drawable/bg_button"
+                android:backgroundTint="@null"
+                android:minWidth="112dp"
+                android:text="SDK 组件"
+                android:textAllCaps="false"
+                android:textColor="@color/hf_text_primary" />
+
+            <Space
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <Button
                 android:id="@+id/btnAllActivities"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"
@@ -147,6 +162,17 @@
             android:textAllCaps="false"
             android:textColor="@color/hf_text_primary" />
     </LinearLayout>
+
+    <Button
+        android:id="@+id/btnDisableAllSdk"
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_button"
+        android:backgroundTint="@null"
+        android:text="一键禁用所有 SDK 组件"
+        android:textAllCaps="false"
+        android:textColor="@color/hf_text_primary" />
 
     <TextView
         android:id="@+id/emptyText"

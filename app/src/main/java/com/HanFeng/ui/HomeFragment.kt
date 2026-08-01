@@ -302,6 +302,11 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
         val ctx = imageView.context.applicationContext
         val customPath = FeatureSettingsRepository.getCustomBackgroundPath(ctx)
         if (!customPath.isNullOrEmpty()) {
+            // 文件存在性预检 - 用户卸装/清除数据后, SP 里仍存着的旧 paths 文件已不存在,
+            // 这种情况显式清掉失效路径后走 asset fallback, 避免 SP 永久持有死路径导致主界面背景图空白.
+            if (!java.io.File(customPath).isFile) {
+                FeatureSettingsRepository.removeCustomBackgroundPath(ctx, customPath)
+            }
             imageView.applyCustomFileBackground(customPath)
         } else {
             imageView.applyCustomAssetBackground("custom/background")

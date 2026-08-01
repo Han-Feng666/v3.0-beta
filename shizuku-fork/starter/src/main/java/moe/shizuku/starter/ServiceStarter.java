@@ -100,7 +100,7 @@ public class ServiceStarter {
     }
 
     private static boolean sendBinder(IBinder binder, String token, boolean retry) {
-        String packageName = "com.HanFeng.shizuku";
+        String packageName = "com.HanFeng";
         String name = packageName + ".shizuku";
         int userId = 0;
         IContentProvider provider = null;

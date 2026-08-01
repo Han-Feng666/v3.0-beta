@@ -798,7 +798,11 @@ btnRootHide.setOnClickListener {
                     when (result) {
                         is com.HanFeng.adblocker.shizuku.SystemCertInstaller.InstallResult.Success -> {
                             val persistentHint = if (result.persistent) {
-                                "\n\n此安装方式会在重启后自动生效，无需重新安装。"
+                                if (result.method.contains("module_ok=true")) {
+                                    "\n\n已写入 root 模块 hf_system_cacerts, 重启一次后证书在系统启动时自动挂载, 之后永久生效."
+                                } else {
+                                    "\n\n此安装方式会在重启后自动生效，无需重新安装。"
+                                }
                             } else {
                                 "\n\n此安装方式在重启后会失效，需要重新安装。建议使用 Magisk 模块方式。"
                             }
@@ -1650,8 +1654,25 @@ btnRootHide.setOnClickListener {
                 ?: lines.firstOrNull { it.startsWith("ril.imei=") }
                     ?.substringAfter('=')?.trim()
                     ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("persist.vendor.radio.imei=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("ro.vendor.radio.imei=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("ro.boot.miui.imei1=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
             val displayVal = rilVal ?: propVal
-            tvCurrent.text = "当前 IMEI：\n${displayVal ?: "(无法读取)"}"
+            // 关键改动: 不再静默写 "(无法读取)" - 把完整诊断明细展示给用户,
+            // 让用户看清 service call / dumpsys 是否被deny / prop 是否全空, 才能针对性报问题.
+            tvCurrent.text = if (displayVal != null) {
+                "当前 IMEI：\n$displayVal"
+            } else {
+                // 把 output 里 "# 解析明细" 之后的内容直接展示, UI 高度有限只取前 800 char
+                val diagBlock = result.output.substringAfter("# 解析明细", "").trim().take(800)
+                "未能读取 IMEI\n诊断信息:\n$diagBlock"
+            }
             if (!propVal.isNullOrBlank()) {
                 etInput.setText(propVal)
                 etInput.setSelection(etInput.text.length)
@@ -1786,8 +1807,22 @@ btnRootHide.setOnClickListener {
                 ?: lines.firstOrNull { it.startsWith("ril.meid=") }
                     ?.substringAfter('=')?.trim()
                     ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("persist.vendor.radio.meid=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("ro.vendor.radio.meid=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("ro.boot.miui.meid=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
             val displayVal = rilVal ?: propVal
-            tvCurrent.text = "当前 MEID：\n${displayVal ?: "(无法读取)"}"
+            tvCurrent.text = if (displayVal != null) {
+                "当前 MEID：\n$displayVal"
+            } else {
+                val diagBlock = result.output.substringAfter("# 解析明细", "").trim().take(800)
+                "未能读取 MEID\n诊断信息:\n$diagBlock"
+            }
             if (!propVal.isNullOrBlank()) {
                 etInput.setText(propVal)
                 etInput.setSelection(etInput.text.length)

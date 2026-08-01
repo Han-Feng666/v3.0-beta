@@ -124,6 +124,37 @@ class SystemCertInstaller(private val context: Context) {
             session.execute("rm -f '$tmpPath'", timeoutSeconds = 2)
         }
 
+        // 即时挂载 (走 SuSession 当前进程 root) 走一层.
+        // Android 14+/16 EROFS 只读 fs 上 (a)(b)(c) 三段即时路径基本全失败 - APEX 不可写,
+        // bind mount 也可能因严格 mount namespace 策略оюза言语让系统全员只看到 init 进程的 ns,
+        // 单 app 上下文挂载进入-init:进入-zygote 的 nsbind mount 是关键点但是仍然可能失败.
+        //
+        // 所以最终兜底: 写 root 模块 hf_system_cacerts, post-fs-data.sh 在 boot 早段
+        // (zygote 启动前) staging bind mount, 所有 app 启动时立刻就看到证书, 绕开 EROFS 限制.
+        // 这样即便 SuSession 即时挂载失败, 用户重启一次后证书永久生效, 模块也会自动重做挂载.
+        triedMethods.add("module")
+        val moduleResult = installToSystemModule(tmpPath, certFileName, diagnostics)
+        if (moduleResult) {
+            triedMethods.add("module_ok")
+            // 模块成功后, 即便 SuSession 即时挂载没成, 也算 success - 但 persistent=true,
+            // 提示用户需要重启一次让 post-fs-data.sh 真正跑起来 mount.
+            return if (installedAt != null) {
+                // 即时挂载也成 - 完美 case
+                InstallResult.Success(
+                    "installed_at=$installedAt, module_ok=true, persistent=true",
+                    certFileName, true, diagnostics
+                )
+            } else {
+                // SuSession 即时挂载失败, 但模块已写盘 - 重启后生效
+                InstallResult.Success(
+                    "SuSession 即时挂载失败但已写入模块 hf_system_cacerts, persistent=true (重启后生效)",
+                    certFileName, true, diagnostics
+                )
+            }
+        } else {
+            triedMethods.add("module_fail")
+        }
+
         return if (installedAt != null) {
             val methodLabel = buildString {
                 append("installed_at=").append(installedAt)
@@ -140,6 +171,105 @@ class SystemCertInstaller(private val context: Context) {
             )
         }
     }
+
+    /**
+     * 把证书写入 root 模块 hf_system_cacerts, post-fs-data.sh 在 boot 早段 staging bind mount
+     * 到 /system/etc/security/cacerts 和 /apex/com.android.conscrypt/cacerts.
+     *
+     * 这是 Android 14+/16 EROFS 上唯一稳定的持久化方式 - SuSession 即时 bind mount 即便成功,
+     * 重启即失效; 而 root 模块方式是 init 阶段 post-fs-data 时挂载, 在 zygote 启动前就装好,
+     * 所有 app 启动时全军就看到证书, 且重启不丢.
+     *
+     * 参考 ProxyPinCA Magisk 模块 post-fs-data.sh 的标准模式:
+     *   1. mkdir /data/adb/hf_cacerts 持久 cert staging
+     *   2. mkdir /data/adb/modules/hf_system_cacerts 写 module.prop + post-fs-data.sh
+     *   3. post-fs-data.sh: 复制原系统证书 + 我们的证书到临时 staging → bind mount 到两个目录
+     *   4. setcap + chcon 让 SELinux label 与原系统证书一致
+     */
+    private fun installToSystemModule(
+        tmpPath: String,
+        certFileName: String,
+        diagnostics: LinkedHashMap<String, String>
+    ): Boolean {
+        val session = SuSession.getInstance()
+        val cacertsStagingDir = "/data/adb/hf_cacerts"
+        val moduleDir = "/data/adb/modules/hf_system_cacerts"
+
+        val cmd = buildString {
+            // 1. 把证书持久存到 /data/adb/hf_cacerts (root-only 持久目录, 重启不丢)
+            append("mkdir -p '$cacertsStagingDir' && ")
+            append("cp -f '$tmpPath' '$cacertsStagingDir/$certFileName' && ")
+            append("chmod 644 '$cacertsStagingDir/$certFileName' && ")
+            // 写一个 sentinel 文件让模块 post-fs-data.sh 知道有证书要装
+            append("touch '$cacertsStagingDir/.install_marker' && ")
+
+            // 2. 创建 root 模块
+            append("mkdir -p '$moduleDir' && ")
+
+            // module.prop
+            append("cat > '$moduleDir/module.prop' << 'EOPROP'\n")
+            append("id=hf_system_cacerts\n")
+            append("name=寒枫系统证书安装\n")
+            append("version=v1.0\n")
+            append("versionCode=1\n")
+            append("author=HanFeng\n")
+            append("description=把寒枫 MITM CA 证书安装到 /system/etc/security/cacerts 和 /apex/com.android.conscrypt/cacerts, 在 boot 早段 staging bind mount, 绕开 Android 14+/16 EROFS 只读 fs 限制\n")
+            append("EOPROP\n")
+
+            // post-fs-data.sh - 在 zygote 启动前跑,
+            // 参考 ProxyPinCA 模块. 关键: bind mount 整个 staging 目录到系统目录,
+            // 必须先把原系统证书全 cp 到 staging 才能覆盖原证书列表.
+            append("cat > '$moduleDir/post-fs-data.sh' << 'EOPFD'\n")
+            append("#!/system/bin/sh\n")
+            append("MODDIR=\${0%/*}\n")
+            append("STAGING_DIR=/data/adb/hf_cacerts/staging\n")
+            append("CERT_SOURCE=/data/adb/hf_cacerts\n")
+            append("\n")
+            append("# 没有 sentinel 文件就不做事, 让模块纯净\n")
+            append("[ -f \"\$CERT_SOURCE/.install_marker\" ] || exit 0\n")
+            append("\n")
+            append("# staging: 复制原系统证书 + 我们的证书, 然后 bind 整个 staging 到两个 CA 目录\n")
+            append("setup_cacerts_dir() {\n")
+            append("  local target_dir=\$1\n")
+            append("  [ -d \"\$target_dir\" ] || return 1\n")
+            append("  local staging=\"\$STAGING_DIR/\$(basename \"\$target_dir\")\"\n")
+            append("  rm -rf \"\$staging\"\n")
+            append("  mkdir -p -m 700 \"\$staging\"\n")
+            append("  cp -f \"\$target_dir\"/* \"\$staging\"/ 2>/dev/null\n")
+            append("  cp -f \"\$CERT_SOURCE\"/*.0 \"\$staging\"/ 2>/dev/null\n")
+            append("  chmod 644 \"\$staging\"/*.0 2>/dev/null\n")
+            append("  # 复用原目录的 SELinux label\n")
+            append("  local ctx=\$(ls -Zd \"\$target_dir\" 2>/dev/null | awk '{print \$1}')\n")
+            append("  if [ -n \"\$ctx\" ] && [ \"\$ctx\" != \"?\" ]; then chcon -R \"\$ctx\" \"\$staging\" 2>/dev/null; fi\n")
+            append("  chown -R 0:0 \"\$staging\" 2>/dev/null\n")
+            append("  # 完整性检查 - 证书数太少防止挂坏\n")
+            append("  local n=\$(ls -1 \"\$staging\" 2>/dev/null | wc -l)\n")
+            append("  if [ \"\$n\" -gt 10 ]; then\n")
+            append("    mount --bind \"\$staging\" \"\$target_dir\"\n")
+            append("    return 0\n")
+            append("  else\n")
+            append("    return 1\n")
+            append("  fi\n")
+            append("}\n")
+            append("\n")
+            append("setup_cacerts_dir /system/etc/security/cacerts\n")
+            append("# Android 14+ real loading path - 不存在就跳过\n")
+            append("[ -d /apex/com.android.conscrypt/cacerts ] && setup_cacerts_dir /apex/com.android.conscrypt/cacerts\n")
+            append("EOPFD\n")
+            append("chmod 755 '$moduleDir/post-fs-data.sh' && ")
+
+            // update sentinel 让 Magisk/KSU 下次 boot 时刷一遍模块
+            append("touch '$moduleDir/update' && ")
+
+            // 验证
+            append("if [ -f '$moduleDir/module.prop' ] && [ -x '$moduleDir/post-fs-data.sh' ] && [ -f '$cacertsStagingDir/$certFileName' ]; then echo OK; else echo FAIL; fi")
+        }
+
+        val result = session.execute(cmd, timeoutSeconds = 10)
+        diagnostics["module_install"] = result.output.trim().take(800)
+        return result.output.contains("OK")
+    }
+
 
     /** 单目录安装结果 */
     private data class DirInstallResult(val success: Boolean, val persistent: Boolean)
@@ -159,12 +289,21 @@ class SystemCertInstaller(private val context: Context) {
         val remountResult = session.execute(
             "mount -o remount,rw '$dirPath' 2>&1 | head -2; " +
                 "mount -o remount,rw /system 2>/dev/null; mount -o remount,rw / 2>/dev/null; " +
-                "cp -f '$tmpPath' '$targetPath' && chmod 644 '$targetPath' && sync && " +
-                "test -f '$targetPath' && echo OK || echo FAIL",
-            timeoutSeconds = 6
+                // 写盘必须 cp 真成功, 决不能跟 remount 失败并行: 用分量 && 链+最后做一致性校验
+                "cp -f '$tmpPath' '$targetPath' && chmod 644 '$targetPath' && sync || true; " +
+                // 严格校验: 文件存在 + 大小非0 + md5 == 源, 三条都过才算 OK
+                "if [ -f '$targetPath' ] && [ -s '$targetPath' ]; then " +
+                "  SRC_MD5=\$(md5sum '$tmpPath' 2>/dev/null | awk '{print \$1}'); " +
+                "  DST_MD5=\$(md5sum '$targetPath' 2>/dev/null | awk '{print \$1}'); " +
+                "  if [ -n \"\$SRC_MD5\" ] && [ \"\$SRC_MD5\" = \"\$DST_MD5\" ]; then echo OK; " +
+                "  else echo MD5_MISMATCH; fi; " +
+                "else echo FAIL; fi; " +
+                // remount 失败 / cp / test 失败都恢复只读, 防止误把系统留在 rw 状态
+                "mount -o remount,ro /system 2>/dev/null; mount -o remount,ro / 2>/dev/null; true",
+            timeoutSeconds = 8
         )
         diagnostics["${dirName}_remount_cp"] = remountResult.output.trim().take(500)
-        if (remountResult.output.contains("OK")) {
+        if (remountResult.output.contains("OK") && !remountResult.output.contains("MD5_MISMATCH")) {
             // 恢复只读保证系统稳定
             session.execute("mount -o remount,ro /system 2>/dev/null; mount -o remount,ro / 2>/dev/null; true",
                 timeoutSeconds = 2)
@@ -195,12 +334,20 @@ class SystemCertInstaller(private val context: Context) {
             append("  for pid in 1 \$(pgrep zygote) \$(pgrep zygote64); do ")
             append("    [ -d /proc/\$pid/ns/mnt ] && nsenter --mount=/proc/\$pid/ns/mnt -- mount -o bind \$STAGING '$dirPath' 2>/dev/null; ")
             append("  done; ")
-            append("  echo OK; ")
-            append("else echo FAIL; fi")
+            // 关键: 必须真正校验挂载上了 - 用 findmnt 看 dirPath 的 SOURCE 是 STAGING,
+            // 而且目标目录里能直接 ls 到 certFileName 才算 OK,
+            // 否则前几步"挂载了"的 echo 可能被前面 nsenter 报错覆盖误判.
+            append("  MOUNT_SRC=\$(findmnt -n -o SOURCE '$dirPath' 2>/dev/null); ")
+            append("  if [ \"\$MOUNT_SRC\" = \"\$STAGING\" ] && [ -f '$dirPath/$certFileName' ]; then echo OK; ")
+            append("  else echo MOUNT_NOT_VALID; fi; ")
+            append("else echo STAGING_EMPTY; fi")
         }
         val overlayResult = session.execute(overlayCmd, timeoutSeconds = 10)
         diagnostics["${dirName}_overlay_bind"] = overlayResult.output.trim().take(500)
-        if (overlayResult.output.contains("OK")) {
+        if (overlayResult.output.contains("OK") &&
+            !overlayResult.output.contains("MOUNT_NOT_VALID") &&
+            !overlayResult.output.contains("STAGING_EMPTY")
+        ) {
             // 注意：staging 目录不要立即 rm — bind mount 持有的源对象必须保留
             return DirInstallResult(success = true, persistent = false)
         }
@@ -211,11 +358,17 @@ class SystemCertInstaller(private val context: Context) {
             append("for pid in 1 \$(pgrep zygote) \$(pgrep zygote64); do ")
             append("  [ -d /proc/\$pid/ns/mnt ] && nsenter --mount=/proc/\$pid/ns/mnt -- mount --bind '$tmpPath' '$targetPath' 2>/dev/null; ")
             append("done; ")
-            append("test -f '$targetPath' && echo OK || echo FAIL")
+            // 同样严格: findmnt source 是 tmpPath, targetPath 内容非空 md5 与源一致
+            append("MOUNT_SRC=\$(findmnt -n -o SOURCE '$targetPath' 2>/dev/null); ")
+            append("if [ \"\$MOUNT_SRC\" = '$tmpPath' ] && [ -s '$targetPath' ]; then ")
+            append("  SRC_MD5=\$(md5sum '$tmpPath' 2>/dev/null | awk '{print \$1}'); ")
+            append("  DST_MD5=\$(md5sum '$targetPath' 2>/dev/null | awk '{print \$1}'); ")
+            append("  if [ \"\$SRC_MD5\" = \"\$DST_MD5\" ]; then echo OK; else echo MD5_MISMATCH; fi; ")
+            append("else echo MOUNT_NOT_VALID; fi")
         }
         val bindResult = session.execute(singleBindCmd, timeoutSeconds = 6)
         diagnostics["${dirName}_single_bind"] = bindResult.output.trim().take(500)
-        return if (bindResult.output.contains("OK")) {
+        return if (bindResult.output.contains("OK") && !bindResult.output.contains("MD5_MISMATCH")) {
             DirInstallResult(success = true, persistent = false)
         } else {
             DirInstallResult(success = false, persistent = false)
@@ -264,8 +417,35 @@ class SystemCertInstaller(private val context: Context) {
         }
 
         return when {
-            removedFrom.isNotEmpty() -> UninstallResult.Success(removedFrom)
-            else -> UninstallResult.Failure("未找到已安装的证书（可能已被重启清除）")
+            removedFrom.isNotEmpty() -> {
+                // 即时挂载删了, 但模块里的证书 staging 没删 - 也清掉, 防止重启后 post-fs-data 又装回来
+                val module = "/data/adb/modules/hf_system_cacerts"
+                val staging = "/data/adb/hf_cacerts"
+                session.execute(
+                    "rm -rf '$module' '$staging' 2>/dev/null; " +
+                        "echo MODULE_CLEANED",
+                    timeoutSeconds = 4
+                )
+                UninstallResult.Success(removedFrom)
+            }
+            else -> {
+                // 即时挂载可能未装, 但模块未清 - 直接清模块状态, 然后告诉用户
+                val module = "/data/adb/modules/hf_system_cacerts"
+                val staging = "/data/adb/hf_cacerts"
+                val anyExist = session.execute(
+                    "if [ -d '$module' ] || [ -d '$staging' ]; then echo EXISTS; else echo NONE; fi",
+                    timeoutSeconds = 3
+                ).output.trim()
+                if (anyExist.contains("EXISTS")) {
+                    session.execute(
+                        "rm -rf '$module' '$staging' 2>/dev/null; echo MODULE_CLEANED",
+                        timeoutSeconds = 4
+                    )
+                    UninstallResult.Success(listOf("module"))
+                } else {
+                    UninstallResult.Failure("未找到已安装的证书（可能已被重启清除）")
+                }
+            }
         }
     }
 

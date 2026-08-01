@@ -76,7 +76,7 @@ public class ShizukuProvider extends ContentProvider {
 
     public static final String PERMISSION = "com.HanFeng.permission.shizuku.API_V23";
 
-    public static final String MANAGER_APPLICATION_ID = "com.HanFeng.shizuku";
+    public static final String MANAGER_APPLICATION_ID = "com.HanFeng";
 
     private static boolean enableMultiProcess = false;
 

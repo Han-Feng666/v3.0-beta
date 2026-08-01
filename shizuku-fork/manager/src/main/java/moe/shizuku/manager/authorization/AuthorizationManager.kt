@@ -9,7 +9,7 @@ import rikka.shizuku.Shizuku
 
 /**
  * 简化版：只支持 Shizuku v11+。
- * 我们已 fork 为 com.HanFeng.shizuku，过滤自己的 packageName。
+ * fork 后实际 applicationId 是 com.HanFeng，过滤自身 packageName 用此名。
  *
  * 安全加固：
  *   - 所有 binder 入口都先拿 Binder 并 null-check；binder 不可用时抛 IllegalState 而非 NPE。
@@ -18,7 +18,7 @@ import rikka.shizuku.Shizuku
 object AuthorizationManager {
 
     private const val TAG = "AuthzManager"
-    private const val SELF_PACKAGE_NAME = "com.HanFeng.shizuku"
+    private const val SELF_PACKAGE_NAME = "com.HanFeng"
 
     private const val FLAG_ALLOWED = 1 shl 1
     private const val FLAG_DENIED = 1 shl 2

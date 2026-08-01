@@ -2263,6 +2263,9 @@ class RulesFragment : Fragment(R.layout.fragment_rules) {
         val ctx = imageView.context.applicationContext
         val customPath = FeatureSettingsRepository.getCustomBackgroundPath(ctx)
         if (!customPath.isNullOrEmpty()) {
+            if (!java.io.File(customPath).isFile) {
+                FeatureSettingsRepository.removeCustomBackgroundPath(ctx, customPath)
+            }
             imageView.applyCustomFileBackground(customPath)
         } else {
             imageView.applyCustomAssetBackground("custom/background")

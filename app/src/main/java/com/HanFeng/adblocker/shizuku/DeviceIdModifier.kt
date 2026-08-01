@@ -694,12 +694,27 @@ class DeviceIdModifier {
         "sys.imei"
     )
 
-    /** 读集更宽, 也尝试 ro.*  厂商衍生项, 任一非空都能展示用于诊断 */
+    /**
+     * 读集更宽, 覆盖 HyperOS / MIUI 14+ / MTK / Qualcomm 各平台常见 prop 项.
+     * Android 13+ service call iphonesubinfo 因 READ_PRIVILEGED_PHONE_STATE 限制对 root 都失败,
+     * 实际可靠源只剩 prop. 这里尽可能拉全厂商衍生项, 任一非空都能展示.
+     */
     private val IMEI_READ_PROPS = IMEI_WRITE_PROPS + listOf(
+        // MIUI / HyperOS boot 段
         "ro.boot.imei1",
         "ro.boot.imei2",
         "ro.boot.miui.imei1",
-        "ro.boot.miui.imei2"
+        "ro.boot.miui.imei2",
+        // Qualcomm / vendor radio 段
+        "persist.vendor.radio.imei",
+        "persist.vendor.radio.imei2",
+        "ro.vendor.radio.imei",
+        "ro.vendor.radio.imei2",
+        // MTK 平台常见
+        "ro.boot.imei_label",
+        // 临时段 (有时被 vendor init 写)
+        "vendor.radio.imei",
+        "vendor.radio.imei2"
     )
 
     /** MEID prop 同源集 (CDMA 机型使用, 与 GSM IMEI 互斥) */
@@ -713,7 +728,10 @@ class DeviceIdModifier {
 
     private val MEID_READ_PROPS = MEID_WRITE_PROPS + listOf(
         "ro.boot.miui.meid",
-        "persist.sys.meid2"
+        "persist.sys.meid2",
+        "persist.vendor.radio.meid",
+        "ro.vendor.radio.meid",
+        "vendor.radio.meid"
     )
 
     /** EFS / QCN 关键备份路径(用于 NV 写入前手动备份) */
@@ -734,36 +752,150 @@ class DeviceIdModifier {
      *   2) 失败则逐条读 IMEI_READ_PROPS  (prop 视图, 可能是被 resetprop 改过的)
      */
     fun readImei(): ShellResult {
+        val debugSb = StringBuilder()   // 所有解析过程信息 → 给 result.output, UI 若要展示诊断可看
+        // 优先 RIL 真值 (多种 service call 号 + dumpsys)
+        for (svcId in listOf(1, 4, 11)) {
+            val raw = runRootShell("service call iphonesubinfo $svcId 2>&1").output.trim()
+            if (raw.isBlank()) continue
+            // Android 13+ 上 service call 多半返回 Permission Denial 或 Result: Parcel(00000000 ...)
+            // 这些信息直接贴给用户看, 不再用 contains("Exception") 当过滤条件 (会把 deny 也漏掉)
+            debugSb.append("[service call $svcId raw] ${raw.take(300)}\n")
+            val parsed = extractImeiFromParcel(raw)
+            if (!parsed.isNullOrBlank()) {
+                debugSb.append("iphonesubinfo.$svcId=$parsed\n")
+            }
+        }
+        val dumpOut = runRootShell("dumpsys iphonesubinfo 2>&1").output.trim()
+        if (dumpOut.isNotBlank()) {
+            debugSb.append("[dumpsys iphonesubinfo raw] ${dumpOut.take(300)}\n")
+            val m = Regex("(?i)imei[\\s:=]+([0-9]{14,15})").find(dumpOut)
+            if (m != null) debugSb.append("dumpsys.imei=${m.groupValues[1]}\n")
+        }
+        // 选取第一段成功解析出的纯 IMEI 15 位数字作为最终 RIL(slot0) 真值
+        val rilImei = Regex("\\b\\d{15}\\b").find(debugSb.toString())?.value
         val sb = StringBuilder()
-        // 优先 RIL 真值
-        val ril = runRootShell(
-            "service call iphonesubinfo 1 2>/dev/null | cut -c 52-66 | tr -d '.[:space:]' || true"
-        ).output.trim()
-        if (sb.isNotEmpty()) sb.append("\n")
-        sb.append("RIL(slot0)=${ril.ifBlank { "(空)" }}")
-        // prop 视图
+        sb.append("RIL(slot0)=${if (rilImei.isNullOrBlank()) "(空)" else rilImei}")
+        if (debugSb.isNotBlank()) {
+            sb.append("\n# 解析明细 (供诊断):\n")
+            sb.append(debugSb.toString().trim())
+        }
+        // prop 视图 - Android 13+ 上这是最可靠源
+        val propSb = StringBuilder()
         for (key in IMEI_READ_PROPS) {
             val v = runRootShell("getprop $key 2>/dev/null").output.trim()
-            if (sb.isNotEmpty()) sb.append("\n")
-            sb.append("$key=${v.ifBlank { "(空)" }}")
+            propSb.append("$key=${v.ifBlank { "(空)" }}\n")
         }
+        sb.append("\n# prop 视图:\n").append(propSb.toString().trim())
         return ShellResult(0, sb.toString())
     }
 
     fun readMeid(): ShellResult {
+        val debugSb = StringBuilder()
+        for (svcId in listOf(6, 7, 12)) {
+            val raw = runRootShell("service call iphonesubinfo $svcId 2>&1").output.trim()
+            if (raw.isBlank()) continue
+            debugSb.append("[service call $svcId raw] ${raw.take(300)}\n")
+            val parsed = extractMeidFromParcel(raw)
+            if (!parsed.isNullOrBlank()) {
+                debugSb.append("iphonesubinfo.$svcId=$parsed\n")
+            }
+        }
+        val dumpOut = runRootShell("dumpsys iphonesubinfo 2>&1").output.trim()
+        if (dumpOut.isNotBlank()) {
+            debugSb.append("[dumpsys iphonesubinfo raw] ${dumpOut.take(300)}\n")
+            val m = Regex("(?i)meid[\\s:=]+([0-9a-fA-F]{14,18})").find(dumpOut)
+            if (m != null) debugSb.append("dumpsys.meid=${m.groupValues[1]}\n")
+        }
+        val rilMeid = Regex("\\b[0-9a-fA-F]{14,18}\\b").find(debugSb.toString())?.value
         val sb = StringBuilder()
-        // service call iphonesubinfo 6 在部分 CDMA 机器返 MEID
-        val ril = runRootShell(
-            "service call iphonesubinfo 6 2>/dev/null | cut -c 52-66 | tr -d '.[:space:]' || true"
-        ).output.trim()
-        if (sb.isNotEmpty()) sb.append("\n")
-        sb.append("RIL(slot0)=${ril.ifBlank { "(空)" }}")
+        sb.append("RIL(slot0)=${if (rilMeid.isNullOrBlank()) "(空)" else rilMeid}")
+        if (debugSb.isNotBlank()) {
+            sb.append("\n# 解析明细 (供诊断):\n")
+            sb.append(debugSb.toString().trim())
+        }
+        val propSb = StringBuilder()
         for (key in MEID_READ_PROPS) {
             val v = runRootShell("getprop $key 2>/dev/null").output.trim()
-            if (sb.isNotEmpty()) sb.append("\n")
-            sb.append("$key=${v.ifBlank { "(空)" }}")
+            propSb.append("$key=${v.ifBlank { "(空)" }}\n")
         }
+        sb.append("\n# prop 视图:\n").append(propSb.toString().trim())
         return ShellResult(0, sb.toString())
+    }
+
+    /**
+     * 从 service call 的 Parcel hex 输出中提取 IMEI (15 位数字).
+     *
+     * service call 输出形如:
+     *   Result: Parcel(0049d60f 0f000000 35 33 35 33 ... 'i' 'm' 'e' 'i' '=' '3' '5' '6' '7' ...)
+     * 或纯 hexparcel 行无 'x' 标记 (老版本):
+     *   Result: Parcel(6d920100 09000000 69000000 6d000000 65000000 69000000 ...)
+     *
+     * 旧版 'i' 'm' 'e' 'i' 这种带引号的可打印字符能直接串成字符串.
+     * 老版 hexparcel 格式每个字符占 4 字节, ASCII 字符在末位.
+     *
+     * 提取策略: 把所有被 'X' 引号包围的 ascii 字符串起来 → 找 15 位数字模式;
+     * 退化路径: 把全部 hex 视作 2 位字节序列, 找 ASCII 0x30..0x39 (数字) 提取连成串;
+     * 任一路径提得出 15 位 IMEI 即返回.
+     */
+    private fun extractImeiFromParcel(parcelText: String): String? {
+        // 路径1: printable 字符串直接 join
+        val printable = Regex("'.'").findAll(parcelText)
+            .map { it.value.trim('\'') }
+            .joinToString("")
+        Regex("\\d{15}").find(printable)?.let { return it.value }
+
+        // 路径2: hex 字节序列解析 — 按规则从 4 字节小端或 1 字节大端解码
+        // 形如 69000000 (i) 这种 4-byte 小端 ascii in parcel
+        val hexTokens = parcelText.split(Regex("\\s+"))
+            .filter { it.matches(Regex("[0-9a-fA-F]{8}")) }
+        val sb = StringBuilder()
+        for (token in hexTokens) {
+            // 取最后 1 字节 (ascii char 装在小端 parcel 末位)
+            val byte = token.substring(6, 8).toInt(16)
+            if (byte in 0x20..0x7e) sb.append(byte.toChar())
+        }
+        Regex("\\d{15}").find(sb.toString())?.let { return it.value }
+
+        // 路径3: 2 字节 token (每个 byte 直接是 ascii)
+        val hex2 = parcelText.split(Regex("\\s+"))
+            .filter { it.matches(Regex("[0-9a-fA-F]{2}")) }
+        val sb2 = StringBuilder()
+        for (t in hex2) {
+            val b = t.toInt(16)
+            if (b in 0x20..0x7e) sb2.append(b.toChar())
+        }
+        Regex("\\d{15}").find(sb2.toString())?.let { return it.value }
+        return null
+    }
+
+    /**
+     * 从 service call Parcel 提取 MEID (14 位 hex).
+     * MEID 是 14 位十六进制,与 IMEI 15 位数字不同.
+     */
+    private fun extractMeidFromParcel(parcelText: String): String? {
+        val printable = Regex("'.'").findAll(parcelText)
+            .map { it.value.trim('\'') }
+            .joinToString("")
+        Regex("[0-9a-fA-F]{14}").find(printable)?.let { return it.value }
+
+        val hexTokens = parcelText.split(Regex("\\s+"))
+            .filter { it.matches(Regex("[0-9a-fA-F]{8}")) }
+        val sb = StringBuilder()
+        for (token in hexTokens) {
+            val byte = token.substring(6, 8).toInt(16)
+            if (byte in 0x20..0x7e) sb.append(byte.toChar())
+        }
+        Regex("[0-9a-fA-F]{14}").find(sb.toString())?.let { return it.value }
+
+        val hex2 = parcelText.split(Regex("\\s+"))
+            .filter { it.matches(Regex("[0-9a-fA-F]{2}")) }
+        val sb2 = StringBuilder()
+        for (t in hex2) {
+            val b = t.toInt(16)
+            if (b in 0x20..0x7e) sb2.append(b.toChar())
+        }
+        Regex("[0-9a-fA-F]{14}").find(sb2.toString())?.let { return it.value }
+        return null
     }
 
     /**
@@ -851,13 +983,15 @@ class DeviceIdModifier {
 
     /**
      * 备份当前 IMEI prop + RIL 真值到本地备份, 用户后续可 restore
+     *
+     * RIL 真值存原始 service call 输出整段, restore 时由 [readImei] 的解析函数
+     * 提取 15 位数字. 不再用 cut -c 52-66 这种位置硬切割, 因 Android 版本/ROM 不同位置不定.
      */
     private fun backupCurrentImei() {
         val backupSb = StringBuilder("echo -n '' > $IMEI_BACKUP 2>/dev/null\n")
-        // RIL 真值
-        backupSb.append(
-            "echo 'RIL='\"\\$(service call iphonesubinfo 1 2>/dev/null | cut -c 52-66 | tr -d '.[:space:]')\" >> $IMEI_BACKUP\n"
-        )
+        // RIL 真值 - 原始输出全保留, 解析在 restore 端做
+        backupSb.append("echo 'RIL_RAW='\"\\$(service call iphonesubinfo 1 2>/dev/null)\" >> $IMEI_BACKUP\n")
+        backupSb.append("echo 'DUMPSYS='\"\\$(dumpsys iphonesubinfo 2>/dev/null)\" >> $IMEI_BACKUP\n")
         for (key in IMEI_READ_PROPS) {
             backupSb.append("echo '$key='\"\\$(getprop '$key')\" >> $IMEI_BACKUP\n")
         }
@@ -866,9 +1000,8 @@ class DeviceIdModifier {
 
     private fun backupCurrentMeid() {
         val backupSb = StringBuilder("echo -n '' > $MEID_BACKUP 2>/dev/null\n")
-        backupSb.append(
-            "echo 'RIL='\"\\$(service call iphonesubinfo 6 2>/dev/null | cut -c 52-66 | tr -d '.[:space:]')\" >> $MEID_BACKUP\n"
-        )
+        backupSb.append("echo 'RIL_RAW='\"\\$(service call iphonesubinfo 6 2>/dev/null)\" >> $MEID_BACKUP\n")
+        backupSb.append("echo 'DUMPSYS='\"\\$(dumpsys iphonesubinfo 2>/dev/null)\" >> $MEID_BACKUP\n")
         for (key in MEID_READ_PROPS) {
             backupSb.append("echo '$key='\"\\$(getprop '$key')\" >> $MEID_BACKUP\n")
         }

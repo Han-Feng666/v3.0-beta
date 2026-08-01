@@ -83,7 +83,20 @@ fun ImageView.applyCustomFileBackground(filePath: String?) {
     if (!isAttachedToWindow) return
     val appContext = context.applicationContext
     setTag(CUSTOM_VISUALS_CONTEXT_TAG_KEY, WeakReference(appContext))
-    if (filePath == null) return
+    if (filePath == null) {
+        // 没设过自定义路径, 显式清空 drawable 让 ImageView 回到 XML 里声明的 src (即 bg_fallback_*)
+        setImageDrawable(null)
+        return
+    }
+    // 文件存在性预检 - 文件被卸装/清除数据丢失时, LoadCustomFileDrawable 会返回 null,
+    // 之前一段代码遇到 null 就静默 return@launch, 让 ImageView 留在 setImageDrawable(null) 后的空白,
+    // 表象就是 "主界面背景图丢失" (但 stats 页因 onResume 不再调 applyBackgroundImage 反而幸存).
+    // 这里加预检: 文件不存在时立即清 SP 路径 + setImageDrawable(null) 让 fallback 显式生效.
+    if (!File(filePath).isFile) {
+        customBackgroundDrawableCache.remove("file:$filePath:0")
+        setImageDrawable(null)
+        return
+    }
     // 同步命中缓存直接设置,跳过协程开销
     val cacheKey = "file:$filePath:${File(filePath).lastModified()}"
     customBackgroundDrawableCache.get(cacheKey)?.let { cached ->

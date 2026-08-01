@@ -3,6 +3,7 @@ package com.HanFeng.ui
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -35,6 +36,7 @@ class PromoComponentGovernActivity : BaseActivity() {
     private var recommendedComponents: List<PromoComponentCandidate> = emptyList()
     private var allActivities: List<PromoComponentCandidate> = emptyList()
     private var showAllActivities = false
+    private var sdkOnly = false
     private var searchDebounceJob: Job? = null
 
     override fun onDestroy() {
@@ -63,17 +65,27 @@ class PromoComponentGovernActivity : BaseActivity() {
         binding.btnBack.setOnClickListener { finish() }
         binding.btnRecommended.setOnClickListener {
             showAllActivities = false
+            sdkOnly = false
             applyFilter()
             adapter.selectRecommendedVisible()
             showShortToast("已勾选推荐组件")
         }
+        binding.btnSdkComponents.setOnClickListener {
+            showAllActivities = true
+            sdkOnly = true
+            applyFilter()
+            adapter.selectRecommendedVisible()
+            showShortToast("已按 SDK 组件过滤并勾选")
+        }
         binding.btnAllActivities.setOnClickListener {
             showAllActivities = true
+            sdkOnly = false
             confirmShowAllActivitiesIfNeeded()
         }
         binding.btnManual.setOnClickListener { showManualComponentGovernDialog("$packageNameValue/") }
         binding.btnFreezeSelected.setOnClickListener { executeSelected(disable = true) }
         binding.btnUnfreezeSelected.setOnClickListener { executeSelected(disable = false) }
+        binding.btnDisableAllSdk.setOnClickListener { executeDisableAllSdkComponents() }
         binding.searchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -131,7 +143,17 @@ class PromoComponentGovernActivity : BaseActivity() {
         } else {
             recommendedComponents
         }
-        val filtered = if (query.isBlank()) base else base.filter { candidate ->
+        // sdkOnly 模式: 基于基础集合只保留属于第三方 SDK 命名空间的组件.
+        // 命名空间判定使用 PromoGovernComponentRepository.isSdkComponent,
+        // 它扫描类名(com.xxx)前缀是否命中常见 SDK 厂商列表 (Pangle / YLH / JPush / Umeng 等).
+        val sdkFiltered = if (sdkOnly) {
+            base.filter { candidate ->
+                // componentName 形如 "pkg/com.bytedance.sdk.openadsdk.activity.XActivity", 取 bar 之后即类名
+                val className = candidate.componentName.substringAfter('/', "").trim()
+                className.isNotBlank() && PromoGovernComponentRepository.isSdkComponent(className)
+            }
+        } else base
+        val filtered = if (query.isBlank()) sdkFiltered else sdkFiltered.filter { candidate ->
             listOf(
                 candidate.shortName,
                 candidate.componentName,
@@ -143,13 +165,14 @@ class PromoComponentGovernActivity : BaseActivity() {
         }
         adapter.submit(filtered)
         binding.emptyText.visibility = if (filtered.isEmpty()) View.VISIBLE else View.GONE
-        binding.emptyText.text = if (showAllActivities) {
-            "没有匹配的 Activity"
-        } else {
-            "没有推荐组件。可搜索组件名，或切换到全部 Activity。"
+        binding.emptyText.text = when {
+            sdkOnly -> "该 App 当前没有识别到第三方 SDK 组件 (穿山甲/优量汇/友盟/极光等都不会显示在此)."
+            showAllActivities -> "没有匹配的 Activity"
+            else -> "没有推荐组件。可搜索组件名，或切换到全部 Activity。"
         }
         binding.btnRecommended.isEnabled = true
-        binding.btnAllActivities.isEnabled = !showAllActivities
+        binding.btnSdkComponents.isEnabled = !sdkOnly
+        binding.btnAllActivities.isEnabled = !showAllActivities || sdkOnly
         updateActionButtons()
     }
 
@@ -210,6 +233,101 @@ class PromoComponentGovernActivity : BaseActivity() {
             adapter.clearSelection()
             updateActionButtons()
             loadComponents()
+        }
+    }
+
+    /**
+     * 一键禁用所有 SDK 组件: 扫描该应用的全部 Activity/Receiver/Service, 找出命名空间命中
+     * PromoGovernComponentRepository.SDK_NAMESPACES 的组件, 批量 pm disable.
+     *
+     * 用例: 用户在淘宝/美团/今日头条里看到了穿山甲、优量汇、友盟等第三方 SDK, 不想逐项勾选,
+     * 一键全部禁用, 减少广告/推送/上报/统计行为.
+     */
+    private fun executeDisableAllSdkComponents() {
+        binding.emptyText.visibility = View.VISIBLE
+        binding.emptyText.text = "正在扫描 SDK 组件..."
+        lifecycleScope.launch {
+            val scanResult = withContext(Dispatchers.Default) {
+                // 扫描更宽: 包括 Activity/Receiver/Service
+                val packageInfo = runCatching {
+                    this@PromoComponentGovernActivity.packageManager.getPackageInfo(
+                        packageNameValue,
+                        PackageManager.GET_ACTIVITIES or PackageManager.GET_RECEIVERS or
+                            PackageManager.GET_SERVICES or
+                            PackageManager.MATCH_DISABLED_COMPONENTS or
+                            PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
+                    )
+                }.getOrNull()
+                if (packageInfo == null) return@withContext emptyList<PromoComponentCandidate>()
+                val collected = mutableListOf<PromoComponentCandidate>()
+                packageInfo.activities.orEmpty().forEach { info ->
+                    val fullName = info.name.orEmpty()
+                    if (fullName.isNotBlank() && PromoGovernComponentRepository.isSdkComponent(fullName)) {
+                        collected += PromoComponentCandidate(
+                            componentName = "$packageNameValue/$fullName",
+                            shortName = fullName.substringAfterLast('.'),
+                            typeLabel = "Activity",
+                            enabled = info.isEnabled,
+                            score = 5,
+                            groupLabel = "SDK 组件",
+                            recommendation = "SDK 组件, 一键禁用命中.",
+                            riskLabel = "低风险"
+                        )
+                    }
+                }
+                packageInfo.receivers.orEmpty().forEach { info ->
+                    val fullName = info.name.orEmpty()
+                    if (fullName.isNotBlank() && PromoGovernComponentRepository.isSdkComponent(fullName)) {
+                        collected += PromoComponentCandidate(
+                            componentName = "$packageNameValue/$fullName",
+                            shortName = fullName.substringAfterLast('.'),
+                            typeLabel = "Receiver",
+                            enabled = info.isEnabled,
+                            score = 5,
+                            groupLabel = "SDK 组件",
+                            recommendation = "SDK 组件, 一键禁用命中.",
+                            riskLabel = "低风险"
+                        )
+                    }
+                }
+                packageInfo.services.orEmpty().forEach { info ->
+                    val fullName = info.name.orEmpty()
+                    if (fullName.isNotBlank() && PromoGovernComponentRepository.isSdkComponent(fullName)) {
+                        collected += PromoComponentCandidate(
+                            componentName = "$packageNameValue/$fullName",
+                            shortName = fullName.substringAfterLast('.'),
+                            typeLabel = "Service",
+                            enabled = info.isEnabled,
+                            score = 5,
+                            groupLabel = "SDK 组件",
+                            recommendation = "SDK 组件, 一键禁用命中.",
+                            riskLabel = "低风险"
+                        )
+                    }
+                }
+                collected.distinctBy { it.componentName }.filter { it.enabled }
+            }
+            if (scanResult.isEmpty()) {
+                showMessageDialog("一键禁用 SDK 组件", "该 App 当前没有识别到第三方 SDK 组件可直接禁用.", "Show empty SDK result failed")
+                loadComponents()
+                return@launch
+            }
+            val confirmMsg = buildString {
+                append("已扫描出 ${scanResult.size} 个第三方 SDK 组件 (来自穿山甲/优量汇/友盟/极光/铃声等)\n\n")
+                append("- 冻结后只损失对应 SDK 的广告展示、推送、统计、上报能力\n")
+                append("- 应用主业务基本不受影响\n")
+                append("- 部分集成推送 SDK 的应用可能收不到该 SDK 通道的推送通知\n")
+                append("- 可在本页用「解冻选中」恢复\n\n")
+                append("是否继续禁用全部 ${scanResult.size} 个?")
+            }
+            StableDialog.builder(this@PromoComponentGovernActivity)
+                .setTitle("确认一键禁用 SDK 组件")
+                .setMessage(confirmMsg)
+                .setPositiveButton("禁用全部 SDK") { _, _ ->
+                    executeBatch(scanResult, disable = true)
+                }
+                .setNegativeButton("取消", null)
+                .showSafely(this@PromoComponentGovernActivity, "Show confirm disable all SDK failed")
         }
     }
 
