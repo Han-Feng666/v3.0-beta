@@ -45,6 +45,10 @@
 #define ABI "arm64-v8a"
 #endif
 
+// 由 main 解析 --library-path=<dir> 填充; 非空时覆盖 run_server 里按 <apk_dir>/lib/<ABI> 的推算.
+// 用于 app 侧激活时先把 librish.so 显式落盘到可读目录再传给 server.
+static char *library_path_override = nullptr;
+
 static void run_server(const char *dex_path, const char *main_class, const char *process_name) {
     if (setenv("CLASSPATH", dex_path, true)) {
         LOGE("can't set CLASSPATH\n");
@@ -97,7 +101,15 @@ v_current = (uintptr_t) v + v_size - sizeof(char *); \
     // 主 app 主清单设置 useLegacyPackaging=true, 会在 nativeLibraryDir 抽出 .so,
     // starter 是 root 在 init mount ns 下执行, dirname(dex_path) 就是 nativeLibDir 的父目录,
     // 该路径下 lib/<ABI>/librish.so 对 server 进程可读.
-    snprintf(lib_path, PATH_MAX, "%s/lib/%s", dirname(dex_path), ABI);
+    //
+    // 当调用方通过 --library-path=<dir> 显式指定时, 优先使用该目录
+    // (app 侧激活时会先把 librish.so 落盘到 /data/local/tmp/hanfeng_shizuku_lib/ 并传此参数,
+    // 这样即使 PM 因安装方式差异没有解压 .so 到 /data/app/<pkg>/lib/<ABI>/, server 也能 dlopen 成功).
+    if (library_path_override != nullptr && library_path_override[0] != '\0') {
+        snprintf(lib_path, PATH_MAX, "%s", library_path_override);
+    } else {
+        snprintf(lib_path, PATH_MAX, "%s/lib/%s", dirname(dex_path), ABI);
+    }
 
     ARG(argv)
     ARG_PUSH(argv, "/system/bin/app_process")
@@ -205,7 +217,20 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < argc; ++i) {
         if (strncmp(argv[i], "--apk=", 6) == 0) {
             apk_path = argv[i] + 6;
+        } else if (strncmp(argv[i], "--library-path=", 15) == 0) {
+            library_path_override = strdup(argv[i] + 15);
+            if (library_path_override != nullptr) {
+                // 去掉尾部斜杠, 避免拼出 "dir//librish.so"
+                size_t len = strlen(library_path_override);
+                while (len > 1 && library_path_override[len - 1] == '/') {
+                    library_path_override[--len] = '\0';
+                }
+            }
         }
+    }
+
+    if (library_path_override != nullptr && library_path_override[0] != '\0') {
+        printf("info: library path override: %s\n", library_path_override);
     }
 
     uid_t uid = getuid();

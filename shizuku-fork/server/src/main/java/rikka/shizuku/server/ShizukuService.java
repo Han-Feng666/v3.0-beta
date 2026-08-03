@@ -445,6 +445,10 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             for (ClientRecord record : records) {
                 if (allowed) {
                     record.allowed = true;
+                    // 主动重推授权: 让已 attach 的客户端无需重启/重新 requestPermission 即可感知
+                    // permissionGranted (官方 manager 授权后客户端要重启才生效, 这里直接重新
+                    // bindApplication 推送 GRANTED, 授权即时生效)。
+                    pushPermissionGrantedToClient(record, true);
                 } else {
                     record.allowed = false;
                     ActivityManagerApis.forceStopPackageNoThrow(record.packageName, UserHandleCompat.getUserId(record.uid));
@@ -476,9 +480,39 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
 
                 // TODO kill user service using
             }
+
+            if (allowed) {
+                for (ClientRecord record : records) {
+                    // grantRuntimePermission 之后再推一次, 避免客户端在 bindApplication 回调里
+                    // 立即检查运行时权限时仍读到旧的 DENIED。
+                    pushPermissionGrantedToClient(record, true);
+                }
+            }
         }
 
         configManager.update(uid, null, mask, value);
+    }
+
+    /**
+     * 主动把权限状态推送给已 attach 的客户端 (重新 bindApplication)。
+     * 用于 manager 授权成功后立即让客户端感知 GRANTED, 无需客户端重启或重新请求。
+     */
+    private void pushPermissionGrantedToClient(ClientRecord record, boolean granted) {
+        if (record == null || record.client == null) return;
+        Bundle reply = new Bundle();
+        reply.putInt(BIND_APPLICATION_SERVER_UID, OsUtils.getUid());
+        reply.putInt(BIND_APPLICATION_SERVER_VERSION, ShizukuApiConstants.SERVER_VERSION);
+        reply.putString(BIND_APPLICATION_SERVER_SECONTEXT, OsUtils.getSELinuxContext());
+        reply.putInt(BIND_APPLICATION_SERVER_PATCH_VERSION, ShizukuApiConstants.SERVER_PATCH_VERSION);
+        reply.putBoolean(BIND_APPLICATION_PERMISSION_GRANTED, granted);
+        reply.putBoolean(BIND_APPLICATION_SHOULD_SHOW_REQUEST_PERMISSION_RATIONALE, false);
+        try {
+            record.client.bindApplication(reply);
+            LOGGER.i("Pushed permission %s to client %s uid=%d pid=%d",
+                    Boolean.toString(granted), record.packageName, record.uid, record.pid);
+        } catch (Throwable t) {
+            LOGGER.w(t, "pushPermissionGrantedToClient failed for %s uid=%d", record.packageName, record.uid);
+        }
     }
 
     private void onPermissionRevoked(String packageName) {
