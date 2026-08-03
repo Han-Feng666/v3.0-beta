@@ -58,6 +58,9 @@ class HanFengApp : Application() {
         writeStartupLog("ForegroundStateTracker installed")
         IdleShutdownController.init(this)
         writeStartupLog("IdleShutdownController installed")
+        backgroundExecutor.execute {
+            runCatching { com.HanFeng.data.StatsRepository.warmup(this@HanFengApp) }
+        }
         initializeBuiltInShizuku()
         writeStartupLog("BuiltInShizuku initialized")
     }
@@ -144,9 +147,6 @@ class HanFengApp : Application() {
                 // appendToFile + FileOutputStream(use=true) 比 appendText 更可控,appendText 内部走同样的流
                 traceFile.appendText(entry)
             }
-            // 预热 StatsRepository：在 VPN 主线程首个 packet 命中 recordBlocked* 之前
-            // 完成整段 SP read + 7 段 JSON 反序列化，避免在 vpn 主收发线程上冷启动阻塞
-            runCatching { com.HanFeng.data.StatsRepository.warmup(this@HanFengApp) }
         }
     }
 
@@ -178,4 +178,3 @@ class HanFengApp : Application() {
         }
     }
 }
-

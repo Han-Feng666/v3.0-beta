@@ -6,4 +6,8 @@
     <files-path
         name="certs"
         path="certs/" />
+    <!-- 批次 E5b: HAR/cURL/JSON 导出分享 -->
+    <cache-path
+        name="shared_capture"
+        path="capture_export/" />
 </paths>

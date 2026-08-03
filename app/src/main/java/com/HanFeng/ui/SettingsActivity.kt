@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.LayoutInflater
+import android.webkit.WebView
 import android.view.View
 import android.widget.EditText
 import android.widget.Button
@@ -72,6 +73,9 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnAppFreeze: Button
     private lateinit var btnGameAntiMark: Button
     private lateinit var btnCoexistSettings: Button
+    private lateinit var btnWhitelistSettings: Button
+    private lateinit var btnBreakpointRules: Button
+    private lateinit var btnCaptureSettings: Button
     private lateinit var btnTrafficCardSettings: Button
     private lateinit var btnJoinGroupSettings: Button
     private lateinit var btnResetHideBackground: Button
@@ -84,6 +88,9 @@ class SettingsActivity : BaseActivity() {
     private lateinit var btnModifySerial: Button
     private lateinit var btnModifyMainboardId: Button
     private lateinit var btnModifyModel: Button
+    private lateinit var btnFakeLocation: Button
+    private lateinit var btnFakeWifi: Button
+
     private lateinit var btnModifySn: Button
     private lateinit var btnModifyImei: Button
     private lateinit var btnModifyMeid: Button
@@ -116,6 +123,20 @@ class SettingsActivity : BaseActivity() {
     private lateinit var textCustomBgPreview: TextView
     private lateinit var btnFloatingBall: Button
     private lateinit var btnRunningApps: Button
+
+    // 地图选点 Activity 回调 (showFakeLocationDialog 内的 etLat/etLng 回填)
+    private var pendingMapPickCallback: ((Double, Double) -> Unit)? = null
+    private val mapPickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val cb = pendingMapPickCallback
+        pendingMapPickCallback = null
+        if (result.resultCode == android.app.Activity.RESULT_OK && cb != null) {
+            val lat = result.data?.getDoubleExtra(MapPickerActivity.EXTRA_LAT, Double.NaN) ?: Double.NaN
+            val lng = result.data?.getDoubleExtra(MapPickerActivity.EXTRA_LNG, Double.NaN) ?: Double.NaN
+            if (!lat.isNaN() && !lng.isNaN()) {
+                cb(lat, lng)
+            }
+        }
+    }
 
     private val certificateExportPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
@@ -156,6 +177,9 @@ class SettingsActivity : BaseActivity() {
         btnAppFreeze = findViewById(R.id.btnAppFreeze)
         btnGameAntiMark = findViewById(R.id.btnGameAntiMark)
         btnCoexistSettings = findViewById(R.id.btnCoexistSettings)
+        btnWhitelistSettings = findViewById(R.id.btnWhitelistSettings)
+        btnBreakpointRules = findViewById(R.id.btnBreakpointRules)
+        btnCaptureSettings = findViewById(R.id.btnCaptureSettings)
         btnTrafficCardSettings = findViewById(R.id.btnTrafficCardSettings)
         btnJoinGroupSettings = findViewById(R.id.btnJoinGroupSettings)
         btnResetHideBackground = findViewById(R.id.btnResetHideBackground)
@@ -168,6 +192,8 @@ class SettingsActivity : BaseActivity() {
         btnModifySerial = findViewById(R.id.btnModifySerial)
         btnModifyMainboardId = findViewById(R.id.btnModifyMainboardId)
         btnModifyModel = findViewById(R.id.btnModifyModel)
+        btnFakeLocation = findViewById(R.id.btnFakeLocation)
+        btnFakeWifi = findViewById(R.id.btnFakeWifi)
         btnModifySn = findViewById(R.id.btnModifySn)
         btnModifyImei = findViewById(R.id.btnModifyImei)
         btnModifyMeid = findViewById(R.id.btnModifyMeid)
@@ -333,6 +359,24 @@ class SettingsActivity : BaseActivity() {
                 failureMessage = "打开共存设置失败"
             )
         }
+        btnWhitelistSettings.setOnClickListener {
+            launchActivitySafely(
+                Intent(this, WhitelistActivity::class.java),
+                failureMessage = "打开黑白名单失败"
+            )
+        }
+        btnBreakpointRules.setOnClickListener {
+            launchActivitySafely(
+                com.HanFeng.ui.capture.BreakpointRulesActivity.createIntent(this),
+                failureMessage = "打开断点规则失败"
+            )
+        }
+        btnCaptureSettings.setOnClickListener {
+            launchActivitySafely(
+                Intent(this, com.HanFeng.ui.capture.CaptureSettingsActivity::class.java),
+                failureMessage = "打开抓包设置失败"
+            )
+        }
         btnTrafficCardSettings.setOnClickListener {
             openJoinGroupPage()
         }
@@ -378,6 +422,15 @@ class SettingsActivity : BaseActivity() {
         btnModifyModel.setOnClickListener {
             requireRootThen("root-unavailable-model", "修改手机型号") { granted ->
                 if (granted) showModifyModelDialog()
+            }
+        }
+        btnFakeLocation.setOnClickListener {
+            // 用户反馈:点击启用定位模拟应直接进入流程,不再弹"现在打开定位模拟对话框?"确认框
+            showFakeLocationDialog()
+        }
+        btnFakeWifi.setOnClickListener {
+            requireRootThen("root-unavailable-fake-wifi", "WiFi 信息模拟") { granted ->
+                if (granted) showFakeWifiDialog()
             }
         }
         btnModifySn.setOnClickListener {
@@ -1314,6 +1367,48 @@ btnRootHide.setOnClickListener {
         val etModel = makeField("型号代号", "如 PLZ110、23127PN0CC")
         val etMarketname = makeField("市场名", "如 OnePlus 15 T、小米 15")
 
+        // 分隔标题
+        val socTitleView = TextView(this).apply {
+            text = "处理器 (SoC)"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            textSize = 13f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, 12.dp, 0, 4.dp)
+        }
+        container.addView(socTitleView)
+        val etSocModel = makeField("SoC 型号", "支持营销名 (Snapdragon 8 Gen 3 / 骁龙 8 Gen 3 / 天玑 9400) 或 codename (SM8650 / kalama / MT6985 / zuma)")
+
+        // 常见机型快选 chips — 点选即填 SoC 型号 (厂商由 [inferSocManufacturer] 自动决定)
+        val presetsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 12.dp, 0, 0)
+        }
+        val presets = listOf(
+            "第三代骁龙8",
+            "骁龙8 Elite",
+            "第二代骁龙8",
+            "天玑9400",
+            "Tensor G4"
+        )
+        presets.forEach { m ->
+            val chip = TextView(this).apply {
+                text = m
+                textSize = 11f
+                setPadding(10.dp, 6.dp, 10.dp, 6.dp)
+                setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+                setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+                setOnClickListener {
+                    etSocModel.setText(m)
+                    etSocModel.setSelection(etSocModel.text.length)
+                }
+            }
+            val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            lp.setMargins(4.dp, 0, 4.dp, 0)
+            chip.layoutParams = lp
+            presetsRow.addView(chip)
+        }
+        container.addView(presetsRow)
+
         // 恢复默认按钮
         val btnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1329,7 +1424,7 @@ btnRootHide.setOnClickListener {
 
         val dialog = StableDialog.builder(this)
             .setTitle("修改手机型号")
-            .setMessage("全部字段自定义，留空的字段保留原值不动。")
+            .setMessage("全部字段自定义，留空的字段保留原值不动。处理器字段填空保留原值。")
             .setView(container)
             .setPositiveButton("确认修改") { _, _ ->
                 val fields = com.HanFeng.adblocker.shizuku.DeviceIdModifier.ModelFields(
@@ -1338,13 +1433,23 @@ btnRootHide.setOnClickListener {
                     model = etModel.text.toString().trim(),
                     marketname = etMarketname.text.toString().trim()
                 )
+                val socModelInput = etSocModel.text.toString().trim()
+                // 优先用 codename 反查得到规范 (营销名, 厂商); 识别不到时退回 inferSocManufacturer 推断厂商
+                val detached = com.HanFeng.adblocker.shizuku.DeviceIdModifier().resolveSocCanonical(socModelInput)
+                val socModelFinal = detached?.first ?: socModelInput
+                val socMfrFinal = detached?.second ?: if (socModelInput.isBlank()) "" else inferSocManufacturer(socModelInput)
+                val socFields = com.HanFeng.adblocker.shizuku.DeviceIdModifier.SocFields(
+                    model = socModelFinal,
+                    manufacturer = socMfrFinal
+                )
                 if (fields.manufacturer.isBlank() && fields.brand.isBlank() &&
-                    fields.model.isBlank() && fields.marketname.isBlank()
+                    fields.model.isBlank() && fields.marketname.isBlank() &&
+                    socFields.model.isBlank() && socFields.manufacturer.isBlank()
                 ) {
                     showShortToast("至少填写一个字段")
                     return@setPositiveButton
                 }
-                executeModelChange(fields)
+                executeModelChange(fields, socFields)
             }
             .setNegativeButton("取消", null)
             .create()
@@ -1353,11 +1458,16 @@ btnRootHide.setOnClickListener {
         btnReset.setOnClickListener {
             lifecycleScope.launch {
                 val result = withContext(Dispatchers.IO) {
-                    com.HanFeng.adblocker.shizuku.DeviceIdModifier().clearModelModule()
+                    val modifier = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
+                    val r1 = modifier.clearModelModule()
+                    val r2 = modifier.clearSoCModule()
+                    if (r1.exitCode == 0 && r2.exitCode == 0) r1 else
+                        com.HanFeng.adblocker.shizuku.DeviceIdModifier.ShellResult(if (r1.exitCode != 0) r1.exitCode else r2.exitCode,
+                            (r1.output + "\n" + r2.output).trim())
                 }
                 if (isFinishing || isDestroyed) return@launch
                 if (result.exitCode == 0) {
-                    showShortToast("已清除型号持久化模块，重启后恢复默认")
+                    showShortToast("已清除机型与 SoC 持久化模块，重启后恢复默认")
                 } else {
                     showShortToast("清除失败: ${result.output}")
                 }
@@ -1366,26 +1476,58 @@ btnRootHide.setOnClickListener {
 
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
-                com.HanFeng.adblocker.shizuku.DeviceIdModifier().readModel()
+                val modifier = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
+                val rm = modifier.readModel()
+                val rs = modifier.readSoC()
+                if (rm.output.isBlank()) rs else
+                    com.HanFeng.adblocker.shizuku.DeviceIdModifier.ShellResult(rm.exitCode and rs.exitCode, rm.output + "\n" + rs.output)
             }
             if (isFinishing || isDestroyed) return@launch
             if (!dialog.isShowing) return@launch
             val lines = result.output.trim().lines().map { it.trim() }.filter { it.contains('=') }
-            // prop key -> 中文 label
             fun propLabel(key: String): String = when (key) {
                 "ro.product.manufacturer" -> "厂商"
                 "ro.product.brand" -> "品牌"
                 "ro.product.model" -> "型号代号"
                 "ro.product.marketname" -> "市场名"
+                "ro.soc.model" -> "SoC 型号"
+                "ro.soc.manufacturer" -> "SoC 厂商"
+                "ro.board.platform" -> "SoC 平台代号"
+                "ro.vendor.soc.model" -> "SoC 型号 (vendor)"
+                "ro.vendor.soc.manufacturer" -> "SoC 厂商 (vendor)"
+                "ro.odm.soc.model" -> "SoC 型号 (odm)"
+                "ro.product.soc.model" -> "SoC 型号 (product)"
+                "ro.hardware" -> "硬件代号 (硬件层)"
                 else -> key
             }
-            val display = lines.joinToString("\n") {
-                val k = it.substringBefore('=').trim()
-                val v = it.substringAfter('=').trim()
-                "${propLabel(k)}：$v"
-            }.ifBlank { "(无法读取)" }
-            tvCurrent.text = "当前型号信息：\n$display"
-            // 把当前 4 字段值填入对应输入框作为起点, 方便用户只改其中一项
+            val displayLines = mutableListOf<String>()
+            for (line in lines) {
+                val k = line.substringBefore('=').trim()
+                val v = line.substringAfter('=').trim()
+                if (k == "ro.soc.manufacturer") continue   // 已并入下方自动推断行
+                if (k == "ro.soc.model" && v.isNotBlank() && v != "(空)") {
+                    val canonical = com.HanFeng.adblocker.shizuku.DeviceIdModifier().resolveSocCanonical(v)
+                    if (canonical != null) {
+                        displayLines += "${propLabel(k)}：$v (规范后: ${canonical.first})"
+                    } else {
+                        displayLines += "${propLabel(k)}：$v"
+                    }
+                } else {
+                    displayLines += "${propLabel(k)}：$v"
+                }
+            }
+            val socModelVal = lines.firstOrNull { it.startsWith("ro.soc.model=") }
+                ?.substringAfter('=')?.trim().orEmpty()
+            val socModelForInfer = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
+                .resolveSocCanonical(socModelVal)?.second ?: socModelVal
+            if (socModelForInfer.isNotBlank() && socModelForInfer != "(空)") {
+                val inferred = inferSocManufacturer(socModelForInfer)
+                if (inferred.isNotBlank()) {
+                    displayLines += "SoC 厂商 (按型号推断)：$inferred"
+                }
+            }
+            val display = displayLines.joinToString("\n").ifBlank { "(无法读取)" }
+            tvCurrent.text = "当前机型信息：\n$display"
             fun fill(et: EditText, propName: String) {
                 val v = lines.firstOrNull { it.startsWith("$propName=") }
                     ?.substringAfter('=')?.trim()
@@ -1398,35 +1540,583 @@ btnRootHide.setOnClickListener {
             fill(etBrand, "ro.product.brand")
             fill(etModel, "ro.product.model")
             fill(etMarketname, "ro.product.marketname")
+            fill(etSocModel, "ro.soc.model")
         }
     }
 
-    private fun executeModelChange(fields: com.HanFeng.adblocker.shizuku.DeviceIdModifier.ModelFields) {
+    private fun executeModelChange(
+        fields: com.HanFeng.adblocker.shizuku.DeviceIdModifier.ModelFields,
+        socFields: com.HanFeng.adblocker.shizuku.DeviceIdModifier.SocFields =
+            com.HanFeng.adblocker.shizuku.DeviceIdModifier.SocFields("", "")
+    ) {
         lifecycleScope.launch {
             val modifier = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
-            val result = withContext(Dispatchers.Default) { modifier.writeModel(fields) }
+            val modelResult = withContext(Dispatchers.Default) {
+                if (fields.manufacturer.isNotBlank() || fields.brand.isNotBlank() ||
+                    fields.model.isNotBlank() || fields.marketname.isNotBlank()
+                ) modifier.writeModel(fields) else com.HanFeng.adblocker.shizuku.DeviceIdModifier.ShellResult(0, "")
+            }
+            val socResult = withContext(Dispatchers.Default) {
+                if (socFields.model.isNotBlank() || socFields.manufacturer.isNotBlank())
+                    modifier.writeSoC(socFields) else com.HanFeng.adblocker.shizuku.DeviceIdModifier.ShellResult(0, "")
+            }
             withContext(Dispatchers.Main) {
-                if (result.exitCode == 0) {
-                    val summary = buildString {
-                        if (fields.manufacturer.isNotBlank()) append("厂商: ${fields.manufacturer}\n")
-                        if (fields.brand.isNotBlank()) append("品牌: ${fields.brand}\n")
-                        if (fields.model.isNotBlank()) append("型号: ${fields.model}\n")
-                        if (fields.marketname.isNotBlank()) append("市场名: ${fields.marketname}\n")
-                    }.trimEnd()
+                val allOk = modelResult.exitCode == 0 && socResult.exitCode == 0
+                val summary = buildString {
+                    if (fields.manufacturer.isNotBlank()) append("厂商: ${fields.manufacturer}\n")
+                    if (fields.brand.isNotBlank()) append("品牌: ${fields.brand}\n")
+                    if (fields.model.isNotBlank()) append("型号: ${fields.model}\n")
+                    if (fields.marketname.isNotBlank()) append("市场名: ${fields.marketname}\n")
+                    if (socFields.model.isNotBlank()) append("SoC 型号: ${socFields.model}\n")
+                    if (socFields.manufacturer.isNotBlank()) append("SoC 厂商: ${socFields.manufacturer}\n")
+                }.trimEnd()
+                if (allOk) {
                     StableDialog.builder(this@SettingsActivity)
                         .setTitle("修改成功")
                         .setMessage("已修改字段:\n$summary\n\n重启设备后全面生效。")
                         .setPositiveButton("确定", null)
                         .showSafely(this@SettingsActivity, "model-changed")
                 } else {
+                    val msg = listOf(
+                        modelResult.output.takeIf { it.isNotBlank() },
+                        socResult.output.takeIf { it.isNotBlank() }
+                    ).filterNotNull().joinToString("\n").ifBlank {
+                        "修改失败 (m=${modelResult.exitCode}, s=${socResult.exitCode})"
+                    }
                     StableDialog.builder(this@SettingsActivity)
                         .setTitle("修改失败")
-                        .setMessage(result.output.ifBlank { "修改失败 (exit=${result.exitCode})" })
+                        .setMessage(msg)
                         .setPositiveButton("确定", null)
                         .showSafely(this@SettingsActivity, "model-change-failed")
                 }
             }
         }
+    }
+
+    /**
+     * 根据 SoC 型号字符串推断厂商。规则覆盖常见芯片前缀:
+     * - 骁龙 / Snapdragon → Qualcomm
+     * - 天玑 / Dimensity / MT6xxx → MediaTek
+     * - Tensor → Google
+     * - Exynos → Samsung
+     * - Kirin(麒麟) → Huawei
+     * - 其他自定义 → 留空(用户应使用 hint 给的 chip)
+     */
+    private fun inferSocManufacturer(model: String): String {
+        val m = model.trim().lowercase()
+        return when {
+            m.contains("骁龙") || m.startsWith("snapdragon") || m.contains("snapdragon") -> "Qualcomm"
+            m.contains("天玑") || m.startsWith("dimensity") || m.matches(Regex("mt\\d{4}.*", RegexOption.IGNORE_CASE)) -> "MediaTek"
+            m.startsWith("tensor") || m.contains("tensor") -> "Google"
+            m.startsWith("exynos") || m.contains("exynos") -> "Samsung"
+            m.contains("麒麟") || m.startsWith("kirin") || m.contains("kirin") -> "华为"
+            m.startsWith("qcom") || m.contains("kalama") || m.contains("pineapple") || m.contains("lahaina") -> "Qualcomm"
+            m.startsWith("mt6") -> "MediaTek"
+            else -> ""
+        }
+    }
+
+    // ==================== 定位模拟 ====================
+    /**
+     * 免 root 跳转开发者选项 + 启动 MockLocationService。
+     * 若没装 LSPosed 模块只走 MockLocationProvider 路径, 仍能覆盖 Google Maps / 微信 / 支付宝等。
+     */
+    private fun showFakeLocationDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16.dp, 16.dp, 16.dp, 8.dp)
+        }
+        val tvCurrent = TextView(this).apply {
+            text = "正在读取..."
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 0, 0, 8.dp)
+            maxLines = 8
+        }
+        container.addView(tvCurrent)
+
+        val tvLatLabel = TextView(this).apply {
+            text = "纬度 (latitude, -90 ~ 90)"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 8.dp, 0, 4.dp)
+        }
+        container.addView(tvLatLabel)
+        val etLat = EditText(this).apply {
+            hint = "如 31.2304"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+        }
+        container.addView(etLat)
+
+        val tvLngLabel = TextView(this).apply {
+            text = "经度 (longitude, -180 ~ 180)"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 8.dp, 0, 4.dp)
+        }
+        container.addView(tvLngLabel)
+        val etLng = EditText(this).apply {
+            hint = "如 121.4737"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+        }
+        container.addView(etLng)
+
+        val tvAltLabel = TextView(this).apply {
+            text = "海拔 (米) [可空]"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 8.dp, 0, 4.dp)
+        }
+        container.addView(tvAltLabel)
+        val etAlt = EditText(this).apply {
+            hint = "如 4.5"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+        }
+        container.addView(etAlt)
+
+        val btnPick = Button(this).apply {
+            text = "内置地图选点 (拖动/搜索)"
+            textSize = 13f
+            setPadding(0, 8.dp, 0, 0)
+        }
+        container.addView(btnPick)
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 12.dp, 0, 0)
+        }
+        val btnStart = Button(this).apply {
+            text = "启动模拟"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp }
+        }
+        val btnStop = Button(this).apply {
+            text = "停止模拟"
+            textSize = 13f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp }
+        }
+        btnRow.addView(btnStart)
+        btnRow.addView(btnStop)
+        container.addView(btnRow)
+
+        val tvHint = TextView(this).apply {
+            text = "免 root 走 MockLocationProvider:\n" +
+                "1) 启动前请到 设置 → 开发者选项 → 选择模拟位置信息应用 → 选 HanFeng\n" +
+                "2) 启动后保持本 APP 在前台或被系统允许后台 (服务为前台通知)\n" +
+                "3) 反检测: 卫星数 8-12 / HDOP 0.8-1.5 / 速度微扰 / isFromMockProvider=false\n" +
+                "4) 想让 WifiManager.getConnectionInfo() 拿到假 SSID/BSSID/MAC, 在 WiFi 模拟里设"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 11f
+            setPadding(0, 8.dp, 0, 0)
+            maxLines = 12
+        }
+        container.addView(tvHint)
+
+        val dialog = StableDialog.builder(this)
+            .setTitle("定位模拟")
+            .setView(container)
+            .setPositiveButton("查看状态", null)
+            .setNegativeButton("关闭", null)
+            .create()
+
+        btnStart.setOnClickListener {
+            val latText = etLat.text.toString().trim()
+            val lngText = etLng.text.toString().trim()
+            if (latText.isBlank() || lngText.isBlank()) {
+                showShortToast("请填入纬度和经度")
+                return@setOnClickListener
+            }
+            val lat = latText.toDoubleOrNull()
+            val lng = lngText.toDoubleOrNull()
+            if (lat == null || lng == null) {
+                showShortToast("经纬度解析失败")
+                return@setOnClickListener
+            }
+            val alt = etAlt.text.toString().trim().toDoubleOrNull() ?: 0.0
+            // 先检查运行时定位权限: 未授予时 addTestProvider 即使 mock 应用设对了也无法注入。
+            // 独立提示, 避免与"开发者选项设置"混在一起误导用户。
+            val hasLocPerm =
+                checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED &&
+                    checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            if (!hasLocPerm) {
+                StableDialog.builder(this)
+                    .setTitle("需要定位权限")
+                    .setMessage(
+                        "位置模拟需要本 app 拥有定位权限(ACCESS_FINE/COARSE_LOCATION),\n" +
+                            "否则模拟位置无法注入其它 App。\n\n现在前往应用权限设置授予？"
+                    )
+                    .setPositiveButton("前往设置") { _, _ ->
+                        runCatching {
+                            startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.parse("package:$packageName")))
+                        }
+                    }
+                    .setNegativeButton("稍后", null)
+                    .create()
+                    .show()
+                return@setOnClickListener
+            }
+            com.HanFeng.xposed.FakeDataStore.writeLocation(this,
+                com.HanFeng.xposed.FakeLocationPoint(
+                    enabled = true, latitude = lat, longitude = lng,
+                    altitude = alt, accuracy = 5.0f, speed = 0.0f,
+                    bearing = 0f, provider = "gps", timestamp = System.currentTimeMillis()
+                )
+            )
+            // 同步写假基站 (hook TelephonyManager 用): LAC/CID 固定假值, MCC/MNC 留 -1 继承真实运营商
+            com.HanFeng.xposed.FakeDataStore.writeCellInfo(this,
+                com.HanFeng.xposed.FakeCellInfo(
+                    enabled = true, mcc = -1, mnc = -1,
+                    lac = 0x7FFE, cid = 0x7FFE
+                )
+            )
+            // mock 应用设置: 已设置直接放行; 未设置但有 root 则强制写入 mock_location + appop 后放行
+            // (用户有 root 时不再依赖手动设置是否真正写入/能否被读到, 点击启用即自动完成);
+            // 只有 root 不可用且确实没设置时才引导用户去开发者选项手动设置。
+            if (!isMockLocationAppSelected() && !forceSetMockLocationByRoot()) {
+                StableDialog.builder(this)
+                    .setTitle("需要开发者选项授权")
+                    .setMessage(
+                        "定位模拟需要先在开发者选项里把「选择模拟位置信息应用」设为 HanFeng，\n" +
+                            "否则 addTestProvider() 会被系统拒绝，模拟不会生效。\n\n" +
+                            "(本机无 root 自动写入权限, 请手动设置)\n\n" +
+                            "现在前往开发者选项设置？"
+                    )
+                    .setPositiveButton("前往设置") { _, _ ->
+                        runCatching {
+                            startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+                        }
+                    }
+                    .setNegativeButton("稍后", null)
+                    .create()
+                    .apply {
+                        // 不要在 dismiss 时立刻启动服务: 此时用户还没在开发者选项里选中 HanFeng,
+                        // 服务会因 addTestProvider() 被系统拒绝而立即退出 (表现为"设置了仍不生效, 只能重新进入")。
+                        // 改为轮询等 mock_location 变为本包名后再自动启动, 用户从设置页返回即自动生效。
+                        setOnDismissListener {
+                            lifecycleScope.launch {
+                                repeat(45) {
+                                    if (isFinishing || isDestroyed) return@launch
+                                    delay(2000)
+                                    if (isMockLocationAppSelected()) {
+                                        startMockServiceFromDialog()
+                                        return@launch
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .show()
+                return@setOnClickListener
+            }
+            startMockServiceFromDialog()
+            refreshMockStatus(tvCurrent, dialog)
+        }
+        btnStop.setOnClickListener {
+            val intent = Intent(this, com.HanFeng.xposed.MockLocationService::class.java).apply {
+                action = com.HanFeng.xposed.MockLocationService.ACTION_STOP
+            }
+            startService(intent)
+            com.HanFeng.xposed.FakeDataStore.clearAll(this)
+            showShortToast("已停止定位模拟")
+            refreshMockStatus(tvCurrent, dialog)
+        }
+        dialog.setOnShowListener {
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                try {
+                    startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+                } catch (e: Throwable) {
+                    showShortToast("找不到开发者选项")
+                }
+            }
+        }
+        btnPick.setOnClickListener {
+            // 改用独立全屏 MapPickerActivity 承载 WebView: Dialog 内 WebView 存在地图空白(尺寸未就绪)
+            // 和搜索框键盘不弹(IME 对 Dialog window focus 处理不一致)两个顽疾, Activity 方案彻底解决。
+            pendingMapPickCallback = { lat, lng ->
+                etLat.setText(lat.toString())
+                etLng.setText(lng.toString())
+                showShortToast("已从地图选点, 点击「启动模拟」即可")
+            }
+            mapPickerLauncher.launch(MapPickerActivity.createIntent(this))
+        }
+        lifecycleScope.launch {
+            refreshMockStatus(tvCurrent, dialog)
+        }
+        dialog.show()
+    }
+
+    /** 启动 MockLocationService (前台服务) 并 Toast。 */
+    private fun startMockServiceFromDialog() {
+        val intent = Intent(this, com.HanFeng.xposed.MockLocationService::class.java).apply {
+            action = com.HanFeng.xposed.MockLocationService.ACTION_START
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        showShortToast("已启动定位模拟")
+    }
+
+    /** 是否已在开发者选项把本 APP 设为"模拟位置信息应用"。 */
+    private fun isMockLocationAppSelected(): Boolean {
+        val mockSetting = runCatching {
+            // MOCK_LOCATION 是 @hide 常量, 公共 SDK 无定义, 用字符串字面量 "mock_location".
+            android.provider.Settings.Secure.getString(contentResolver, "mock_location")
+        }.getOrNull()?.trim() ?: ""
+        // 标准 ROM 存包名; 老系统存 "1"; 个别 ROM 存 "package:<包名>" 或大小写不一致, 一并兼容。
+        return mockSetting == packageName ||
+            mockSetting.equals(packageName, ignoreCase = true) ||
+            mockSetting == "package:$packageName" ||
+            mockSetting == "1"
+    }
+
+    /**
+     * 有 root 时强制把本 app 写为"模拟位置信息应用" (mock_location 安全设置 + appop), 
+     * 彻底绕开"用户在开发者选项手动设置但系统未写入/读取失败"的问题。
+     * 写入后立即用 isMockLocationAppSelected() 校验是否真正生效。
+     */
+    private fun forceSetMockLocationByRoot(): Boolean {
+        return runCatching {
+            val su = com.HanFeng.adblocker.shizuku.SuSession.getInstance()
+            if (!su.open(8)) return false
+            su.execute(
+                "settings put secure mock_location $packageName 2>/dev/null; " +
+                    "appops set $packageName android:mock_location allow 2>/dev/null; " +
+                    "settings get secure mock_location 2>/dev/null",
+                8
+            )
+            isMockLocationAppSelected()
+        }.getOrDefault(false)
+    }
+
+    /**
+     * 刷新定位模拟状态行。必须读私有 PREF: /data/local/tmp 免 root 写不进去,
+     * 读公开 JSON 会恒显"未启动模拟" (见 FakeDataStore.readLocationPrivate 注释)。
+     */
+    private fun refreshMockStatus(tvCurrent: TextView, dialog: android.app.Dialog) {
+        lifecycleScope.launch {
+            val summary = withContext(Dispatchers.IO) {
+                val cur = com.HanFeng.xposed.FakeDataStore.readLocationPrivate(this@SettingsActivity)
+                if (cur != null && cur.enabled) {
+                    "当前模拟中: lat=${cur.latitude}, lng=${cur.longitude}, alt=${cur.altitude}"
+                } else {
+                    "未启动模拟"
+                }
+            }
+            if (isFinishing || isDestroyed) return@launch
+            if (!dialog.isShowing) return@launch
+            tvCurrent.text = summary
+        }
+    }
+
+    // ==================== WiFi 信息模拟 ====================
+    private fun showFakeWifiDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16.dp, 16.dp, 16.dp, 8.dp)
+        }
+        val tvCurrent = TextView(this).apply {
+            text = "正在读取..."
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 0, 0, 8.dp)
+            maxLines = 14
+        }
+        container.addView(tvCurrent)
+
+        fun makeTextEdit(label: String, hint: String, caps: Boolean): EditText {
+            val tv = TextView(this@SettingsActivity).apply {
+                text = label
+                setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+                textSize = 12f
+                setPadding(0, 8.dp, 0, 4.dp)
+            }
+            container.addView(tv)
+            return EditText(this@SettingsActivity).apply {
+                this.hint = hint
+                setSingleLine(true)
+                inputType = if (caps) {
+                    android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or
+                        android.text.InputType.TYPE_CLASS_TEXT or
+                        android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                } else android.text.InputType.TYPE_CLASS_TEXT
+                setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+                setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+                setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+                setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+            }
+        }
+        val etSsid = makeTextEdit("WiFi 名称 (SSID)", "如 HanFeng-WiFi", caps = false)
+        container.addView(etSsid)
+        val etBssid = makeTextEdit("BSSID (路由器 MAC, 大写)", "如 AA:BB:CC:DD:EE:FF", caps = true)
+        container.addView(etBssid)
+        val etMac = makeTextEdit("本机 MAC", "如 02:11:22:33:44:55 (推荐 locally administered 段)", caps = true)
+        container.addView(etMac)
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 12.dp, 0, 0)
+        }
+        val btnRandom = Button(this).apply {
+            text = "随机全部"
+            textSize = 12f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp }
+        }
+        val btnApply = Button(this).apply {
+            text = "应用全部"
+            textSize = 12f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp; marginEnd = 4.dp }
+        }
+        val btnRestore = Button(this).apply {
+            text = "恢复"
+            textSize = 12f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp }
+        }
+        btnRow.addView(btnRandom)
+        btnRow.addView(btnApply)
+        btnRow.addView(btnRestore)
+        container.addView(btnRow)
+
+        val tvHint = TextView(this).apply {
+            text = "WiFi 信息改写三层生效:\n" +
+                "1) LSPosed Hook 路径 (主): Hook WifiManager.getConnectionInfo / getScanResults, 所有目标 APP 读到的就是假值\n" +
+                "   要求: 装 LSPosed + 在 LSPosed 里启用本模块作用域\n" +
+                "2) Root prop 路径: wlan.ssid / wlan.bssid / wlan.mac resetprop + 持久化 Magisk service.d\n" +
+                "3) Root MAC 真改: ip link set wlan0 address <mac>, 重启自动重放\n" +
+                "4) WifiConfigStore.xml 注入: 仅 AOSP/Pixel 已验证, MIUI/HyperOS 加密版仅做 hook 兜底"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 11f
+            setPadding(0, 8.dp, 0, 0)
+            maxLines = 18
+        }
+        container.addView(tvHint)
+
+        val dialog = StableDialog.builder(this)
+            .setTitle("WiFi 信息模拟")
+            .setView(container)
+            .setPositiveButton("关闭", null)
+            .create()
+
+        btnRandom.setOnClickListener {
+            val r = kotlin.random.Random(System.currentTimeMillis())
+            val chars = ('A'..'Z') + ('0'..'9')
+            val ssid = "HanFeng-" + (1..6).map { chars.random(r) }.joinToString("")
+            val oui = listOf(
+                "50:C7:BF", "64:09:80", "04:33:8F", "04:95:E6",
+                "C0:3F:0E", "1C:BF:C0", "34:29:8E", "BC:46:99"
+            ).random(r)
+            val tail = (1..3).joinToString(":") {
+                (0..255).random(r).toString(16).uppercase().padStart(2, '0')
+            }
+            val bssid = "$oui:$tail"
+            val macTail = (1..5).joinToString(":") {
+                (0..255).random(r).toString(16).uppercase().padStart(2, '0')
+            }
+            val mac = "02:$macTail"
+            etSsid.setText(ssid)
+            etBssid.setText(bssid)
+            etMac.setText(mac)
+            showShortToast("已生成假 WiFi 信息")
+        }
+
+        btnApply.setOnClickListener {
+            val ssid = etSsid.text.toString().trim()
+            val bssid = etBssid.text.toString().trim()
+            val mac = etMac.text.toString().trim()
+            if (ssid.isBlank() || bssid.isBlank() || mac.isBlank()) {
+                showShortToast("请填全 SSID/BSSID/MAC 或点随机")
+                return@setOnClickListener
+            }
+            com.HanFeng.xposed.FakeDataStore.writeWifiInfo(
+                this,
+                com.HanFeng.xposed.FakeWifiInfo(
+                    enabled = true, ssid = ssid, bssid = bssid, mac = mac,
+                    rssi = -55, linkSpeed = 433, frequency = 2437,
+                    ipAddress = 0x0100A8C0, networkId = -1, hiddenSSID = false,
+                    fakeScanResults = listOf(
+                        com.HanFeng.xposed.FakeScanResult(
+                            ssid = ssid, bssid = bssid, rssi = -55,
+                            frequency = 2437, timestamp = System.currentTimeMillis() * 1000
+                        )
+                    )
+                )
+            )
+            showShortToast("已写入假 WiFi 数据 (Hook 路径已生效)")
+            lifecycleScope.launch {
+                val summary = withContext(Dispatchers.IO) {
+                    val wm = com.HanFeng.adblocker.shizuku.WifiModifier()
+                    val sb = StringBuilder()
+                    sb.append("=== Root 加固 ===\n")
+                    val r1 = wm.setMacAddress("wlan0", mac)
+                    sb.append("MAC 改写: ${r1.output}\n\n")
+                    val r2 = wm.setWifiProps(ssid, bssid, mac)
+                    sb.append("Prop 写入: ${r2.output}\n\n")
+                    val r3 = wm.setWifiConfigStore(ssid, bssid)
+                    sb.append("WifiConfigStore: ${r3.output}")
+                    sb.toString()
+                }
+                if (isFinishing || isDestroyed) return@launch
+                StableDialog.builder(this@SettingsActivity)
+                    .setTitle("Root 加固结果")
+                    .setMessage(summary)
+                    .setPositiveButton("确定", null)
+                    .showSafely(this@SettingsActivity, "wifi-root-apply")
+            }
+        }
+
+        btnRestore.setOnClickListener {
+            com.HanFeng.xposed.FakeDataStore.clearAll(this)
+            lifecycleScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    com.HanFeng.adblocker.shizuku.WifiModifier().restore()
+                }
+                if (isFinishing || isDestroyed) return@launch
+                showShortToast("已清假数据 + 恢复 root 路径: ${result.output.take(50)}")
+            }
+        }
+        lifecycleScope.launch {
+            val summary = withContext(Dispatchers.IO) {
+                val curFake = com.HanFeng.xposed.FakeDataStore.readWifiInfoPublic()
+                val rootState = com.HanFeng.adblocker.shizuku.WifiModifier().readCurrent()
+                val sb = StringBuilder()
+                sb.append("=== 假数据状态 (Hook 路径) ===\n")
+                if (curFake != null && curFake.enabled) {
+                    sb.append("启用中\nSSID: ${curFake.ssid}\nBSSID: ${curFake.bssid}\nMAC: ${curFake.mac}\n")
+                } else {
+                    sb.append("未启用\n")
+                }
+                sb.append("\n=== Root 路径真值 ===\n")
+                sb.append(rootState)
+                sb.toString()
+            }
+            if (isFinishing || isDestroyed) return@launch
+            if (!dialog.isShowing) return@launch
+            tvCurrent.text = summary
+        }
+        dialog.show()
     }
 
     // ==================== SN 码 (拨号盘 *#06# 显示的 SN 行) ====================
@@ -1562,9 +2252,19 @@ btnRootHide.setOnClickListener {
             setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
             textSize = 12f
             setPadding(0, 0, 0, 8.dp)
-            maxLines = 8
+            maxLines = 12
         }
-        val etInput = EditText(this).apply {
+        container.addView(tvCurrent)
+
+        // 主 IMEI 标签
+        val tvLabel1 = TextView(this).apply {
+            text = "主 IMEI (IMEI1)"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 8.dp, 0, 4.dp)
+        }
+        container.addView(tvLabel1)
+        val etInput1 = EditText(this).apply {
             hint = "15 位数字 (末位 Luhn 校验)"
             setSingleLine(true)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
@@ -1573,55 +2273,97 @@ btnRootHide.setOnClickListener {
             setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
             setPadding(12.dp, 12.dp, 12.dp, 12.dp)
         }
+        container.addView(etInput1)
+
+        // 副 IMEI 标签
+        val tvLabel2 = TextView(this).apply {
+            text = "副 IMEI (IMEI2, 双卡机型用; 留空则与 IMEI1 相同)"
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            textSize = 12f
+            setPadding(0, 8.dp, 0, 4.dp)
+        }
+        container.addView(tvLabel2)
+        val etInput2 = EditText(this).apply {
+            hint = "留空 = 与 IMEI1 共用 (旧行为); 双卡机型建议填入独立 IMEI"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setTextColor(getColor(com.HanFeng.R.color.hf_text_primary))
+            setHintTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
+            setBackgroundResource(com.HanFeng.R.drawable.bg_panel)
+            setPadding(12.dp, 12.dp, 12.dp, 12.dp)
+        }
+        container.addView(etInput2)
+
         val tvHint = TextView(this).apply {
             text = "本工具先尝试 NV 真 IMEI 写入, 失败 (常见 OEM 锁) 自动降级 prop 伪装。" +
+                "动态扫描设备真实存在的 IMEI prop (含厂商衍生项如 ro.boot.imei_alpha) 一并写入;" +
                 "prop 伪装对 TelephonyManager.getImei() 等 API 在 com.android.phone 重启后才生效; " +
-                "拨号盘 *#06# 在部分机型不会刷新。修改 IMEI 风险较高, 已自动备份原值, " +
-                "失败可用\"恢复备份\"按钮。"
+                "拨号盘 *#06# 在部分机型不会刷新。双卡机型务必填入两个不同的 IMEI 避免运营商验证冲突; " +
+                "修改 IMEI 风险较高, 已自动备份原值, 失败可用\"恢复备份\"按钮。"
             setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
             textSize = 11f
             setPadding(0, 8.dp, 0, 0)
-            maxLines = 10
+            maxLines = 14
         }
+        container.addView(tvHint)
+
+        // 三按钮: 随机主 IMEI / 同时随机两个独立 IMEI / 恢复备份
         val btnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 8.dp, 0, 0)
         }
-        val btnRandom = Button(this).apply {
-            text = "随机"
-            textSize = 13f
+        val btnRandom1 = Button(this).apply {
+            text = "随机 IMEI1"
+            textSize = 12f
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp }
+        }
+        val btnRandomBoth = Button(this).apply {
+            text = "随机双 IMEI"
+            textSize = 12f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 4.dp; marginStart = 4.dp }
         }
         val btnRestore = Button(this).apply {
             text = "恢复备份"
-            textSize = 13f
+            textSize = 12f
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 4.dp }
         }
-        btnRow.addView(btnRandom)
+        btnRow.addView(btnRandom1)
+        btnRow.addView(btnRandomBoth)
         btnRow.addView(btnRestore)
-        container.addView(tvCurrent)
-        container.addView(etInput)
-        container.addView(tvHint)
         container.addView(btnRow)
 
         val dialog = StableDialog.builder(this)
-            .setTitle("修改 IMEI")
+            .setTitle("修改 IMEI (双卡分离支持)")
             .setView(container)
             .setPositiveButton("确认修改") { _, _ ->
-                val newImei = etInput.text.toString().trim()
-                if (newImei.isBlank()) {
-                    showShortToast("请输入 IMEI")
+                val imei1 = etInput1.text.toString().trim()
+                val imei2 = etInput2.text.toString().trim()
+                if (imei1.isBlank()) {
+                    showShortToast("请输入主 IMEI")
                     return@setPositiveButton
                 }
-                executeImeiChange(newImei)
+                executeImeiChange(imei1, imei2.ifBlank { null })
             }
             .setNegativeButton("取消", null)
             .create()
 
         dialog.show()
-        btnRandom.setOnClickListener {
-            etInput.setText(com.HanFeng.adblocker.shizuku.DeviceIdModifier.generateRandomImei())
-            etInput.setSelection(etInput.text.length)
+        btnRandom1.setOnClickListener {
+            etInput1.setText(com.HanFeng.adblocker.shizuku.DeviceIdModifier.generateRandomImei())
+            etInput1.setSelection(etInput1.text.length)
+        }
+        btnRandomBoth.setOnClickListener {
+            val i1 = com.HanFeng.adblocker.shizuku.DeviceIdModifier.generateRandomImei()
+            var i2 = com.HanFeng.adblocker.shizuku.DeviceIdModifier.generateRandomImei()
+            // 确保两个不同的 IMEI
+            while (i2 == i1) {
+                i2 = com.HanFeng.adblocker.shizuku.DeviceIdModifier.generateRandomImei()
+            }
+            etInput1.setText(i1)
+            etInput2.setText(i2)
+            etInput1.setSelection(i1.length)
+            etInput2.setSelection(i2.length)
+            showShortToast("已生成两个独立 IMEI")
         }
         btnRestore.setOnClickListener {
             lifecycleScope.launch {
@@ -1645,16 +2387,16 @@ btnRootHide.setOnClickListener {
             val rilVal = lines.firstOrNull { it.startsWith("RIL(slot0)=") }
                 ?.substringAfter('=')?.trim()
                 ?.takeIf { it.isNotBlank() && it != "(空)" }
-            val propVal = lines.firstOrNull { it.startsWith("gsm.imei=") }
+            val propVal1 = lines.firstOrNull { it.startsWith("gsm.imei=") || it.startsWith("gsm.imei1=") }
                 ?.substringAfter('=')?.trim()
                 ?.takeIf { it.isNotBlank() && it != "(空)" }
-                ?: lines.firstOrNull { it.startsWith("persist.sys.imei=") }
+                ?: lines.firstOrNull { it.startsWith("persist.sys.imei=") || it.startsWith("persist.sys.imei1=") }
                     ?.substringAfter('=')?.trim()
                     ?.takeIf { it.isNotBlank() && it != "(空)" }
-                ?: lines.firstOrNull { it.startsWith("ril.imei=") }
+                ?: lines.firstOrNull { it.startsWith("ril.imei=") || it.startsWith("ril.imei1=") }
                     ?.substringAfter('=')?.trim()
                     ?.takeIf { it.isNotBlank() && it != "(空)" }
-                ?: lines.firstOrNull { it.startsWith("persist.vendor.radio.imei=") }
+                ?: lines.firstOrNull { it.startsWith("persist.vendor.radio.imei=") || it.startsWith("persist.vendor.radio.imei1=") }
                     ?.substringAfter('=')?.trim()
                     ?.takeIf { it.isNotBlank() && it != "(空)" }
                 ?: lines.firstOrNull { it.startsWith("ro.vendor.radio.imei=") }
@@ -1663,30 +2405,54 @@ btnRootHide.setOnClickListener {
                 ?: lines.firstOrNull { it.startsWith("ro.boot.miui.imei1=") }
                     ?.substringAfter('=')?.trim()
                     ?.takeIf { it.isNotBlank() && it != "(空)" }
-            val displayVal = rilVal ?: propVal
-            // 关键改动: 不再静默写 "(无法读取)" - 把完整诊断明细展示给用户,
-            // 让用户看清 service call / dumpsys 是否被deny / prop 是否全空, 才能针对性报问题.
-            tvCurrent.text = if (displayVal != null) {
-                "当前 IMEI：\n$displayVal"
+            val propVal2 = lines.firstOrNull { it.startsWith("gsm.imei2=") }
+                ?.substringAfter('=')?.trim()
+                ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("persist.sys.imei2=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("ril.imei2=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("persist.vendor.radio.imei2=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+                ?: lines.firstOrNull { it.startsWith("ro.boot.miui.imei2=") }
+                    ?.substringAfter('=')?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "(空)" }
+            val displayVal1 = rilVal ?: propVal1
+            tvCurrent.text = if (displayVal1 != null) {
+                val sb = StringBuilder("当前 IMEI：\nIMEI1: $displayVal1")
+                if (propVal2 != null) {
+                    sb.append("\nIMEI2: $propVal2")
+                }
+                // 顺带展示扫描到的其他 prop 数量
+                val totalProps = lines.count { it.contains('=') && it.substringBefore('=').contains("imei", ignoreCase = true) }
+                if (totalProps > 0) sb.append("\n(共扫描到 $totalProps 个 imei 关键 prop)")
+                sb.toString()
             } else {
                 // 把 output 里 "# 解析明细" 之后的内容直接展示, UI 高度有限只取前 800 char
                 val diagBlock = result.output.substringAfter("# 解析明细", "").trim().take(800)
                 "未能读取 IMEI\n诊断信息:\n$diagBlock"
             }
-            if (!propVal.isNullOrBlank()) {
-                etInput.setText(propVal)
-                etInput.setSelection(etInput.text.length)
+            if (!propVal1.isNullOrBlank()) {
+                etInput1.setText(propVal1)
+                etInput1.setSelection(etInput1.text.length)
             } else if (!rilVal.isNullOrBlank()) {
-                etInput.setText(rilVal)
-                etInput.setSelection(etInput.text.length)
+                etInput1.setText(rilVal)
+                etInput1.setSelection(etInput1.text.length)
+            }
+            if (!propVal2.isNullOrBlank()) {
+                etInput2.setText(propVal2)
+                etInput2.setSelection(etInput2.text.length)
             }
         }
     }
 
-    private fun executeImeiChange(newImei: String) {
+    private fun executeImeiChange(newImei1: String, newImei2: String?) {
         lifecycleScope.launch {
             val modifier = com.HanFeng.adblocker.shizuku.DeviceIdModifier()
-            val result = withContext(Dispatchers.Default) { modifier.writeImei(newImei) }
+            val result = withContext(Dispatchers.Default) { modifier.writeImei(newImei1, newImei2) }
             withContext(Dispatchers.Main) {
                 if (result.exitCode == 0) {
                     StableDialog.builder(this@SettingsActivity)
@@ -3196,17 +3962,11 @@ btnRootHide.setOnClickListener {
         val appContext = applicationContext
         lifecycleScope.launch {
             try {
-                val inputStream = contentResolver.openInputStream(uri)
-                    ?: throw IllegalStateException("无法打开选择的图片")
                 val bgDir = File(appContext.filesDir, "backgrounds")
                 if (!bgDir.exists()) bgDir.mkdirs()
                 val bgFile = File(bgDir, "bg_" + System.currentTimeMillis() + ".jpg")
                 withContext(Dispatchers.IO) {
-                    inputStream.use { input ->
-                        bgFile.outputStream().use { output ->
-                            input.copyTo(output)
-                        }
-                    }
+                    createOptimizedBackgroundCopy(uri, bgFile)
                 }
                 FeatureSettingsRepository.appendCustomBackgroundPath(appContext, bgFile.absolutePath)
                 refreshCustomBackgroundPreview()
@@ -3219,6 +3979,30 @@ btnRootHide.setOnClickListener {
 
     private fun chooseBackgroundImage() {
         backgroundPickerLauncher.launch("image/*")
+    }
+
+    private fun createOptimizedBackgroundCopy(uri: android.net.Uri, outputFile: File) {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { input ->
+            android.graphics.BitmapFactory.decodeStream(input, null, bounds)
+        } ?: throw IllegalStateException("无法打开选择的图片")
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IllegalStateException("图片格式无法识别")
+        val maxSide = 1600
+        var sample = 1
+        while ((bounds.outWidth / sample) > maxSide || (bounds.outHeight / sample) > maxSide) {
+            sample *= 2
+        }
+        val opts = android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = sample.coerceAtLeast(1)
+            inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+        }
+        val bmp = contentResolver.openInputStream(uri)?.use { input ->
+            android.graphics.BitmapFactory.decodeStream(input, null, opts)
+        } ?: throw IllegalStateException("图片解码失败")
+        outputFile.outputStream().use { out ->
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 86, out)
+        }
+        bmp.recycle()
     }
 
     private fun removeCustomBackground() {

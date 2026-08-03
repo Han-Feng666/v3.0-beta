@@ -51,6 +51,9 @@ class MainActivity : BaseActivity() {
         private const val KEY_BATTERY_OPT_PROMPT_AT = "last_battery_opt_prompt_at"
         private const val BATTERY_OPT_PROMPT_COOLDOWN = 7L * 24L * 60L * 60L * 1000L
         const val EXTRA_AUTO_REMOVE_FROM_RECENTS = "extra_auto_remove_from_recents"
+        // 远程 Intent 跳到指定主 Tab; 用于 CaptureFloatingService 点击悬浮窗后跳到抓包 Tab
+        const val EXTRA_OPEN_TAB = "extra_open_tab"
+        const val TAB_INDEX_CAPTURE = 3
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -163,14 +166,19 @@ class MainActivity : BaseActivity() {
             pager?.isSaveEnabled = false
             pager?.adapter = null
             pager?.adapter = MainPagerAdapter(this)
-            // 全 3 个 fragment 都保留,避免切换到 Rules/Stats 时重新 inflate 925 行 XML + 触发 refreshList
-            pager?.offscreenPageLimit = 2
+            // 首屏优先: 避免启动时一次性 inflate 规则/统计/抓包 4 个页面导致安装后白屏数秒。
+            // 注意: setOffscreenPageLimit 只允许 OFFSCREEN_PAGE_LIMIT_DEFAULT(-1) 或 >0,
+            // 传 0 会抛 IllegalArgumentException 导致启动闪退, 必须用 -1/1。
+            pager?.offscreenPageLimit = 1
             pager?.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
                 override fun onPageSelected(position: Int) {
                     if (position == 0) notifyRulesPageSelected()
                 }
             })
-            pager?.setCurrentItem(1, false)
+            // 远程携带 EXTRA_OPEN_TAB 时跳到指定 tab (例如 CaptureFloatingService)
+            val tab = intent?.getIntExtra(EXTRA_OPEN_TAB, -1) ?: -1
+            val initial = if (tab in 0..3) tab else 1
+            pager?.setCurrentItem(initial, false)
             return
         }
         if (savedInstanceState != null) return
@@ -194,8 +202,11 @@ class MainActivity : BaseActivity() {
 
     private fun syncMitmCertificateStateIfNeeded() {
         if (!FeatureSettingsRepository.isHttpDecryptEnabled(this)) return
-        val wasInstalled = HttpsMitmRepository.isCertificateInstalled(this)
         lifecycleScope.launch {
+            // isCertificateInstalled 无缓存时读 SP, 移到后台协程避免阻塞首帧
+            val wasInstalled = withContext(Dispatchers.Default) {
+                HttpsMitmRepository.isCertificateInstalled(applicationContext)
+            }
             val installed = withContext(Dispatchers.Default) {
                 CertificateAuthorityManager.syncInstalledState(applicationContext)
             }
@@ -288,12 +299,28 @@ class MainActivity : BaseActivity() {
 
     private fun checkAndPromptBatteryOptimization() {
         if (isFinishing || isDestroyed || batteryOptimizationPromptShown) return
-        if (DeviceCompatibilityHelper.isIgnoringBatteryOptimizations(this)) return
+        batteryOptimizationPromptShown = true
         val prefs = getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE)
         val lastPromptAt = prefs.getLong(KEY_BATTERY_OPT_PROMPT_AT, 0L)
         val now = System.currentTimeMillis()
-        if (lastPromptAt > 0L && now - lastPromptAt < BATTERY_OPT_PROMPT_COOLDOWN) return
-        batteryOptimizationPromptShown = true
+        if (lastPromptAt > 0L && now - lastPromptAt < BATTERY_OPT_PROMPT_COOLDOWN) {
+            batteryOptimizationPromptShown = false
+            return
+        }
+        // isIgnoringBatteryOptimizations 是跨进程 binder 调用, 丢到后台线程避免阻塞冷启动首帧
+        lifecycleScope.launch {
+            val ignoring = withContext(Dispatchers.Default) {
+                runCatching { DeviceCompatibilityHelper.isIgnoringBatteryOptimizations(this@MainActivity) }.getOrDefault(true)
+            }
+            if (ignoring || isFinishing || isDestroyed) {
+                batteryOptimizationPromptShown = false
+                return@launch
+            }
+            showBatteryOptimizationDialog(now)
+        }
+    }
+
+    private fun showBatteryOptimizationDialog(now: Long) {
         val romType = DeviceCompatibilityHelper.detectRomType()
         val isChineseRom = DeviceCompatibilityHelper.isChineseRom()
         val brand = Build.BRAND.take(1).uppercase() + Build.BRAND.drop(1)
@@ -516,6 +543,15 @@ class MainActivity : BaseActivity() {
         }.onFailure {
             LogRepository.append(this, "Open settings failed: ${it.message ?: it.javaClass.simpleName}")
             showShortToast("打开设置失败")
+        }
+    }
+
+    fun openReward() {
+        runCatching {
+            startActivity(RewardActivity.createIntent(this))
+        }.onFailure {
+            LogRepository.append(this, "Open reward failed: ${it.message ?: it.javaClass.simpleName}")
+            showShortToast("打开赞赏页失败")
         }
     }
 

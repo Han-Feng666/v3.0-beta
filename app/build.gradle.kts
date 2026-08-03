@@ -12,7 +12,7 @@ android {
         minSdk = 24
         targetSdk = 35
         versionCode = 306
-        versionName = "2.13.6"
+        versionName = "3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -96,7 +96,6 @@ dependencies {
         resolutionStrategy.force("androidx.core:core-ktx:1.13.1")
     }
 
-    
     // P2.2 新增：单元测试依赖
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.mockito:mockito-core:5.12.0")
@@ -104,4 +103,7 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+
+    // LSPosed/Xposed API - 仅编译期需要, 运行期由用户设备上的 LSPosed 框架提供
+    compileOnly("de.robv.android.xposed:api:82")
 }

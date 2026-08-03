@@ -897,6 +897,8 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - shizuku-fork/:aidl 必须设 `buildFeatures.aidl = true`，否则 AIDL 不生成 stub → server/common/api 找不到 `moe.shizuku.server.IShizukuService` 包报错。
   - `moe.shizuku.manager.application` 是 fork manager 模块全局 lateinit 变量（见 `application.kt`），需要主 app 启动时调 `moe.shizuku.manager.init(application)` 才能让 `Starter.kt` 拿到包路径。当前主 app 暂未做这步——只 BootCompleteReceiver 在开机时才会触发该路径，运行态没用。
   - 编译验证：`./gradlew :app:assembleDebug` 全量通过；APK 含上述 12 个 .so。
+  - [排查] server 崩 `dlopen failed: .../librish.so not found`：APK 已含 4 ABI librish.so 且 extractNativeLibs=true 时，首要嫌疑是设备装的是 useLegacyPackaging 修复前的旧包（同 APK 中 libshizuku.so 能跑而 librish.so 报 not found 只有旧包才自洽）。激活链路已加固为不依赖 PM 解压状态：`BuiltInShizukuStarter.activateViaRoot` 先 resolve librish.so（nativeLibraryDir → APK zip 抽到 filesDir → 都没有则提示重装新包），root 落盘 `/data/local/tmp/hanfeng_shizuku_lib/` 后以 `--library-path=<该目录>` 传给 starter；starter.cpp 新增 `--library-path` 覆盖参数（默认仍按 dirname(dex_path)/lib/<ABI> 推算）。
+  - 抓包 enable 失败仅看 SP 标志 `cert_installed`（HttpsMitmRepository），系统证书安装依赖 root/Shizuku，故 Shizuku 不可用会连带抓包 PENDING_CERT；UI 已分层提示"证书未生成/未安装"。
 
 [设备标识三个字的修正]
 - Date: 2026-07-18
@@ -925,4 +927,105 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - persistent 标记反映是否写盘：success.persistent=true 时 UI 提示"重启后仍生效"，
     false 时提示"重启后失效"。
   - 目标目录：/system/etc/security/cacerts 主路径（旧设备）；/apex/com.android.conscrypt/cacerts
-    为 Android 14+ conscrypt 引擎实际加载点，但 APEX 不可写，仅可用 bind mount + nsenter。
+     为 Android 14+ conscrypt 引擎实际加载点，但 APEX 不可写，仅可用 bind mount + nsenter。
+  - [修正 2026-08-03] 抓包只需**用户证书**即可免 root：`cert_ready`/`cert_installed` 是 SP 标志，用户手动装 HanFeng.cer 用户证书后必须先调 `CertificateAuthorityManager.syncInstalledState()`（从 AndroidCAStore 探测）置位，否则 stale false 误报"证书未就绪"；`CaptureController.enable` 已前置 sync + CA 未生成时自动 `ensureCaInstalledFiles()` 生成并导出 Downloads。抓包不依赖 Shizuku/root。
+
+[抓包数据面路由架构 (2026-08-03 排查"装好证书仍抓不到包"定论)]
+- Date: 2026-08-03
+- Context: 用户装好系统证书、点启用抓包仍一个包都抓不到，Agent 定位根因
+- Category: 排障 / 架构
+- Instructions:
+  - 抓包 = 只读旁路挂接在广告拦截的 HTTPS MITM 管线 (`AdBlockVpnService` + `HttpsTlsBridgeManager` + `CaptureTap`) 上；`CaptureController.enable` 只切状态+发广播，**不直接拦截**。CaptureTap→onDecoded* 仅在 TLS bridge 完成解密后才触发。
+  - 任意 HTTPS 连接要进 bridge 解密，必须满足 full-capture routing 激活：`AdBlockVpnService.resolveFullCaptureRouteMode` 里 `ENABLE_GLOBAL_HTTPS_MITM_CAPTURE`(编译期 false) 控制 MITM_GLOBAL、`ENABLE_MITM_APP_FULL_CAPTURE`(false) 控制 MITM_APP。两者为 false 时 `isMitmFullCaptureRoutingActive()` 恒假 → SNI 观测(observeHttpsSni, :3113)与 SYN pending(:3331)都直接 return → 未知域名永远不解密 → 一个包都进不来。此前仅域名级 dynamic decrypt route 能出包。
+  - 2026-08-03 修复：`mitmFullCaptureEnabled = captureActive || ENABLE_GLOBAL_HTTPS_MITM_CAPTURE`(captureActive 读 `CaptureController.current.value.active`)；`shouldTrackPendingGlobalMitmHttpsSyn` 在 MITM_GLOBAL 模式直接 return true(绕过疑似广告过滤)；`CaptureController.enable/disable` 联动 `NetworkKernel.reloadIfRunning/start`(VPN 重建接口才生效，VPN 启动时序 startVpn:buildInterface(437) 先于 syncFromPrefs(457)，故 syncFromPrefs 内的 enable 会再触发一次 reload 收敛)。
+  - 抓包依赖广告拦截 VPN 管线：广告拦截开关未开时 VPN 不启动(AdBlockVpnService onStartCommand 对 ACTION_START/RELOAD 均检查 isAdBlockEnabled)，抓包同样拦不到；UI 已加提示。全量抓包只排除了 protected/social-core 域名与白名单 app，证书固定(pinning)的 App 会走 MITM 熔断冷却(isMitmFullCaptureCircuitOpen)。
+  - 证书：用户/系统证书都经 AndroidCAStore 可探测，`syncInstalledState` 一次即可置位 `cert_installed`；`HttpsMitmRepository.isCertificateReady/Installed` 是 SP 缓存，运行期靠 refreshRuntimeFeatureFlags 刷新。
+
+[LSPosed 模块集成 + 定位/WiFi 模拟架构]
+- Date: 2026-08-02
+- Context: Agent 实现"免 root + root 定位模拟 + WiFi 信息模拟"三套机制时定型
+- Category: 构建方法 / 架构
+- Instructions:
+  - LSPosed/Xposed API 通过 `compileOnly("de.robv.android.xposed:api:82")` 引入(settings.gradle.kts 加了 `maven("https://api.xposed.info/")`);运行期由用户设备上的 LSPosed 框架提供。
+  - LSPosed 模块声明:`assets/xposed_init` -> `com.HanFeng.xposed.HookMain`;AndroidManifest application 内 4 个 meta-data(`xposedmodule=true`/`xposeddescription`/`xposedminversion=82`/`xposedscope=@array/xposed_scope`);scope 数组在 `res/values/xposed_scope.xml`,默认含 `android`/`com.android.systemui`/`com.android.settings`/`com.google.android.gms`/`com.google.android.gsf`(用户在 LSPosed 里追加勾选目标 APP)。
+  - 跨进程共享数据走双路径:`/data/local/tmp/.hf_fake_data.json`(公共 root 路径,所有进程 root 可读)+ `SharedPreferences#hanfeng_fake_data`(私有,无需 root 时 LSPosed 通过 XSharedPreferences 读)。写入用 `FakeDataStore.writeWifiInfo/writeLocation/clearAll(ctx, ...)`,读取用 `readWifiInfoPublic/readLocationPublic`。
+  - 数据模型在 `com.HanFeng.xposed.FakeData.kt`:`FakeWifiInfo`(ssid/bssid/mac/rssi/linkSpeed/frequency/ipAddress/networkId/hiddenSSID/fakeScanResults)、`FakeScanResult`、`FakeLocationPoint`(lat/lng/alt/accuracy/speed/bearing/provider/timestamp)。
+  - 反检测(HookMain):Android 12+ Location.isFromMockProvider() 在 system_server + GMS 进程中 hook 为 `returnConstant(false)`;`Settings.Secure.getString("mock_location")` hook 为 "0";LocationManager.isMockProvider/isProviderEnabledForPrivileged hook 为 false。WifiManager.startScan hook 为 `returnConstant(true)` 防真扫描覆盖假数据。WifiInfo 字段因 Android 12+ final 用反射 `setObjectField` + `setAccessible(true)`(XposedHelpers.setObjectField 内部已处理 ART final 绕过)。
+  - MockLocationService(`com.HanFeng.xposed.MockLocationService`)是前台служба:`addTestProvider(PROVIDER_GPS,...)` + `setTestProviderLocation` 每秒注入一次假坐标;extras 包含 `satellites`(8-12 随机)、HDOP、NMEA GGA 句子(带正确 XOR 校验和)、speed 微扰(静置时 0.05-0.3 m/s)、bearing ±5 度抖动 等;`isFromMockProvider` extras 字段置 false。Manifest 注册为 `android:foregroundServiceType="location"`,需 `FOREGROUND_SERVICE_LOCATION` 权限 + 开发者选项中`选择模拟位置信息应用=HanFeng`。
+  - Root WiFi 加固(`WifiModifier`):三套独立路径并行执行——(1)`ip link set wlan0 down/address XX:XX/up` 改网卡 MAC(Magisk service.d 脚本 `hf_wifi_mac.sh` 开机重放);(2)resetprop `wlan.ssid/wlan.bssid/wlan.mac` + `persist.sys.wifi.mac` + 落入统一 hf_dictator module;(3)`/data/misc/wifi/WifiConfigStore.xml` sed 替换 SSID/BSSID 节点(仅 AOSP/Pixel 已验证;MIUI/HyperOS 加密版仅做日志)。WifiConfigStore.xml 改前自动备份到 `/data/adb/hf_dictator/wificonfig_backup.xml`,改后 `am force-stop com.android.wifi` 让其重读。恢复走 `restore()` 全部回滚。
+  - 假 WiFi 数据生成:SSID 走"HanFeng-" + 6 字符 alphanumeric;BSSID 从常见厂商 OUI 段(TP-LINK 50:C7:BF / 小米 64:09:80 / 华为 04:33:8F / vivo 04:95:E6 等)选一个 + 后 3 八段随机;MAC 走 LA 段(02 前缀)防广播冲突。
+  - SettingsActivity root 区按钮:布局 `btnFakeLocation`(freemium 走 MockLocationProvider,不需要 root)+ `btnFakeWifi`(需 root 加固)。"屏幕刷新率超频"功能已废弃移除(RefreshRateModifier.kt 已删)。
+  - LSPosed hook 进程作用域排除 `com.android.*`(系统 UI 等噪声进程)和 `com.HanFeng`(自己),其他目标 APP 都需要用户在 LSPosed 模块管理里勾选作用域才生效。
+  - file-read-limit + LSPosed 静态审计通知:本项目沙盒无 Java/Android SDK 不能编译,所有这一批新文件需要用户实机+装 LSPosed 框架后验证。
+  - [修正 2026-08-03] 免 root 时 `/data/local/tmp` 对 untrusted_app 不可读写: UI 状态与 MockLocationService 读坐标必须走私有 PREF(`FakeDataStore.readLocationPrivate(ctx)`),公开 JSON 只给 root/LSPosed 进程读;之前 UI 用 `readLocationPublic()` 恒显"未启动模拟",服务读 public 恒拿 null 永不注入。
+  - [修正 2026-08-03] `addTestProvider()` 要求开发者选项"选择模拟位置信息应用"= 本包,否则抛 SecurityException 服务秒退:`hasMockPermission()` 必须读 `Settings.Secure.MOCK_LOCATION == packageName`(或老系统 "1"),失败时 `notifyUserGuide()` 引导跳开发者选项而非泛化报错;SettingsActivity 启动前也先校验并弹窗引导。
+
+[IMEI/MEID 修改功能优化(参考模块)]
+- Date: 2026-08-02
+- Context: 用户上传 Magisk 模块"重启随机修改IMEI序列号"作参考,Agent 优化既有 IMEI/MEID 写入
+- Category: 业务规则 / 架构
+- Instructions:
+  - 双 IMEI 真分离:`writeImei(mainImei, subImei)` 第二参数为副 IMEI(IMEI2);IMEI_WRITE_PROPS 严格分两组——含"imei2"的写副 IMEI,其余(含共用段 `gsm.imei`/`ril.imei`/`sys.imei`)写主 IMEI。共用一个 IMEI 双卡机会导致运营商验证冲突,这是原模块的关键 Bug。
+  - 动态扫描补全:写之前 `scanExistingImeiProps()` 跑 `getprop | grep -iE 'imei|meid'` 找出长度 >=14 的 prop,补足硬编码列表漏网的 OEM 专属 prop(如 Samsung `ro.boot.imei_alpha`、MIUI `ro.boot.imei_label`),把扫描结果一并写入。
+  - IMEI_WRITE_PROPS 扩展(原 IMEI_READ_PROPS 才有的):加 `ro.boot.imei1/imei2`、`ro.boot.miui.imei1/imei2`、`ro.vendor.radio.imei/imei2`、`vendor.radio.imei/imei2`、`gsm.imei1/imei2`、`ril.imei1/imei2`、`sys.imei1/imei2`;写入集补 `persist.vendor.radio.imei/imei2`(原写入缺,只在读集)。
+  - MEID 是单一标识,**不存在 MEID1/MEID2**(双 CDMA 也没有分卡 MEID);仅 `gsm.meid/ril.meid/persist.sys.meid/persist.vendor.radio.meid/ro.boot.meid/ro.boot.miui.meid/ro.vendor.radio.meid/vendor.radio.meid/sys.meid` 9 条写入 prop。`persist.sys.meid2` 只在 READ_PROPS(部分机型 vendor init 写但无害)。
+  - RIL 重启加强:`killall com.android.phone` + `am force-stop com.android.phone` 之外补 `stop ril-daemon` + `start ril-daemon` 让 Phone 进程重新从 prop 读;原模块只 kill 不 stop rild,部分 ROM 上 com.android.phone 不会重新读 prop。
+  - UI 双 IMEI 对话框(SettingsActivity.showModifyImeiDialog):主 IMEI(IMEI1)+ 副 IMEI(IMEI2) 双输入框;"随机 IMEI1"按钮只填主;"随机双 IMEI"按钮生成两个互不相同的 IMEI(while 循环防重);读 IMEI 时分 IMEI1/IMEI2 parse + 回填。
+
+
+[定位模拟流程时序修复 + 双 Provider 注入]
+- Date: 2026-08-03
+- Context: 用户反馈"开发者选项已设置 HanFeng 仍反复提示去设置、只能重新进入才行；显示生效但高德显示真实位置"
+- Category: 排错调试 / 架构
+- Instructions:
+  - [时序 bug] SettingsActivity 的"需要开发者选项授权"弹窗原用 `setOnDismissListener { startMockServiceFromDialog() }`：点"前往设置"→ 弹窗 dismiss → 服务**立刻**启动，此刻 mock_location 还没设好 → `addTestProvider()` 被系统拒绝 → 服务 notifyUserGuide + 秒退。用户从开发者选项返回时服务已死，表现为"设置了仍提示去设置/只能重新进入"。
+  - 修复：dismiss 后改为 `lifecycleScope.launch { repeat(45){ delay(2000); if(isMockLocationAppSelected()){ startMockServiceFromDialog(); return@launch } } }` 轮询，等 mock_location 变为本包名再启动，用户从设置页返回即自动生效，不再提前启动被拒。
+  - [值兼容] `Settings.Secure.mock_location` 在不同 ROM 上值可能是包名 / "1" / "package:<包名>" / 大小写不一致；`isMockLocationAppSelected()` 与 `MockLocationService.hasMockPermission()` 需同时兼容这几种，否则"已设置仍判未设置"。
+  - [双 Provider] 只注入 `LocationManager.GPS_PROVIDER` 时，地图/打车类 App（如高德）仍可拿到真实 network 定位；改为同时 `addTestProvider("gps") + addTestProvider("network")`，注入线程每秒对两个 provider 都 `setTestProviderLocation`。个别 ROM 禁止 network test provider 时该路静默失败，gps 仍生效。清理/停止时遍历全部 provider remove。
+  - 高德自带 SDK 的 HTTP 网络定位不经系统 network provider，MockLocationProvider 无法覆盖，需 LSPosed hook 路径才拦得住。
+
+[Shizuku 激活防假激活 + 抓包路由二次核查]
+- Date: 2026-08-03
+- Context: 用户反馈"点激活显示已激活和授权了，但状态框仍显示未激活"
+- Category: 排错调试
+- Instructions:
+  - 假激活根因类：官方 server 进程是 starter fork 的 app_process，启动瞬间 `Shizuku.pingBinder()` 可能短暂为真，随后进程被系统回收/崩溃则 binder 断开；Activity 的 `waitForBinder()` 原在第一次 pingBinder 为真时立即弹"已激活"Toast。
+  - 修复：`waitForBinder` 首次检测到 alive 后再 `delay(3000)` 二次确认，仍 alive 才弹"已激活"；若已断开则弹"服务进程启动后即退出(疑似被杀/崩溃)"并写诊断日志。
+  - `BuiltInShizukuStarter.activateViaRoot` 判据本就以 `waitForBinderAlive(8s)` 为准，非假激活；状态框(refreshShizukuStatus)用 `ShizukuRepository.getStatus` 的 binderAlive，binder 死即显示"未激活"。若用户实测激活后 binder 持续死，优先怀疑系统后台限制杀 server 进程。
+  - 抓包路由二次核查定论：`startVpn:429 refreshRuntimeFeatureFlags` 与 `performSeamlessReload:668 refreshRuntimeFeatureFlags` 都在 `buildInterface` 前刷新 httpDecryptEnabled/mitmCertificateInstalled 字段，`FullCaptureRoutingSupport.resolve` 在 stableMode=false 时才可能返回 MITM_GLOBAL（stableMode=true 是 buildInterface 失败后的降级路径）；SNI 观测(:3113)→ leaf 证书(:3247)→ registerObservedSession→prepareTlsBridge 链路完整。静态上全量抓包路由已正确，用户仍零条目优先怀疑：装的是旧 APK / 广告拦截未开 / 目标域名属 whitelist/protected 被排除 / QUIC(HTTP3) 走 UDP 不经 TLS bridge。
+
+[抓包断网/Shizuku 假授权/定位 root 兜底三修复定论]
+- Date: 2026-08-03
+- Context: 用户反馈"抓包采用全量路由导致 App 断网；Shizuku 点激活显示已激活但本应用未授权、其它 App 授权开关不生效；定位模拟为什么不直接用 root"
+- Category: 排错调试
+- Instructions:
+  - [抓包断网] 抓包开启时 `resolveFullCaptureRouteMode` 原把 `captureActive` 直接映射成 `mitmFullCaptureEnabled=true` → `FullCaptureRoutingSupport.resolve` 返回 MITM_GLOBAL → 全部 App 流量进 TLS bridge 解密, bridge 对任意 App 失败即断网。修复: 抓包默认走 MITM_APP 按应用路由——`mitmAppTargets` 取 `CaptureController.current.value.targetApps`(BY_APP 模式) 合并广告 MITM 目标, VPN 用 `addAllowedApplication` 只放行目标应用(其余 App 绕过 VPN 直连不受影响);仅 `Mode.ALL_APPS` 才允许 MITM_GLOBAL。`shouldTrackPendingGlobalMitmHttpsSyn` 在 MITM_APP 下直接 return true(VPN 只放行目标流量, 全解密安全)。
+  - [Shizuku 假授权] fork server 对内置管理端 com.HanFeng 在 attach 时自动授权(isManager → attach 回复 permissionGranted=true)。若首次 attach 发生在 server 未注册 binder 之前, SDK 缓存 `permissionGranted=false` 之后不会重新 attach, `checkSelfPermission()` 恒 DENIED → 授权弹窗/其它 App 开关全失效。修复: `BuiltInShizukuStarter.restartViaRoot()`(root `pgrep -f hanfeng_shizuku_server` + kill, `Shizuku.onBinderReceived(null, pkg)` 清缓存, 再 activateViaRoot) + `ensureSelfAuthorized(context)` 自愈;Activity 在 requestPermission 后 2.5s 复查, 未授权即触发自愈。被授权 App 还必须在 manifest 声明 `com.HanFeng.permission.shizuku.API_V23` 或 `moe.shizuku.manager.permission.API_V23`, 否则 server 不推 binder、checkSelfPermission 恒 DENIED。
+  - [定位 root 兜底] `addTestProvider()` 卡"开发者选项选择模拟位置应用":有 root 时 MockLocationService 直接 `settings put secure mock_location <pkg>` + `appops set <pkg> android:mock_location allow`, 免手动进开发者选项, 之后 addTestProvider 即放行; root 不可用才回退 notifyUserGuide 引导。定位模拟坐标读取必须走私有 PREF(FakeDataStore.readLocationPrivate), 不能读 public JSON。
+
+[授权管理不依赖 manager 自授权定论]
+- Date: 2026-08-03
+- Context: 用户上传官方 Shizuku-13.6.0 源码, 参照官方 AuthorizationManager 核查"其它 App 授权开关不生效"
+- Category: 排错调试
+- Instructions:
+  - 官方 Shizuku Manager 管理授权表**不需要** manager 自身 `checkSelfPermission()==GRANTED`: server 端 `checkCallerManagerPermission` 按 `appId(Binder.getCallingUid())==MANAGER_APPLICATION_ID` 认授权方, 与 manager 自身权限标志无关。SDK 的 `getFlagsForUid/updateFlagsForUid` 走 `requireService()`(只要 binder 存活), 内部**不做** permissionGranted 门禁; 且 fork server attach 时对 manager 恒回 `BIND_APPLICATION_PERMISSION_GRANTED=true`(:289) 并推 binder(:552 按 isClientPermissionRequested)。
+  - 本项目曾把 `ShizukuAuthorizationRepository` 的 listInstalledAppsForAuth/grantAuthorization/revokeAuthorization/isAuthorized 全部挂在 `selfAuthorized()` 上, 一旦 SDK 缓存旧 DENIED 整条授权管理即死。修复(2026-08-03): 管理操作门禁从 `selfAuthorized()` 改为 `isServerAlive()`(binder 存活即可); `ShizukuPermissionManageActivity` 的 `applyAuthorizationChange`/`switchesEnabled`/`loadAppListWithAuthorization` 同步去掉 selfAuthorized 门禁。`selfAuthorized()` 仅保留给 UI 展示 manager 作为客户端的真实授权状态。
+  - 定论: 给第三方 App 授权/撤销只依赖 `Shizuku.pingBinder()`; manager 自身 `checkSelfPermission()==GRANTED` 只影响"manager 当普通 Shizuku 客户端"(用户服务/newProcess)的能力, 由上一轮 restartViaRoot 自愈兜底。
+
+[抓包全量被广告目标顶成按应用路由 + 定位注入失败静默 + server 授权即时生效]
+- Date: 2026-08-03
+- Context: 用户反馈"抓包不断网但零条目；位置模拟显示已启用但其它 App 读到真实位置；授权后其它 App 仍拿不到权限"
+- Category: 排错调试
+- Instructions:
+  - [抓包零条目根因] `FullCaptureRoutingSupport.resolve` 中 MITM_APP **优先于** MITM_GLOBAL。抓包 ALL_APPS 时只要广告拦截的 mitmAppTargets(adTargets) 非空, 路由就被顶成 MITM_APP → VPN `addAllowedApplication` 只放行广告目标 App, 用户要抓的目标 App 流量绕过 VPN 直连 → "不断网但抓不到包"。修复(2026-08-03): `resolveFullCaptureRouteMode` 在 captureModeAllApps(抓包 active 且 ALL_APPS) 时排除 adTargets 不并入 mitmAppTargets, 强制走 MITM_GLOBAL; BY_APP 模式仍按 targetApps+adTargets 走 MITM_APP。
+  - [定位注入失败可见性] `MockLocationService` 此前 addTestProvider/setTestProviderLocation 失败全 runCatching 静默, UI 仅凭坐标数据判"已启用", 实际注入可能根本没生效(最常见: 系统定位总开关关闭, 或 mock 权限被系统收回)。修复(2026-08-03): 启动前 `isLocationEnabled()` 检查, root 走 `settings put secure location_mode 3` 兜底否则报错停止; addTestProvider 全部失败 → notifyError+stop; setTestProviderLocation 连续 5 轮全失败 → notifyError+stop。
+  - [server 授权即时生效] fork server `updateFlagsForUid` 授权分支更新 configManager 后, 对已 attach 的 `clientManager.findClients(uid)` 重推 `bindApplication(reply)`(BIND_APPLICATION_PERMISSION_GRANTED=true 全套字段), SDK `IShizukuApplication.Stub` 回调更新 `permissionGranted` 并 scheduleBinderReceivedListeners, 授权免重启即时生效。revoke 分支保持 forceStop+onPermissionRevoked。
+
+[冷启动白屏十秒排查]
+- Date: 2026-08-03
+- Context: 用户反馈"首次打开闪退、后续打开白屏十秒"
+- Category: 排错调试
+- Instructions:
+  - 冷启动白屏十秒先查三个主线程阻塞点: (1) `BaseActivity.applyHideBackgroundPolicyIfNeeded` 即使 hideBackground 默认 false 也会执行 `am.appTasks.forEach{setExcludeFromRecents}` 跨进程 IPC 遍历所有 task, 单次数百 ms~数秒, 是最大嫌疑; 修复: `!enabled && lastAppliedHideBackground==null` 直接 return, 未启用隐藏后台不做 IPC。(2) `HomeFragment.onViewCreated` 首次 `updateAllStatus()` 主线程同步 SP read + Gson 反序列化, 改为 `view.post{}` 延后到首帧后。(3) `checkAndPromptBatteryOptimization` 的 `isIgnoringBatteryOptimizations` 是 binder IPC, 改丢 `Dispatchers.Default` 协程, 弹窗回主线程。
+  - `WhitelistRepository.getLocalProxyCoexistConfig` 无缓存、每次 Gson 反序列化, 冷启动被 `NetworkKernel.snapshot`→`CoexistExecutionEngine.isAvailable` 反复调用, 需加 `@Volatile cachedLocalProxyCoexistConfig` 内存缓存。
+  - 首次打开闪退根因: `MainActivity` 曾设 `ViewPager2.offscreenPageLimit=0`, 非法值(仅允许 -1 或 >0)抛 IllegalArgumentException 必崩; 已改回 1。

@@ -68,10 +68,11 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
             updateAllStatus()
         }
         view.findViewById<Button>(R.id.btnGuide).setOnClickListener { activity.showGuideDialog() }
-        view.findViewById<Button>(R.id.btnWhitelist).setOnClickListener { activity.openWhitelist() }
+        view.findViewById<Button>(R.id.btnReward).setOnClickListener { activity.openReward() }
         view.findViewById<ImageView>(R.id.btnSettings).setOnClickListener { activity.openSettings() }
         view.findViewById<TextView>(R.id.textVersion)?.text = "v${BuildConfig.VERSION_NAME}"
-        updateAllStatus()
+        // 首帧先渲染, 状态文本(SP/IPC 读取)延后一帧刷新, 避免冷启动白屏被主线程 SP read 拖长
+        view.post { updateAllStatus() }
         view.findViewById<View>(R.id.homeButtons).apply {
             post {
                 val params = layoutParams as? androidx.constraintlayout.widget.ConstraintLayout.LayoutParams ?: return@post

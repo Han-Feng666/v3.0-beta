@@ -1,4 +1,182 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">寒枫</string>
+
+    <!-- 抓包 © -->
+    <string name="capture_title">抓包</string>
+    <string name="capture_enable_toggle">启用抓包</string>
+    <string name="capture_status_on">开</string>
+    <string name="capture_status_off">关</string>
+    <string name="capture_mode_by_app">按应用</string>
+    <string name="capture_mode_all_apps">全部</string>
+    <string name="capture_filter">筛选</string>
+    <string name="capture_empty_hint">暂无抓包条目</string>
+    <string name="capture_pending_certificate_hint">证书未就绪, 请先安装并开启 HTTPS MITM</string>
+    <string name="capture_hint_cert_not_generated">证书未生成。请先进入「设置 → HTTPS MITM」生成 CA 证书，再回来开启抓包。</string>
+    <string name="capture_hint_cert_not_installed">CA 证书尚未安装。免 root 方式：安装导出的 HanFeng.cer 用户证书（系统下载/HanFeng 目录），装完再点一次开启即可；如需解密其他应用的 HTTPS 流量，再用 Root 安装系统证书。</string>
+    <string name="capture_breakpoint_badge">断点</string>
+    <string name="capture_breakpoint_rules_title">断点规则</string>
+    <string name="capture_breakpoint_rules_hint">命中捕获条目后,该匹配请求/响应将被暂挂,等待在抓包详情页中应用动作(透传/替换/丢弃)。规则跨 VPN 重启保留。</string>
+    <string name="capture_breakpoint_rules_empty">尚无断点规则。\n点击下方"添加规则"以创建。</string>
+    <string name="capture_breakpoint_add">添加规则</string>
+    <string name="capture_breakpoint_delete">删除</string>
+    <string name="capture_breakpoint_kind_request">设为请求断点</string>
+    <string name="capture_breakpoint_kind_response">设为响应断点</string>
+    <string name="capture_breakpoint_field_host">Host (必填)</string>
+    <string name="capture_breakpoint_field_method">Method (空=全部)</string>
+    <string name="capture_breakpoint_field_path">Path 前缀 (空=全部)</string>
+    <string name="capture_breakpoint_invalid_host">Host 必填且不含空白</string>
+    <string name="capture_breakpoint_go_to_rules">断点规则管理</string>
+    <string name="capture_replay_badge">重放</string>
+    <string name="capture_detail_title">抓包详情</string>
+    <string name="capture_detail_tab_overview">概览</string>
+    <string name="capture_detail_tab_request">请求</string>
+    <string name="capture_detail_tab_response">响应</string>
+    <string name="capture_detail_tab_tls">TLS</string>
+    <string name="capture_detail_tab_export">导出</string>
+    <string name="capture_detail_action_edit">编辑</string>
+    <string name="capture_detail_action_replay">重放</string>
+    <string name="capture_detail_save_edit">保存草稿</string>
+    <string name="capture_detail_apply_breakpoint">应用替换</string>
+    <string name="capture_detail_body_label">Body</string>
+    <string name="capture_detail_body_label_decompressed">Body (%1$s, 已解压 %2$d → %3$d 字节)</string>
+    <string name="capture_view_mode_raw">Raw</string>
+    <string name="capture_view_mode_tree">Tree</string>
+    <string name="capture_view_mode_preview">Preview</string>
+    <string name="capture_view_tree_unsupported">无法解析为 JSON/XML, 回到 Raw 模式</string>
+    <string name="capture_view_preview_image">图像预览</string>
+    <string name="capture_view_preview_binary">二进制(Hex):</string>
+    <string name="capture_hex_editor_title">Hex 编辑器</string>
+    <string name="capture_hex_status_readonly">%1$d 字节 (只读)</string>
+    <string name="capture_hex_status_editing">%1$d 字节 (编辑中)</string>
+    <string name="capture_hex_unlock">编辑</string>
+    <string name="capture_hex_lock">锁定</string>
+    <string name="capture_hex_apply">应用</string>
+    <string name="capture_hex_ascii_hint">ASCII (Latin-1 编码):</string>
+    <string name="capture_hex_apply_toast">已应用 %1$d 字节</string>
+    <string name="capture_detail_request_headers_label">请求头</string>
+    <string name="capture_detail_response_headers_label">响应头</string>
+    <string name="capture_tls_not_available">本条记录未采集 TLS 信息</string>
+    <string name="capture_action_pass_through">放行</string>
+    <string name="capture_action_replace">替换</string>
+    <string name="capture_action_drop">丢弃</string>
+    <string name="capture_filter_host_hint">host 子串(如: api.example.com)</string>
+    <string name="capture_filter_status_hint">状态码(如: 200,3xx,4xx,404..410)</string>
+    <string name="capture_filter_keyword_hint">关键字(path/host/headers/body)</string>
+    <string name="capture_filter_session_hint">sessionId(flowKey, 留空=不过滤)</string>
+    <string name="capture_filter_intercepted_only">仅看被断点拦截</string>
+    <string name="capture_filter_duration_hint">duration 区间 ms(如: 50..2000)</string>
+    <string name="capture_filter_appname_hint">App 名(精确, 留空=不过滤)</string>
+
+    <!-- 抓包设置页 -->
+    <string name="capture_settings_title">抓包设置</string>
+    <string name="capture_settings_body_preview_section">Body 预览上限</string>
+    <string name="capture_settings_body_preview_all_apps">"全模式 (ALL_APPS)"</string>
+    <string name="capture_settings_body_preview_by_app">"按 App 模式"</string>
+    <string name="capture_settings_replay_section">重放</string>
+    <string name="capture_settings_batch_interval">批量重放间隔</string>
+    <string name="capture_settings_confirm_risky_replay">批量重放前确认风险(防误伤)</string>
+    <string name="capture_settings_ui_section">界面与导出</string>
+    <string name="capture_settings_auto_scroll">新条目自动滚到顶部</string>
+    <string name="capture_settings_notify_active">抓包时通知栏常驻徽章</string>
+    <string name="capture_settings_redact_export">导出 HAR/cURL 默认脱敏</string>
+    <string name="capture_settings_save">保存</string>
+    <string name="capture_settings_retention_section">历史保留</string>
+    <string name="capture_settings_max_entries_label">最多保留条数 (0 = 不限)</string>
+    <string name="capture_settings_max_age_label">最多保留天数 (0 = 永久)</string>
+    <string name="capture_settings_retention_hint">超出上限时按时间最新优先(LRU), 旧条目与对应 body 块一并删除。重启 App 仍可在抓包页看到历史。</string>
+    <string name="capture_export_share_har">分享 HAR</string>
+    <string name="capture_export_share_curl">分享 cURL</string>
+    <string name="capture_export_share_json">分享摘要</string>
+    <string name="capture_export_share_chooser">分享抓包记录</string>
+    <string name="capture_export_share_failed">导出失败, 无法分享</string>
+
+    <!-- 联动广告拦截 -->
+    <string name="capture_add_to_adblock">加入广告拦截</string>
+    <string name="capture_add_host_to_blocklist">该 host 加 hosts 黑名单</string>
+    <string name="capture_add_path_to_blocklist">该 path 加路径拦截</string>
+    <string name="capture_adblock_added_toast">已加入广告拦截: %1$s</string>
+    <string name="capture_adblock_add_failed_toast">加入失败: %1$s</string>
+    <string name="capture_adblock_prompt_title">加入广告拦截方式</string>
+    <string name="capture_adblock_kind_host">host 完全阻断</string>
+    <string name="capture_adblock_kind_path">path 路径拦截</string>
+    <string name="capture_adblock_kind_ws">该 host 上的 WebSocket 全拦</string>
+
+    <!-- 批量重放 GUI -->
+    <string name="capture_batch_select">选择</string>
+    <string name="capture_batch_replay_selected">重放选中(%1$d)</string>
+    <string name="capture_batch_clear_selection">取消选择</string>
+    <string name="capture_batch_confirm_title">批量重放确认</string>
+    <string name="capture_batch_confirm_msg">将按顺序重放 %1$d 条请求, 间隔 %2$dms。请确保不会影响目标服务可用性。</string>
+    <string name="capture_batch_progress">批量重放进度: %1$d / %2$d (成功 %3$d, 失败 %4$d)</string>
+    <string name="capture_batch_done">批量重放完成: 成功 %1$d / 失败 %2$d</string>
+    <string name="capture_batch_cancel_btn">取消</string>
+    <string name="capture_batch_running">正在批量重放…</string>
+    <string name="capture_batch_cancelled">已取消, 完成 %1$d 条</string>
+    <string name="capture_search_hint">搜索 host/path/method</string>
+    <string name="capture_filter_apply">应用</string>
+    <string name="capture_filter_reset">重置</string>
+    <string name="capture_floating_initial">抓包·0</string>
+    <string name="capture_floating_count">抓包·%1$d</string>
+    <string name="capture_floating_channel_name">抓包悬浮窗</string>
+    <string name="capture_floating_channel_desc">保持抓包悬浮徽章前台服务运行</string>
+    <string name="capture_floating_notif_title">HanFeng 抓包运行中</string>
+    <string name="capture_floating_notif_text">已捕获 %1$d 条请求</string>
+
+    <!-- 批次 E6: 持久改写规则库 -->
+    <string name="rewrite_rules_title">改写规则</string>
+    <string name="rewrite_rules_hint">命中后自动按动作改写请求/响应, 无需人工介入。规则可启用/停用, 跨 App 重启保留。</string>
+    <string name="rewrite_rules_empty">尚无规则。\n点击 + 创建。</string>
+    <string name="rewrite_rules_add">新增规则</string>
+    <string name="rewrite_rules_edit">编辑规则</string>
+    <string name="rewrite_rules_save">保存</string>
+    <string name="rewrite_rules_cancel">取消</string>
+    <string name="rewrite_rules_delete">删除</string>
+    <string name="rewrite_rules_import">导入</string>
+    <string name="rewrite_rules_export">导出</string>
+    <string name="rewrite_rules_enable">启用</string>
+    <string name="rewrite_rules_disable">停用</string>
+    <string name="rewrite_rules_field_name">名称</string>
+    <string name="rewrite_rules_field_kind">方向</string>
+    <string name="rewrite_rules_field_host">Host (含 . / * 通配)</string>
+    <string name="rewrite_rules_field_method">Method (空=全部)</string>
+    <string name="rewrite_rules_field_path_mode">Path 匹配</string>
+    <string name="rewrite_rules_field_path_value">Path 值</string>
+    <string name="rewrite_rules_field_content_type">Content-Type 包含 (空=全部)</string>
+    <string name="rewrite_rules_field_query_contains">Query 包含 (空=全部)</string>
+    <string name="rewrite_rules_field_priority">优先级 (越小越先)</string>
+    <string name="rewrite_rules_field_action">动作</string>
+    <string name="rewrite_rules_field_replacement">替换字节 (UTF-8)</string>
+    <string name="rewrite_rules_field_status">Status Line (空=保留)</string>
+    <string name="rewrite_rules_field_headers_override">头覆盖 (每行 Name: Value)</string>
+    <string name="rewrite_rules_pathmode_any">任意</string>
+    <string name="rewrite_rules_pathmode_prefix">前缀</string>
+    <string name="rewrite_rules_pathmode_suffix">后缀</string>
+    <string name="rewrite_rules_pathmode_contains">包含</string>
+    <string name="rewrite_rules_pathmode_equals">相等</string>
+    <string name="rewrite_rules_pathmode_regex">正则</string>
+    <string name="rewrite_rules_action_pass">透传</string>
+    <string name="rewrite_rules_action_replace">替换</string>
+    <string name="rewrite_rules_action_drop">丢弃</string>
+    <string name="rewrite_rules_kind_request">请求</string>
+    <string name="rewrite_rules_kind_response">响应</string>
+    <string name="rewrite_rules_invalid">请至少填写 Host 或 Path</string>
+    <string name="rewrite_rules_deleted">已删除</string>
+    <string name="rewrite_rules_saved">已保存</string>
+    <string name="rewrite_rules_import_failed">导入失败</string>
+    <string name="rewrite_rules_export_failed">导出失败</string>
+    <string name="rewrite_rules_import_success">已导入 %1$d 条</string>
+    <string name="rewrite_rules_export_chooser">分享改写规则 (JSON)</string>
+    <string name="rewrite_rules_import_picker">选择 rules.json 文件</string>
+    <string name="rewrite_rules_save_as_rule_request">保存为改写规则 (请求)</string>
+    <string name="rewrite_rules_save_as_rule_response">保存为改写规则 (响应)</string>
+    <string name="rewrite_rules_saved_from_entry">已生成规则草稿, 请在弹窗中确认动作</string>
+    <string name="capture_error_entry_not_found">找不到对应条目</string>
+    <string name="capture_quick_action_title">条目动作</string>
+    <string name="capture_quick_action_open_detail">查看 / 修改</string>
+    <string name="capture_quick_action_replay">重放</string>
+    <string name="capture_quick_action_save_rule_req">保存为改写规则 (请求)</string>
+    <string name="capture_quick_action_save_rule_rsp">保存为改写规则 (响应)</string>
+    <string name="capture_quick_action_add_adblock">加入广告拦截…</string>
+    <string name="capture_quick_action_export">导出此条…</string>
 </resources>

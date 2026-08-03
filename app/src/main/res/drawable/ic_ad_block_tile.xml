@@ -1,21 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    广告拦截磁贴图标: 告示牌 + 禁止斜杠
-    - 告示牌(圆角矩形 + 立柱)代表广告
-    - 右上到左下贯穿的斜杠代表拦截/禁止
-    SystemUI 在磁贴里会以单色 tint 渲染,fillColor 用纯白即可
+    快捷设置磁贴图标: “HF”两个大写英文 (HanFeng 缩写)。
+    SystemUI 会按单色 tint 渲染, 使用纯白矩形笔画保证小尺寸清晰。
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M3.5,4.5 h17 a1.5,1.5 0 0 1 1.5,1.5 v9 a1.5,1.5 0 0 1 -1.5,1.5 h-17 a1.5,1.5 0 0 1 -1.5,-1.5 v-9 a1.5,1.5 0 0 1 1.5,-1.5 z M10,16.5 h4 v3 a1,1 0 0 1 -1,1 h-2 a1,1 0 0 1 -1,-1 z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M20.5,3.5 L3.5,20.5 A1.2,1.2 0 0 0 5.2,22.3 L22.2,5.3 A1.2,1.2 0 0 0 20.5,3.5 Z"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="0" />
+    <!-- H: 左竖 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M3,4h2v16h-2z" />
+    <!-- H: 右竖 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M12,4h2v16h-2z" />
+    <!-- H: 中横 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M3,11h11v2h-11z" />
+
+    <!-- F: 竖 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M16,4h2v16h-2z" />
+    <!-- F: 顶横 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M16,4h6v2h-6z" />
+    <!-- F: 中横 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M16,11h5v2h-5z" />
 </vector>

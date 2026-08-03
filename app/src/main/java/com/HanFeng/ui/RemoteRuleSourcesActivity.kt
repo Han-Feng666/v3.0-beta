@@ -73,14 +73,9 @@ class RemoteRuleSourcesActivity : BaseActivity() {
                 RuleRepository.getRemoteRuleSources(applicationContext)
             }
             if (requestVersion != loadSourcesVersion || isFinishing || isDestroyed) return@launch
-            allSources = sources.map { source ->
-                if (source.lastError?.isNotBlank() == true) {
-                    withContext(Dispatchers.IO) {
-                        RuleRepository.updateRemoteRuleSource(applicationContext, source.copy(lastError = null))
-                    }
-                    source.copy(lastError = null)
-                } else source
-            }
+            // 保留 lastError、lastSyncStartedAt 以展示三态：未运行 / 同步中 / 成功 / 失败
+            // 仅在用户主动操作（同步/启用/编辑）时清 lastError，进入页面时不再自动清零
+            allSources = sources
             applyFilter(binding.searchInput.text?.toString().orEmpty())
         }
     }
@@ -145,6 +140,20 @@ class RemoteRuleSourcesActivity : BaseActivity() {
         
         if (manual) {
             showShortToast(if (sourceId == null) "正在同步规则源" else "正在同步规则")
+        }
+        // 同步入口立即把目标规则源标记为"同步中"，让列表条目马上显示运行中状态
+        val appContext = applicationContext
+        val startedAt = System.currentTimeMillis()
+        if (sourceId != null) {
+            lifecycleScope.launch {
+                withContext(Dispatchers.IO) {
+                    val existing = RuleRepository.getRemoteRuleSources(appContext).firstOrNull { it.id == sourceId }
+                    if (existing != null && existing.lastSyncStartedAt == 0L) {
+                        RuleRepository.updateRemoteRuleSource(appContext, existing.copy(lastSyncStartedAt = startedAt, lastError = null))
+                    }
+                }
+                loadSources()
+            }
         }
         lifecycleScope.launch {
             runCatching {

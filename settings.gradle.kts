@@ -18,6 +18,8 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         maven("https://jitpack.io")
+        // Xposed API (api:82) 不在 mavenCentral, 需要这个 bintray-mirror
+        maven("https://api.xposed.info/")
     }
 }
 

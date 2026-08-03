@@ -41,8 +41,16 @@ class RemoteRuleSourceListAdapter(
 
         fun bind(item: RemoteRuleSourceConfig) {
             title.text = item.name
+            val statusLine = when {
+                item.lastSyncStartedAt > 0L -> "同步中"
+                item.lastError != null && item.lastError.isNotBlank() -> "失败"
+                item.lastUpdatedAt > 0L -> "成功"
+                else -> "未运行"
+            }
             summary.text = buildString {
                 append(if (item.enabled) "已启用" else "已停用")
+                append(" · ")
+                append(statusLine)
                 append(" · ")
                 append(item.url)
                 item.lastUpdatedAt.takeIf { it > 0L }?.let {
@@ -54,6 +62,20 @@ class RemoteRuleSourceListAdapter(
                     append(it)
                 }
             }
+            // 长按失败原因一键复制到剪贴板，方便用户反馈或排查
+            if (item.lastError?.isNotBlank() == true) {
+                itemView.setOnLongClickListener {
+                    val cm = itemView.context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("ruleSourceError", item.lastError))
+                    android.widget.Toast.makeText(itemView.context, "失败原因已复制", android.widget.Toast.LENGTH_SHORT).show()
+                    true
+                }
+            } else {
+                itemView.setOnLongClickListener(null)
+            }
+            // 运行中状态禁用按钮，避免重复触发同步
+            val syncing = item.lastSyncStartedAt > 0L
+            sync.isEnabled = !syncing
             toggle.text = if (item.enabled) "停用" else "启用"
             toggle.setOnClickListener { 
                 try {

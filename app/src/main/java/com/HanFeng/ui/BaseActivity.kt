@@ -68,6 +68,10 @@ open class BaseActivity : AppCompatActivity() {
         val now = System.currentTimeMillis()
         val lastEnabled = lastAppliedHideBackground
         if (lastEnabled == enabled && now - lastAppliedHideBackgroundAt < 5_000L) return
+        // 冷启动白屏元凶: hideBackground 默认 false 时仍会走 applyHideBackgroundPolicy(false) 的
+        // am.appTasks.forEach{setExcludeFromRecents} 跨进程 IPC 遍历所有 task, 单次数百 ms~数秒。
+        // 从未启用过隐藏后台时直接跳过, 首帧渲染不被阻塞; 用户开启后再关闭仍会正常恢复 recents。
+        if (!enabled && lastEnabled == null) return
         applyHideBackgroundPolicy(enabled)
     }
 

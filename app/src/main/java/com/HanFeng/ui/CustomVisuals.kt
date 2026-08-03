@@ -55,7 +55,6 @@ private val customBackgroundDrawableCache = object : LruCache<String, Drawable>(
 
 fun ImageView.applyCustomAssetBackground(assetBaseName: String) {
     cancelCustomVisualsJob(this)
-    if (!isAttachedToWindow) return
     val appContext = context.applicationContext
     setTag(CUSTOM_VISUALS_CONTEXT_TAG_KEY, WeakReference(appContext))
     // 同步命中缓存直接设置,跳过协程开销
@@ -70,7 +69,7 @@ fun ImageView.applyCustomAssetBackground(assetBaseName: String) {
         } ?: return@launch
         customBackgroundDrawableCache.put("asset:$assetBaseName", customDrawable)
         val ctxRef = getTag(CUSTOM_VISUALS_CONTEXT_TAG_KEY) as? WeakReference<*>
-        if (ctxRef?.get() == appContext && isAttachedToWindow) {
+        if (ctxRef?.get() == appContext) {
             markBitmapLive(customDrawable)
             setImageDrawable(customDrawable)
         }
@@ -80,7 +79,6 @@ fun ImageView.applyCustomAssetBackground(assetBaseName: String) {
 
 fun ImageView.applyCustomFileBackground(filePath: String?) {
     cancelCustomVisualsJob(this)
-    if (!isAttachedToWindow) return
     val appContext = context.applicationContext
     setTag(CUSTOM_VISUALS_CONTEXT_TAG_KEY, WeakReference(appContext))
     if (filePath == null) {
@@ -110,7 +108,7 @@ fun ImageView.applyCustomFileBackground(filePath: String?) {
         } ?: return@launch
         customBackgroundDrawableCache.put(cacheKey, customDrawable)
         val ctxRef = getTag(CUSTOM_VISUALS_CONTEXT_TAG_KEY) as? WeakReference<*>
-        if (ctxRef?.get() == appContext && isAttachedToWindow) {
+        if (ctxRef?.get() == appContext) {
             markBitmapLive(customDrawable)
             setImageDrawable(customDrawable)
         }
@@ -161,8 +159,19 @@ fun loadCustomFileDrawable(context: Context, filePath: String): Drawable? {
     val file = File(filePath)
     if (!file.exists()) return null
     return runCatching {
-        file.inputStream().use { input ->
-            Drawable.createFromStream(input, filePath)
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+        val maxSide = 1600
+        var sample = 1
+        while ((bounds.outWidth / sample) > maxSide || (bounds.outHeight / sample) > maxSide) {
+            sample *= 2
         }
+        val opts = android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = sample.coerceAtLeast(1)
+            inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+        }
+        val bmp = android.graphics.BitmapFactory.decodeFile(file.absolutePath, opts) ?: return@runCatching null
+        android.graphics.drawable.BitmapDrawable(context.resources, bmp)
     }.getOrNull()
 }
