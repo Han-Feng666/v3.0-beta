@@ -14,6 +14,7 @@ object WhitelistRepository {
     private const val KEY_LOCAL_PROXY_COEXIST = "local_proxy_coexist"
     @Volatile private var cachedDisallowedPackages: Set<String>? = null
     @Volatile private var cachedInstalledApps: List<CachedInstalledApp>? = null
+    @Volatile private var cachedLocalProxyCoexistConfig: LocalProxyCoexistConfig? = null
     private val gson = Gson()
     private val coexistKeywordHints = listOf(
         "加速", "加速器", "游戏空间", "游戏助手", "网络加速", "手游加速", "vpn", "proxy", "tunnel",
@@ -176,12 +177,14 @@ object WhitelistRepository {
     }
 
     fun getLocalProxyCoexistConfig(context: Context): LocalProxyCoexistConfig {
+        cachedLocalProxyCoexistConfig?.let { return it }
         val json = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_LOCAL_PROXY_COEXIST, null)
-            ?: return LocalProxyCoexistConfig()
+            ?: return LocalProxyCoexistConfig().also { cachedLocalProxyCoexistConfig = it }
         return runCatching {
             gson.fromJson(json, LocalProxyCoexistConfig::class.java)
-        }.getOrNull()?.sanitize() ?: LocalProxyCoexistConfig()
+        }.getOrNull()?.sanitize()?.also { cachedLocalProxyCoexistConfig = it }
+            ?: LocalProxyCoexistConfig().also { cachedLocalProxyCoexistConfig = it }
     }
 
     fun saveLocalProxyCoexistConfig(context: Context, config: LocalProxyCoexistConfig) {
@@ -189,6 +192,7 @@ object WhitelistRepository {
             .edit()
             .putString(KEY_LOCAL_PROXY_COEXIST, gson.toJson(config))
             .apply()
+        cachedLocalProxyCoexistConfig = config
         cachedDisallowedPackages = null
     }
 

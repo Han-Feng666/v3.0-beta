@@ -32,6 +32,8 @@ object HttpsTlsBridgeManager {
     private const val HTTP2_HEADER_BLOCK_LARGE_THRESHOLD = 16 * 1024
     private const val HTTP2_DATA_DEEP_INSPECTION_SCORE_THRESHOLD = 2
     private const val HTTP2_DATA_BODY_LIMIT_BYTES = 64 * 1024
+    /** 批次 E2 大响应整流落地 — 单 entry 累计保持上限 1MB(再多直接断采样, 入库供给侧终按 LRU 控制)。 */
+    private const val HTTP2_FULL_BODY_ACCUMULATOR_LIMIT_BYTES = 1 * 1024 * 1024
     private const val BRIDGE_EXECUTOR_CORE_THREADS = 2
     private const val BRIDGE_EXECUTOR_MAX_THREADS = 8
     private const val BRIDGE_EXECUTOR_QUEUE_CAPACITY = 64
@@ -93,6 +95,7 @@ object HttpsTlsBridgeManager {
         flushHttp2Summary(context, flowKey, "client", finalFlush = true)
         flushHttp2Summary(context, flowKey, "server", finalFlush = true)
         http2FlowControls.remove(flowKey)
+        com.HanFeng.capture.CaptureTap.tapSessionEnded(flowKey)
         val bridge = bridges.remove(flowKey) ?: return
         bridge.close()
         LogRepository.append(context, "Closed HTTPS TLS bridge flow=$flowKey local=${bridge.host}:${bridge.port}")
@@ -106,6 +109,7 @@ object HttpsTlsBridgeManager {
                 flushHttp2Summary(context, flowKey, direction, finalFlush = true)
             }
         }
+        http2LogStates.keys.toList().forEach { com.HanFeng.capture.CaptureTap.tapSessionEnded(it) }
         val all = bridges.values.toList()
         bridges.clear()
         http2FlowControls.clear()
@@ -190,6 +194,38 @@ object HttpsTlsBridgeManager {
                     val negotiatedAlpn = readApplicationProtocol(remoteTls)
                     val negotiatedTls = remoteTls.session?.protocol
                     logNegotiatedTlsSession(context, session, running, negotiatedAlpn, negotiatedTls)
+                    // 抓包旁路: TLS 握手完成(requirements R11.2), 采样协议/CipherSAN/对端证书。
+                    // 注意 TLS 信息按 session 级别记录, 在抓包条目建立时合并到 CaptureEntry.tlsMeta。
+                    runCatching {
+                        val sess = remoteTls.session
+                        if (sess != null) {
+                            val peerCerts = runCatching { sess.peerCertificates.toList() }.getOrDefault(emptyList())
+                            val certMetas = peerCerts.mapNotNull { cert ->
+                                runCatching {
+                                    val x509 = cert as? java.security.cert.X509Certificate
+                                    if (x509 == null) return@runCatching null
+                                    val sha = java.security.MessageDigest.getInstance("SHA-256")
+                                        .digest(cert.encoded)
+                                        .joinToString("") { "%02X".format(it) }
+                                    com.HanFeng.capture.CertMeta(
+                                        subject = x509.subjectX500Principal.name,
+                                        issuer = x509.issuerX500Principal.name,
+                                        notBefore = x509.notBefore.time,
+                                        notAfter = x509.notAfter.time,
+                                        sha256Fingerprint = sha
+                                    )
+                                }.getOrNull()
+                            }
+                            com.HanFeng.capture.CaptureTap.tapTlsHandshake(
+                                context = context,
+                                session = session,
+                                protocol = sess.protocol,
+                                cipherSuite = sess.cipherSuite ?: "unknown",
+                                alpn = negotiatedAlpn,
+                                peerCertificates = certMetas
+                            )
+                        }
+                    }
                     pipeBridgeTraffic(context, session, localTls, remoteTls, negotiatedAlpn)
                 }
             }
@@ -243,10 +279,11 @@ object HttpsTlsBridgeManager {
         negotiatedAlpn: String?
     ) {
         val requestRef = java.util.concurrent.atomic.AtomicReference<RequestInspection?>()
+        val captureTxnRef = java.util.concurrent.atomic.AtomicReference<Long?>(null)
         val latch = CountDownLatch(2)
         if (!executeBridgeTask(context, session, RunningBridgeHandle(localTls), "pipe-client") {
             try {
-                pipeClientToServer(context, session, localTls.inputStream, remoteTls.outputStream, requestRef, negotiatedAlpn)
+                pipeClientToServer(context, session, localTls.inputStream, remoteTls.outputStream, requestRef, captureTxnRef, negotiatedAlpn)
             } finally {
                 latch.countDown()
                 runCatching { remoteTls.shutdownOutput() }
@@ -255,7 +292,7 @@ object HttpsTlsBridgeManager {
             return
         }
         try {
-            pipeServerToClient(context, session, remoteTls.inputStream, localTls.outputStream, requestRef, negotiatedAlpn)
+            pipeServerToClient(context, session, remoteTls.inputStream, localTls.outputStream, requestRef, captureTxnRef, negotiatedAlpn)
         } finally {
             latch.countDown()
             runCatching { localTls.shutdownOutput() }
@@ -269,6 +306,7 @@ object HttpsTlsBridgeManager {
         input: InputStream,
         output: OutputStream,
         requestRef: java.util.concurrent.atomic.AtomicReference<RequestInspection?>,
+        captureTxnRef: java.util.concurrent.atomic.AtomicReference<Long?>,
         negotiatedAlpn: String?
     ) {
         val buffer = ByteArray(16 * 1024)
@@ -304,32 +342,42 @@ object HttpsTlsBridgeManager {
                     val bufferedFrames = pendingHttp2ClientRewrite.parsedFrames.toList()
                     pendingHttp2ClientRewrite = PendingHttp2ClientRewrite()
                     payload = processHttp2ClientPayload(context, session, bufferedFrames, payload, directives.isNotEmpty())
-                    if (logAndCheckSuppressedHttp2Payload(context, session, payload, "client")) {
+                } else {
+                    val delayedRewriteStreams = findIncompleteClientHeaderStreams(session.flowKey, inspection.parsedFrames)
+                    if (delayedRewriteStreams.isNotEmpty()) {
+                        pendingHttp2ClientRewrite = PendingHttp2ClientRewrite(
+                            active = true,
+                            rawBytes = payload,
+                            parsedFrames = inspection.parsedFrames.toMutableList(),
+                            openStreams = delayedRewriteStreams.toMutableSet()
+                        )
+                        LogRepository.append(context, "HTTP/2 client rewrite buffering host=${session.host} flow=${session.flowKey} streams=${delayedRewriteStreams.sorted().joinToString(",")} bytes=${payload.size} pendingFrameBytes=${http2State.pendingFrameBytes.size}")
                         continue
                     }
-                    writeAndFlush(output, payload)
-                    continue
+                    payload = processHttp2ClientPayload(context, session, inspection.parsedFrames, payload, directives.isNotEmpty())
                 }
-                val delayedRewriteStreams = findIncompleteClientHeaderStreams(session.flowKey, inspection.parsedFrames)
-                if (delayedRewriteStreams.isNotEmpty()) {
-                    pendingHttp2ClientRewrite = PendingHttp2ClientRewrite(
-                        active = true,
-                        rawBytes = payload,
-                        parsedFrames = inspection.parsedFrames.toMutableList(),
-                        openStreams = delayedRewriteStreams.toMutableSet()
-                    )
-                    LogRepository.append(context, "HTTP/2 client rewrite buffering host=${session.host} flow=${session.flowKey} streams=${delayedRewriteStreams.sorted().joinToString(",")} bytes=${payload.size} pendingFrameBytes=${http2State.pendingFrameBytes.size}")
-                    continue
-                }
-                payload = processHttp2ClientPayload(context, session, inspection.parsedFrames, payload, directives.isNotEmpty())
                 if (logAndCheckSuppressedHttp2Payload(context, session, payload, "client")) {
                     continue
                 }
+                writeAndFlush(output, payload)
             }
             if (!inspected) {
                 val inspection = HttpMitmFilter.inspectRequest(session, payload)
                 if (inspection != null) {
                     requestRef.set(inspection)
+                    // 抓包旁路: HTTP/1.1 请求解码完成 + 缺口 2:断点 action 直接参与 chunk 处理。
+                    val tapOutcome = com.HanFeng.capture.CaptureTap.tapHttp1Request(context, session, inspection, payload)
+                    captureTxnRef.set(extractTxnId(tapOutcome))
+                    when (val action = extractBreakpointAction(tapOutcome)) {
+                        is com.HanFeng.capture.BreakpointAction.Drop -> {
+                            // 请求 Drop: 不发往服务器
+                            return@pipeClientToServer
+                        }
+                        is com.HanFeng.capture.BreakpointAction.ReplaceWith -> {
+                            payload = com.HanFeng.capture.BreakpointActionExecutor.applyToRequest(action, payload)
+                        }
+                        is com.HanFeng.capture.BreakpointAction.PassThrough -> { /* 透传原 payload */ }
+                    }
                     if (HttpMitmFilter.shouldRewriteHttp1RequestHeaders(session, inspection)) {
                         payload = HttpMitmFilter.rewriteRequestForMitm(session, inspection, payload)
                     }
@@ -356,11 +404,16 @@ object HttpsTlsBridgeManager {
         input: InputStream,
         output: OutputStream,
         requestRef: java.util.concurrent.atomic.AtomicReference<RequestInspection?>,
+        captureTxnRef: java.util.concurrent.atomic.AtomicReference<Long?>,
         negotiatedAlpn: String?
     ) {
         val buffer = ByteArray(16 * 1024)
         var filtered = false
         var pendingHttp1Bytes = ByteArray(0)
+        // 批次 E3: WebSocket Upgrade 后整流抓帧 — raw bytes 按块进入抓包落盘
+        // (鉴 E2 chunked writer, 帧编码细节留给详情页 WsGrpcFrameDecoder)。
+        var wsUpgraded = false
+        val wsAccumulator = java.io.ByteArrayOutputStream()
         val allowHttp1Filter = negotiatedAlpn.isNullOrBlank() || negotiatedAlpn == "http/1.1"
         var http2State = Http2FrameLogger.StreamState(Http2FrameLogger.Direction.SERVER_TO_CLIENT)
         if (!allowHttp1Filter) {
@@ -410,7 +463,29 @@ object HttpsTlsBridgeManager {
                         }
                         is BufferedHttp1Result.Ready -> {
                             pendingHttp1Bytes = ByteArray(0)
-                            payload = applyHttp1Filter(context, session, assembled.responseBytes, requestRef.get())
+                            // 批次 E3: 检测 WS Upgrade(101 + Upgrade: websocket) 并标记后续字节为 WS stream
+                            if (HttpMitmFilter.isWebSocketUpgradeResponse(assembled.responseBytes)) {
+                                wsUpgraded = true
+                                LogRepository.append(context, "WebSocket Upgrade detected host=${session.host} flow=${session.flowKey}")
+                            }
+                            // 缺口 2: 应用断点 action 后再做广告拦截
+                            val tapResp = com.HanFeng.capture.CaptureTap.tapHttp1Response(
+                                context, session, captureTxnRef.get()?.toLong(), requestRef.get(), assembled.responseBytes
+                            )
+                            when (val action = extractBreakpointActionResponse(tapResp)) {
+                                is com.HanFeng.capture.BreakpointAction.Drop -> {
+                                    payload = ByteArray(0)
+                                }
+                                is com.HanFeng.capture.BreakpointAction.ReplaceWith -> {
+                                    val replaced = com.HanFeng.capture.BreakpointActionExecutor.applyToResponse(
+                                        action, assembled.responseBytes
+                                    )
+                                    payload = applyHttp1Filter(context, session, replaced, requestRef.get())
+                                }
+                                is com.HanFeng.capture.BreakpointAction.PassThrough -> {
+                                    payload = applyHttp1Filter(context, session, assembled.responseBytes, requestRef.get())
+                                }
+                            }
                             if (assembled.remainderBytes.isNotEmpty()) {
                                 payload += assembled.remainderBytes
                             }
@@ -424,7 +499,16 @@ object HttpsTlsBridgeManager {
         if (!filtered && allowHttp1Filter && pendingHttp1Bytes.isNotEmpty()) {
             when (val assembled = HttpMitmFilter.finalizeBufferedHttp1Response(pendingHttp1Bytes)) {
                 is BufferedHttp1Result.Ready -> {
-                    val finalPayload = applyHttp1Filter(context, session, assembled.responseBytes, requestRef.get()) + assembled.remainderBytes
+                    val tapResp = com.HanFeng.capture.CaptureTap.tapHttp1Response(
+                        context, session, captureTxnRef.get()?.toLong(), requestRef.get(), assembled.responseBytes
+                    )
+                    val basePayload = when (val action = extractBreakpointActionResponse(tapResp)) {
+                        is com.HanFeng.capture.BreakpointAction.Drop -> ByteArray(0)
+                        is com.HanFeng.capture.BreakpointAction.ReplaceWith ->
+                            com.HanFeng.capture.BreakpointActionExecutor.applyToResponse(action, assembled.responseBytes)
+                        is com.HanFeng.capture.BreakpointAction.PassThrough -> assembled.responseBytes
+                    }
+                    val finalPayload = applyHttp1Filter(context, session, basePayload, requestRef.get()) + assembled.remainderBytes
                     writeAndFlush(output, finalPayload)
                 }
                 is BufferedHttp1Result.Bypass -> {
@@ -782,6 +866,23 @@ object HttpsTlsBridgeManager {
         events: List<Http2FrameLogger.FrameEvent>,
         direction: String
     ): List<Http2StreamDirective> = synchronized(http2StateLock) {
+        // 缺口 3 (待补): 本代码块全程持有 [http2StateLock]。
+        // 当 H2 命中断点时, CaptureTap -> CaptureController.onDecoded* 会同步调
+        // BreakpointRepo.awaitResumeBlocking(txnId) 阻塞当前 worker 至多 30s,
+        // 在此期间整个 VPN 的所有 H2 流都不能进入本 synchronized 边界,
+        // 形成全局 H2 卡顿。
+        //
+        // 当前方案的安全网:
+        //   - 30s 硬超时后兜底 PassThrough(useOriginal=true), VPN 不会死锁
+        //   - 命中需用户在 GUI 详情页主动裁决; 不裁决即超时
+        //   - Drop 通过 streamState.blockedByAction + terminalBlocked 隔离后续帧, 不依赖出锁反馈
+        //
+        // 候选补救(批次 B): 把断点 await 移出同步区, 改为
+        //   ① 同步区内只 emit PendingBreakpoint + 注册 deferred, 立即退回到 frame 调度外
+        //   ② worker 离开 monitor 后 await deferred; resolve 完成后再回头注入帧决策
+        // 但这需要重构本方法的消费者(pipeClientToServer/pipeServerToClient + processHttp2ClientPayload)
+        // 接受 "await outside lock" 的两阶段语义, 风险较高, 方案成熟后落地。
+        // 引用 design correctness 13 / requirements R8.4。
         val key = http2LogKey(session.flowKey, direction)
         val state = http2LogStates.computeIfAbsent(key) { Http2LogState() }
         val directives = mutableListOf<Http2StreamDirective>()
@@ -902,7 +1003,36 @@ object HttpsTlsBridgeManager {
                                 (headerInspection.suspiciousScore >= HTTP2_DATA_DEEP_INSPECTION_SCORE_THRESHOLD ||
                                     (event.endStream && headerInspection.hasBodyRewriteDirectives && streamState.dataBytes <= HTTP2_DATA_BODY_LIMIT_BYTES))
                             if (!shouldInspectData) {
+                                // 抓包旁路: 即便广告拦截跳过 deep inspect, 也把 body sample 采样到抓包(design correctness 1: 只读旁路)。
+                                com.HanFeng.capture.CaptureTap.tapHttp2Data(
+                                    context, session, event.streamId, event.dataFragment
+                                )
                                 streamState.lastDataSample = trimHttp2DataSample(streamState.lastDataSample, event.dataFragment)
+                                // 批次 E2: 响应方向整流累计, endStream 时一次性 emit 完整 body 到 CaptureStore body_chunks 表,
+                                // 解 32KB ring buffer 上限 + 解 ring 上限过后的二次 detail 页加载完整 body 能力。
+                                if (!streamState.fullResponseAccumulatorDropped) {
+                                    if (streamState.fullResponseAccumulator.size + event.dataFragment.size > HTTP2_FULL_BODY_ACCUMULATOR_LIMIT_BYTES) {
+                                        streamState.fullResponseAccumulatorDropped = true
+                                        streamState.fullResponseAccumulator = ByteArray(0)
+                                        LogRepository.append(context, "H2 full-body accumulator overflow (flow=${session.flowKey} sid=${event.streamId}); dropped")
+                                    } else {
+                                        streamState.fullResponseAccumulator += event.dataFragment
+                                    }
+                                }
+                                if (event.endStream) {
+                                    val acc = streamState.fullResponseAccumulator
+                                    if (acc.isNotEmpty() && !streamState.fullResponseAccumulatorDropped) {
+                                        // 同步 emit 到 CaptureController.onH2CompleteBody, 让其走 persistExecutor 写 body_chunks。
+                                        com.HanFeng.capture.CaptureController.onH2CompleteBody(
+                                            context,
+                                            sessionId = session.flowKey,
+                                            streamId = event.streamId,
+                                            body = acc,
+                                            truncated = false
+                                        )
+                                    }
+                                    streamState.fullResponseAccumulator = ByteArray(0)
+                                }
                                 return@forEachIndexed
                             }
                             val dataInspection = HttpMitmFilter.inspectHttp2DataSample(
@@ -962,6 +1092,8 @@ object HttpsTlsBridgeManager {
 
                     if (event.reset) {
                         streamState.reset = true
+                        // 抓包旁路: rst-stream 时也清理本 stream 的 txn 映射。
+                        com.HanFeng.capture.CaptureTap.tapHttp2StreamClosed(session, event.streamId)
                         if (streamState.blockedByAction) {
                             streamState.terminalBlocked = true
                             streamState.streamClosed = true
@@ -1001,6 +1133,125 @@ object HttpsTlsBridgeManager {
                                 session,
                                 decoded.headers
                             )
+                            // 抓包旁路 + 缺口 2: HTTP/2 headers 帧断点 action 处理。
+                            // H2 Drop 通过设 streamState.blockedByAction + 让后续 frame dispatch 失效;
+                            // H2 ReplaceWith 需要 HPACK 重新编码, 当前dropped 转成 PassThrough 保留原 chunk,
+                            // 后续缺口会补完整 synthetic response 注入。
+                            streamState.lastHeaderInspection?.let { h2insp ->
+                                if (h2insp.requestLike) {
+                                    val tapReq = com.HanFeng.capture.CaptureTap.tapHttp2Request(
+                                        context, session, event.streamId, h2insp
+                                    )
+                                    if (tapReq is com.HanFeng.capture.TapRequestOutcome.Pending) {
+                                        when (tapReq.action) {
+                                            is com.HanFeng.capture.BreakpointAction.Drop -> {
+                                                streamState.blockedByAction = true
+                                                streamState.terminalBlocked = true
+                                            }
+                                            is com.HanFeng.capture.BreakpointAction.ReplaceWith -> {
+                                                // 批次 C2: H2 请求方向 ReplaceWith 真正注入合成请求帧。
+                                                // 与响应方向对称: 通过 directive.syntheticRequest 通道在 applyHttp2Directives
+                                                // 上游写入端写 client→server 合成帧, 同时把 streamId 加入 blockedStreams 防止客户端
+                                                // 原本头/请求体被 processHttp2ClientPayload 携带出去(双重发送)。
+                                                // 安全网: 仅当 streamState 未被广告拦截置 blockedByAction 时进入,
+                                                //         替换后立刻 blockedByAction + terminalBlocked=true 隔离后续真实 DATA 帧。
+                                                if (!streamState.blockedByAction) {
+                                                    val action = tapReq.action as com.HanFeng.capture.BreakpointAction.ReplaceWith
+                                                    val scheme = h2insp.scheme ?: "https"
+                                                    val authority = h2insp.authority?.ifBlank { null } ?: session.host
+                                                    val ho = action.headersOverride.orEmpty()
+                                                    fun pseudo(key: String): String? = ho.entries.firstOrNull { it.key.equals(key, true) }?.value
+                                                    val path = pseudo(":path")?.ifBlank { null } ?: h2insp.path ?: "/"
+                                                    val method = pseudo(":method")?.ifBlank { null } ?: h2insp.method ?: "GET"
+                                                    val body = action.replacement
+                                                    val extraHeaders = ho.entries
+                                                        .filter { !it.key.startsWith(":") && !it.key.equals("host", true) && !it.key.equals("content-length", true) }
+                                                        .map { it.key to it.value }
+                                                    val synthetic = Http2FrameCodec.buildSyntheticRequestFrames(
+                                                        streamId = event.streamId,
+                                                        method = method,
+                                                        scheme = scheme,
+                                                        authority = authority,
+                                                        path = path,
+                                                        body = body,
+                                                        extraHeaders = extraHeaders
+                                                    )
+                                                    streamState.blockedByAction = true
+                                                    streamState.terminalBlocked = true
+                                                    directives += Http2StreamDirective(
+                                                        streamId = event.streamId,
+                                                        action = "capture-h2-request-replace",
+                                                        confidence = "capture",
+                                                        sendRst = false,
+                                                        syntheticRequest = synthetic
+                                                    )
+                                                    LogRepository.append(context, "H2 request breakpoint ReplaceWith applied (flow=${session.flowKey} sid=${event.streamId} method=$method path=$path bytes=${body.size})")
+                                                } else {
+                                                    LogRepository.append(context, "H2 request breakpoint ReplaceWith skipped: stream already blocked (flow=${session.flowKey} sid=${event.streamId})")
+                                                }
+                                            }
+                                            is com.HanFeng.capture.BreakpointAction.PassThrough -> { /* 透传 */ }
+                                        }
+                                    }
+                                } else if (h2insp.responseLike) {
+                                    val tapResp = com.HanFeng.capture.CaptureTap.tapHttp2ResponseHeaders(
+                                        context, session, event.streamId, h2insp
+                                    )
+                                    if (tapResp is com.HanFeng.capture.TapResponseOutcome.Pending) {
+                                        when (tapResp.action) {
+                                            is com.HanFeng.capture.BreakpointAction.Drop -> {
+                                                streamState.blockedByAction = true
+                                                streamState.terminalBlocked = true
+                                            }
+                                            is com.HanFeng.capture.BreakpointAction.ReplaceWith -> {
+                                                // 批次 C: H2 响应方向 ReplaceWith 真正注入合成帧。
+                                                // 与既有广告拦截 syntheticResponse 路径共用 applyHttp2Directives, 写入 client output。
+                                                // 仅响应方向落地; 请求方向仍留日志(见下方)。
+                                                // 安全网: 直接消费 ReplaceWith.replacement(body) + headersOverride + statusLineOverride,
+                                                //         用 HpackEncoder + Http2FrameCodec.buildSyntheticResponseFrames 生成帧;
+                                                //         若 streamState 已被广告拦截置 blockedByAction, 跳过避免双重注入。
+                                                if (!streamState.blockedByAction) {
+                                                    val action = tapResp.action as com.HanFeng.capture.BreakpointAction.ReplaceWith
+                                                    val status = action.statusLineOverride
+                                                        ?.let { it.substringAfter(' ').substringBefore(' ').ifBlank { "200" } }
+                                                        ?.toIntOrNull()
+                                                        ?: h2insp.status?.toIntOrNull()
+                                                        ?: 200
+                                                    val ct = action.headersOverride?.entries
+                                                        ?.firstOrNull { it.key.equals("content-type", true) }?.value
+                                                        ?: h2insp.contentType
+                                                        ?: "application/octet-stream"
+                                                    val extraHeaders = action.headersOverride
+                                                        ?.filterKeys { !it.equals("content-length", true) && !it.equals("content-type", true) }
+                                                        ?.entries
+                                                        ?.map { it.key to it.value }
+                                                        ?: emptyList()
+                                                    val synthetic = Http2FrameCodec.buildSyntheticResponseFrames(
+                                                        streamId = event.streamId,
+                                                        status = status,
+                                                        contentType = ct,
+                                                        body = action.replacement,
+                                                        extraHeaders = extraHeaders
+                                                    )
+                                                    streamState.blockedByAction = true
+                                                    streamState.terminalBlocked = true
+                                                    directives += Http2StreamDirective(
+                                                        streamId = event.streamId,
+                                                        action = "capture-h2-response-replace",
+                                                        confidence = "capture",
+                                                        sendRst = false,
+                                                        syntheticResponse = synthetic
+                                                    )
+                                                    LogRepository.append(context, "H2 response breakpoint ReplaceWith applied (flow=${session.flowKey} sid=${event.streamId} status=$status bytes=${action.replacement.size})")
+                                                } else {
+                                                    LogRepository.append(context, "H2 response breakpoint ReplaceWith skipped: stream already blocked (flow=${session.flowKey} sid=${event.streamId})")
+                                                }
+                                            }
+                                            is com.HanFeng.capture.BreakpointAction.PassThrough -> { /* 透传 */ }
+                                        }
+                                    }
+                                }
+                            }
                             streamState.lastActionDecision = streamState.lastHeaderInspection
                                 ?.let(HttpMitmFilter::decideHttp2Action)
                             logHttp2HeadersComplete(context, session, direction, event.streamId, streamState)
@@ -1071,6 +1322,8 @@ object HttpsTlsBridgeManager {
                             streamState.terminalBlocked = true
                         }
                         streamState.streamClosed = true
+                        // 抓包旁路: HTTP/2 stream 关闭, 清本 stream 的 txn 映射(design correctness 1)。
+                        com.HanFeng.capture.CaptureTap.tapHttp2StreamClosed(session, event.streamId)
                         logHttp2StreamClosed(context, session, direction, event.streamId, event.stage, streamState)
                     }
                 }
@@ -1095,6 +1348,12 @@ object HttpsTlsBridgeManager {
                 control.terminalBlockedStreams += directive.streamId
                 recordHttp2TerminalBlockedStat(context, session, control, directive.streamId, 100 * 1024)
                 logHttp2SyntheticResponse(context, session, directive, resetPeer)
+            }
+            if (directive.syntheticRequest != null && resetPeer == "upstream" && control.syntheticRequestedStreams.add(directive.streamId)) {
+                writeAndFlush(output, directive.syntheticRequest)
+                control.terminalBlockedStreams += directive.streamId
+                recordHttp2TerminalBlockedStat(context, session, control, directive.streamId, 100 * 1024)
+                logHttp2SyntheticRequest(context, session, directive)
             }
             if (directive.sendRst && control.resetSentStreams.add(directive.streamId)) {
                 writeHttp2RstStream(output, directive.streamId)
@@ -1444,6 +1703,18 @@ object HttpsTlsBridgeManager {
         )
     }
 
+    private fun logHttp2SyntheticRequest(
+        context: Context,
+        session: TlsMitmSessionManager.TlsMitmSession,
+        directive: Http2StreamDirective
+    ) {
+        appendHttp2Log(
+            context,
+            session,
+            "HTTP/2 synthetic request stream=${directive.streamId} action=${directive.action} confidence=${directive.confidence} peer=upstream bytes=${directive.syntheticRequest?.size ?: 0} sendRst=${directive.sendRst}"
+        )
+    }
+
     private fun logHttp2StreamReset(
         context: Context,
         session: TlsMitmSessionManager.TlsMitmSession,
@@ -1669,6 +1940,7 @@ object HttpsTlsBridgeManager {
         val terminalBlockedStreams: MutableSet<Int> = linkedSetOf(),
         val terminalStatsRecorded: MutableSet<Int> = linkedSetOf(),
         val pendingClientRstStreams: MutableSet<Int> = linkedSetOf(),
+        val syntheticRequestedStreams: MutableSet<Int> = linkedSetOf(),
         var goAwaySeen: Boolean = false
     )
 
@@ -1677,7 +1949,8 @@ object HttpsTlsBridgeManager {
         val action: String,
         val confidence: String,
         val sendRst: Boolean,
-        val syntheticResponse: ByteArray? = null
+        val syntheticResponse: ByteArray? = null,
+        val syntheticRequest: ByteArray? = null
     )
 
     private data class PendingHttp2ClientRewrite(
@@ -1709,6 +1982,9 @@ object HttpsTlsBridgeManager {
         var lastHeaderInspection: Http2HeaderInspection? = null,
         var lastDataInspection: Http2DataInspection? = null,
         var lastDataSample: ByteArray = ByteArray(0),
+        /** 批次 E2: 响应方向累计 body, 在 endStream 时一次性入库 CaptureStore 完整体。 */
+        var fullResponseAccumulator: ByteArray = ByteArray(0),
+        var fullResponseAccumulatorDropped: Boolean = false,
         var lastActionDecision: Http2ActionDecision? = null,
         var blockedByAction: Boolean = false,
         var terminalBlocked: Boolean = false,
@@ -1716,6 +1992,32 @@ object HttpsTlsBridgeManager {
         var reset: Boolean = false,
         var streamClosed: Boolean = false
     )
+
+    // 缺口 2: 把 [com.HanFeng.capture.TapRequestOutcome] / [com.HanFeng.capture.TapResponseOutcome]
+    // 翻译成 HTBM 可消费的 txnId / BreakpointAction 两个独立维度。
+    private fun extractTxnId(outcome: com.HanFeng.capture.TapRequestOutcome): Long? = when (outcome) {
+        is com.HanFeng.capture.TapRequestOutcome.Inactive -> null
+        is com.HanFeng.capture.TapRequestOutcome.Pending -> outcome.txnId
+    }
+
+    private fun extractTxnIdResponse(outcome: com.HanFeng.capture.TapResponseOutcome): Long? = when (outcome) {
+        is com.HanFeng.capture.TapResponseOutcome.Inactive -> null
+        is com.HanFeng.capture.TapResponseOutcome.NotFound -> null
+        is com.HanFeng.capture.TapResponseOutcome.Pending -> outcome.txnId
+    }
+
+    private fun extractBreakpointAction(outcome: com.HanFeng.capture.TapRequestOutcome): com.HanFeng.capture.BreakpointAction =
+        when (outcome) {
+            is com.HanFeng.capture.TapRequestOutcome.Inactive -> com.HanFeng.capture.BreakpointAction.PassThrough(useOriginal = true)
+            is com.HanFeng.capture.TapRequestOutcome.Pending -> outcome.action
+        }
+
+    private fun extractBreakpointActionResponse(outcome: com.HanFeng.capture.TapResponseOutcome): com.HanFeng.capture.BreakpointAction =
+        when (outcome) {
+            is com.HanFeng.capture.TapResponseOutcome.Inactive -> com.HanFeng.capture.BreakpointAction.PassThrough(useOriginal = true)
+            is com.HanFeng.capture.TapResponseOutcome.NotFound -> com.HanFeng.capture.BreakpointAction.PassThrough(useOriginal = true)
+            is com.HanFeng.capture.TapResponseOutcome.Pending -> outcome.action
+        }
 
     private const val LOOPBACK_HOST = "127.0.0.1"
     private const val MAX_PENDING_HTTP2_CLIENT_REWRITE_BYTES = 64 * 1024

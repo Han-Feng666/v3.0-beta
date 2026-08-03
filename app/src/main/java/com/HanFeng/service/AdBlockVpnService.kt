@@ -453,6 +453,10 @@ class AdBlockVpnService : VpnService() {
             HttpsMitmRepository.clearRuntimeState(this)
         }
         com.HanFeng.service.FloatingBallService.startIfEnabled(this)
+        // 抓包配置跨 VPN 重启恢复(requirements R3.5)
+        runCatching { com.HanFeng.capture.CaptureController.syncFromPrefs(this) }
+        // 抓包 active 时实时悬浮窗自动拉起(design Components #13)
+        runCatching { com.HanFeng.service.CaptureFloatingService.startIfCaptureActive(this) }
         packetJob = scope.launch {
             runCatching { runPacketLoop(tunGeneration) }
                 .onFailure { error ->
@@ -743,6 +747,9 @@ class AdBlockVpnService : VpnService() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             foregroundShown = false
         }
+        // 关 VPN 时把当前抓包快照写盘(requirements R3.5), 抓包 controller 自身保持 active 让 UI 状态延续。
+        runCatching { com.HanFeng.capture.CaptureController.flushSnapshotToPrefs(this) }
+        runCatching { com.HanFeng.service.CaptureFloatingService.stop(this) }
         if (stopService) stopSelf()
         LogRepository.append(this, "VPN stopped")
     }
@@ -3325,6 +3332,15 @@ class AdBlockVpnService : VpnService() {
         if (!isMitmFullCaptureRoutingActive()) return false
         if (!info.tcpFlags.hasTcpFlag(TCP_FLAG_SYN) || info.tcpFlags.hasTcpFlag(TCP_FLAG_ACK)) return false
         if (isLocalLoopOrProxyEndpoint(ip, info.destinationPort)) return false
+        // 全量抓包 (MITM_GLOBAL): 对所有未知 HTTPS 连接都路由进 TLS bridge 解密,
+        // 不受"疑似广告应用"过滤限制。
+        // 按应用抓包 (MITM_APP): VPN 仅放行目标应用的流量 (addAllowedApplication),
+        // 到达这里的连接全部来自抓包目标, 一律进入 TLS bridge 解密; 其余应用绕过 VPN 直连, 不受影响。
+        if (activeFullCaptureMode == FullCaptureRoutingSupport.Mode.MITM_APP ||
+            activeFullCaptureMode == FullCaptureRoutingSupport.Mode.MITM_GLOBAL
+        ) {
+            return true
+        }
         val appName = resolveAppName(ip, info)
         return shouldAggressivelyMitmUnknownHttpsApp(appName)
     }
@@ -10198,8 +10214,35 @@ class AdBlockVpnService : VpnService() {
     private fun resolveFullCaptureRouteMode(stableMode: Boolean): FullCaptureRoutingSupport.Mode {
         val localProxyFullCapture = shouldCaptureFullTrafficForLocalProxy()
         val mitmCircuitOpen = isMitmFullCaptureCircuitOpen()
-        val mitmAppTargets = if (ENABLE_MITM_APP_FULL_CAPTURE && !stableMode && !localProxyFullCapture && httpDecryptEnabled && mitmCertificateInstalled && !mitmCircuitOpen) {
-            resolveMitmAppFullCaptureTargets(this, packageName, shizukuAdControlReady)
+        // 抓包开启即启用 HTTPS MITM 路由: 抓包数据面挂在 HTTPS MITM 管线上,
+        // 只有 full-capture routing 激活, 未知域名的 SNI/SYN 才会被路由进 TLS bridge 解密,
+        // CaptureTap 才会产出条目 (见 HttpsTlsBridgeManager / CaptureController).
+        //
+        // 断网修复: 抓包默认走「按应用」(MITM_APP) 路由 —— VPN 只放行抓包目标应用,
+        // 其余应用绕过 VPN 直连, 不会因全量 MITM 解密失败而断网。
+        // 仅当用户显式选择「全部应用」抓包时才启用全局 (MITM_GLOBAL) 路由。
+        val captureSnapshot = com.HanFeng.capture.CaptureController.current.value
+        val captureModeAllApps = captureSnapshot.active && captureSnapshot.mode == com.HanFeng.capture.CaptureController.Mode.ALL_APPS
+        val captureTargetApps = if (captureSnapshot.active && captureSnapshot.mode == com.HanFeng.capture.CaptureController.Mode.BY_APP) {
+            captureSnapshot.targetApps
+        } else {
+            emptySet()
+        }
+        // 关键: 抓包 ALL_APPS 时排除广告目标走 MITM_APP —— FullCaptureRoutingSupport.resolve 里
+        // MITM_APP 优先于 MITM_GLOBAL, 若不排除, 全量抓包会被 adTargets 顶成"只放行广告目标"的
+        // 按应用路由, 用户要抓的目标 App 流量绕过 VPN 直连, 表现为"不断网但抓不到包"。
+        val allowAdMitmAppTargets = !captureModeAllApps
+        val mitmAppTargets = if (!stableMode && !localProxyFullCapture && httpDecryptEnabled && mitmCertificateInstalled && !mitmCircuitOpen) {
+            val adTargets = if (allowAdMitmAppTargets && ENABLE_MITM_APP_FULL_CAPTURE) {
+                resolveMitmAppFullCaptureTargets(this, packageName, shizukuAdControlReady)
+            } else {
+                emptySet()
+            }
+            (captureTargetApps + adTargets)
+                .asSequence()
+                .distinct()
+                .take(CAPTURE_ROUTING_TARGET_LIMIT)
+                .toSet()
         } else {
             emptySet()
         }
@@ -10211,7 +10254,7 @@ class AdBlockVpnService : VpnService() {
                 httpDecryptEnabled = httpDecryptEnabled,
                 mitmCertificateInstalled = mitmCertificateInstalled,
                 mitmAppFullCaptureEnabled = mitmAppTargets.isNotEmpty(),
-                mitmFullCaptureEnabled = ENABLE_GLOBAL_HTTPS_MITM_CAPTURE,
+                mitmFullCaptureEnabled = captureModeAllApps || ENABLE_GLOBAL_HTTPS_MITM_CAPTURE,
                 mitmCircuitOpen = mitmCircuitOpen
             )
         )
@@ -10350,6 +10393,8 @@ class AdBlockVpnService : VpnService() {
         private const val ENABLE_ACTIVE_MITM_ROUTING = true
         private const val ENABLE_MITM_APP_FULL_CAPTURE = false
         private const val ENABLE_GLOBAL_HTTPS_MITM_CAPTURE = false
+        // 抓包按应用路由的最大目标数 (addAllowedApplication 数量受 VpnService 上限约束)
+        private const val CAPTURE_ROUTING_TARGET_LIMIT = 8
         private const val MAX_BUFFERED_CLIENT_SEGMENTS = 32
         private const val MAX_BUFFERED_SERVER_SEGMENTS = 32
         private const val MAX_BUFFERED_CLIENT_BYTES = 256 * 1024

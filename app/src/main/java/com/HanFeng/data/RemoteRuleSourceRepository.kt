@@ -115,23 +115,31 @@ object RemoteRuleSourceRepository {
             onDetailedProgress?.invoke(RemoteRuleSyncProgress(1, 1, source, RemoteRuleSyncProgress.Stage.CONNECTING))
             onDetailedProgress?.invoke(RemoteRuleSyncProgress(1, 1, source, RemoteRuleSyncProgress.Stage.DOWNLOADING))
             val (savedEtag, savedLastModified) = loadSyncCache(context, source.id)
-            val downloadResult = downloadToFileConditional(context, source.url, savedEtag, savedLastModified) { bytesRead, totalBytes, wasTruncated ->
-                downloadedBytes = bytesRead
-                truncated = truncated || wasTruncated
-                onDetailedProgress?.invoke(
-                    RemoteRuleSyncProgress(
-                        current = 1,
-                        total = 1,
-                        source = source,
-                        stage = RemoteRuleSyncProgress.Stage.DOWNLOADING,
-                        bytesRead = bytesRead,
-                        totalBytes = totalBytes
+            // 多镜像回退链：主 URL 失败按序尝试 fallbackUrls，缓存请求仅对主 URL 生效
+            val downloadResult = downloadWithFallback(
+                context,
+                primaryUrl = source.url,
+                fallbackUrls = source.fallbackUrls,
+                savedEtag = savedEtag,
+                savedLastModified = savedLastModified,
+                onProgress = { bytesRead, totalBytes, wasTruncated ->
+                    downloadedBytes = bytesRead
+                    truncated = truncated || wasTruncated
+                    onDetailedProgress?.invoke(
+                        RemoteRuleSyncProgress(
+                            current = 1,
+                            total = 1,
+                            source = source,
+                            stage = RemoteRuleSyncProgress.Stage.DOWNLOADING,
+                            bytesRead = bytesRead,
+                            totalBytes = totalBytes
+                        )
                     )
-                )
-            }
+                }
+            )
             if (downloadResult.notModified) {
                 notModified = true
-                val updatedSource = source.copy(lastUpdatedAt = System.currentTimeMillis(), lastError = null)
+                val updatedSource = source.copy(lastUpdatedAt = System.currentTimeMillis(), lastError = null, lastSyncStartedAt = 0L)
                 RuleRepository.updateRemoteRuleSource(context, updatedSource)
                 val totalTime = System.currentTimeMillis() - startTime
                 LogRepository.append(context, "规则源同步完成（304 未修改）：${source.name}，跳过下载，耗时${totalTime / 1000}秒")
@@ -196,7 +204,8 @@ object RemoteRuleSourceRepository {
                     addedCount <= 0 -> "未导入任何规则，可能规则格式不正确"
                     truncated -> "导入${addedCount}条（文件可能被截断，建议增大限制或拆分来源）"
                     else -> null
-                }
+                },
+                lastSyncStartedAt = 0L
             )
             RuleRepository.updateRemoteRuleSource(context, updatedSource)
 
@@ -236,7 +245,7 @@ object RemoteRuleSourceRepository {
                 is OutOfMemoryError -> "运行内存不足，导入失败。规则源大小：${formatBytes(downloadedBytes)}；请先减少已启用规则源数量或重启 App 后重试"
                 else -> error.message ?: "未知错误"
             }
-            val updatedSource = source.copy(lastError = message)
+            val updatedSource = source.copy(lastError = message, lastSyncStartedAt = 0L)
             RuleRepository.updateRemoteRuleSource(context, updatedSource)
             val totalTime = System.currentTimeMillis() - startTime
             LogRepository.append(context, "规则源同步失败：${source.name}，url=${source.url}，errorClass=${error.javaClass.name}，raw=${error.message ?: ""}，mapped=$message，耗时${totalTime / 1000}秒")
@@ -290,6 +299,43 @@ object RemoteRuleSourceRepository {
         val etag: String? = null,
         val lastModified: String? = null
     )
+
+    private fun downloadWithFallback(
+        context: Context,
+        primaryUrl: String,
+        fallbackUrls: List<String>,
+        savedEtag: String?,
+        savedLastModified: String?,
+        onProgress: ((bytesRead: Long, totalBytes: Long?, wasTruncated: Boolean) -> Unit)? = null
+    ): ConditionalDownloadResult {
+        if (fallbackUrls.isEmpty()) {
+            return downloadToFileConditional(context, primaryUrl, savedEtag, savedLastModified, onProgress)
+        }
+        var firstError: Throwable? = null
+        // 主 URL 优先尝试（带 ETag/Last-Modified 条件），失败按序 fallback（不带条件，避免缓存对不上源）
+        runCatching {
+            return downloadToFileConditional(context, primaryUrl, savedEtag, savedLastModified, onProgress)
+        }.onFailure { firstError = it }
+
+        LogRepository.append(
+            context,
+            "规则源主 URL 失败，尝试备用镜像：$primaryUrl 错误：${firstError?.message}"
+        )
+        for ((index, fallback) in fallbackUrls.withIndex()) {
+            if (fallback.isBlank() || fallback == primaryUrl) continue
+            runCatching {
+                LogRepository.append(context, "尝试备用镜像 #${index + 1}/${fallbackUrls.size}：$fallback")
+                return downloadToFileConditional(context, fallback, null, null, onProgress)
+            }.onFailure { err ->
+                LogRepository.append(
+                    context,
+                    "备用镜像失败 #${index + 1}：$fallback 错误：${err.message ?: err.javaClass.simpleName}"
+                )
+                if (firstError == null) firstError = err
+            }
+        }
+        throw firstError ?: IOException("所有镜像下载失败")
+    }
 
     private fun downloadToFileConditional(
         context: Context,

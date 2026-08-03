@@ -1853,6 +1853,21 @@ object HttpMitmFilter {
         return BufferedHttp1Result.Ready(buffer, ByteArray(0))
     }
 
+    /**
+     * 批次 E3: 判断 HTTP/1.1 响应是否为 WebSocket Upgrade(Switching Protocols, 101,
+     * Upgrade: websocket)。由 [HttpsTlsBridgeManager.pipeServerToClient] 在 Ready 分支调用。
+     */
+    fun isWebSocketUpgradeResponse(responseBytes: ByteArray): Boolean {
+        val ascii = decodeAscii(responseBytes) ?: return false
+        if (!ascii.startsWith("HTTP/1.1 101") && !ascii.startsWith("HTTP/1.0 101")) return false
+        // 任何 case-insensitive 出现 Upgrade: websocket 视为 WS Upgrade
+        val lower = ascii.lowercase()
+        return lower.contains("\r\nupgrade: websocket\r\n") ||
+            lower.contains("\r\nupgrade: websocket \r\n") ||
+            lower.contains("\r\nupgrade: websocket;") ||
+            (lower.contains("\r\nupgrade:") && lower.contains("websocket"))
+    }
+
     fun inspectHttp2DataSample(
         session: TlsMitmSessionManager.TlsMitmSession,
         headerInspection: Http2HeaderInspection?,

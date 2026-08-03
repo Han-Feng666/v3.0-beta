@@ -151,6 +151,16 @@ object TlsMitmSessionManager {
             context,
             "Bypassed HTTPS MITM host=${updated.host} flow=$flowKey source=${updated.source} reason=$reason"
         )
+        com.HanFeng.capture.CaptureController.onTlsConnectionEvent(
+            context = context,
+            host = updated.host,
+            appName = updated.appName,
+            packageName = null,
+            targetIp = updated.targetIp,
+            targetPort = updated.targetPort,
+            flowKey = updated.flowKey,
+            error = reason
+        )
     }
 
     private fun bypassCooldownMillisForReason(reason: String): Long {

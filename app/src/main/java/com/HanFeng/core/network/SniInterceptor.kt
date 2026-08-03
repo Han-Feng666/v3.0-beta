@@ -144,6 +144,26 @@ object SniInterceptor {
             }
         }
 
+        // DGA 启发式：广告/追踪 SDK 轮换子域名规避静态黑名单的最后兜底。
+        // 保守阈值（minLabel=8, entropy>=0.70）已避免常见短前缀误伤；
+        // publishHostSuffix (.akamaihd.net/.cloudfront.net/.fastly.net 等) 已显式排除。
+        // 命中后写入 ScoredBlockCache，让学习引擎下游也能复用这个信号；
+        // ttl 借用 MitmLearningEngine.ttlForScore 的长短（这里给一个固定 5 分钟的保守窗口）。
+        if (DgaPatternDetector.looksLikeDga(sniHost)) {
+            ScoredBlockCache.recordCandidate(
+                domain = sniHost,
+                ip = null,
+                score = ScoredBlockCache.SCORE_THRESHOLD_DOMAIN,
+                ttlMillis = 5 * 60_000L,
+                vendor = vendor,
+                reason = "dga-heuristic"
+            )
+            return makeDecision(true, sniHost, vendor, "dga-heuristic").also {
+                cacheDecision(sniHost, it)
+                recordSlowPathLatency(slowPathStartedAt)
+            }
+        }
+
         return makeDecision(false, sniHost, vendor, "pass").also {
             cacheDecision(sniHost, it)
             recordSlowPathLatency(slowPathStartedAt)

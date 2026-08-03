@@ -5,8 +5,12 @@ package com.HanFeng.core.network
  *
  * Targets ad/tracker SDKs that rotate subdomains to evade static blocklists.
  * Uses simple structural and entropy signals rather than ML.
+ *
+ * 已接入 [SniInterceptor.evaluate] 作为兜底启发式：在白名单、社交核心、敏感认证、
+ * 内置规则、ScoredBlockCache、广告 SDK infra、小说 heuristic 都未命中后再调用，
+ * 命中后写入 [ScoredBlockCache] 让学习引擎下游也吃到这个信号。
  */
-internal object DgaPatternDetector {
+object DgaPatternDetector {
 
     private const val MIN_LABEL_LEN_FOR_DGA = 8
     private const val HIGH_ENTROPY_THRESHOLD = 0.70

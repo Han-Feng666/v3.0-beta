@@ -78,7 +78,17 @@ data class RemoteRuleSourceConfig(
     val enabled: Boolean = true,
     val lastUpdatedAt: Long = 0L,
     val lastRuleCount: Int = 0,
-    val lastError: String? = null
+    val lastError: String? = null,
+    /**
+     * 备用镜像 URL 列表。主 URL 下载失败（连接/DNS/HTTP 非 2xx/3xx 外的失败）时
+     * 按序逐个尝试。EnableRuleSource 仍然只看 [url] 字段；该字段仅影响下载重试链路。
+     */
+    val fallbackUrls: List<String> = emptyList(),
+    /**
+     * 最后一次同步开始的时间戳。0 表示当前未在运行；>0 表示同步进行中。
+     * 同步完成（成功或失败）后会被 reset 为 0，配合 [lastUpdatedAt] / [lastError] 表达终态。
+     */
+    val lastSyncStartedAt: Long = 0L
 )
 
 data class DashboardStats(

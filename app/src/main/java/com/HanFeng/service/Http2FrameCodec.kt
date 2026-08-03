@@ -116,7 +116,6 @@ object Http2FrameCodec {
         )
         return headersFrame + dataFrame
     }
-
     fun buildRstStreamFrame(streamId: Int, errorCode: Int = 0x8): ByteArray {
         val payload = byteArrayOf(
             ((errorCode ushr 24) and 0xFF).toByte(),
@@ -125,6 +124,56 @@ object Http2FrameCodec {
             (errorCode and 0xFF).toByte()
         )
         return buildFrame(type = 0x3, flags = 0x0, streamId = streamId, payload = payload)
+    }
+
+    /**
+     * 构造合成 HTTP/2 请求 HEADERS + DATA 帧(client → upstream)。
+     * 用于抓包断点 ReplaceWith(请求方向) — 替换客户端原本要发送给上游的请求。
+     *
+     * 关键伪头: :method / :path / :scheme / :authority 由调用方传入。
+     * HEADERS 帧标志: END_HEADERS=0x4; DATA 帧标志: END_STREAM=0x1。
+     * 若 body 为空, END_STREAM 标志直接设在 HEADERS 帧,不发送 DATA 帧。
+     */
+    fun buildSyntheticRequestFrames(
+        streamId: Int,
+        method: String,
+        scheme: String,
+        authority: String,
+        path: String,
+        body: ByteArray,
+        extraHeaders: List<Pair<String, String>> = emptyList()
+    ): ByteArray {
+        val headers = mutableListOf(
+            HpackDecoder.HeaderField(":method", method),
+            HpackDecoder.HeaderField(":scheme", scheme),
+            HpackDecoder.HeaderField(":authority", authority),
+            HpackDecoder.HeaderField(":path", path)
+        )
+        if (body.isNotEmpty()) {
+            headers += HpackDecoder.HeaderField("content-length", body.size.toString())
+        }
+        extraHeaders.forEach { (name, value) ->
+            if (!name.equals("content-length", true) && !name.startsWith(":")) {
+                headers += HpackDecoder.HeaderField(name, value)
+            }
+        }
+        val headerBlock = HpackEncoder.encodeLiteralHeadersWithoutIndexing(headers)
+        val endStreamOnHeaders = body.isEmpty()
+        val headersFrame = buildHeadersFrame(
+            streamId = streamId,
+            headerBlock = headerBlock,
+            endStream = endStreamOnHeaders
+        )
+        if (body.isEmpty()) {
+            return headersFrame
+        }
+        val dataFrame = buildFrame(
+            type = 0x0,
+            flags = 0x1,
+            streamId = streamId,
+            payload = body
+        )
+        return headersFrame + dataFrame
     }
 
     private fun buildFrame(type: Int, flags: Int, streamId: Int, payload: ByteArray): ByteArray {

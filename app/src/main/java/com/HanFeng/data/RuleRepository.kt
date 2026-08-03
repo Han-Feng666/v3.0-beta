@@ -678,8 +678,43 @@ object RuleRepository {
     private const val DECISION_TTL_MS = 10000L // 10 秒缓存
 
     fun prewarmCaches(context: Context) {
+        ensureBundledRulesFallback(context)
         if (cachedSimpleDomainIndex != null) return
         buildAllCachesFromFile(context)
+    }
+
+    /**
+     * 冷启动兜底：当本地 rules 文件不存在/为空且无任何已同步远程规则时，
+     * 从内置 raw 资源导入一份基础规则，避免新装用户首启 VPN 时拦不到任何东西。
+     * 仅在文件缺失或 entries 为 0 时触发一次，不覆盖用户已有的规则文件。
+     */
+    private fun ensureBundledRulesFallback(context: Context) {
+        runCatching {
+            val file = rulesFile(context)
+            if (file.exists() && file.length() > 2L) return@runCatching
+            // 已有远程规则源同步过的话，rules 文件应当已有内容；这里只对真正空时兜底
+            val sources = getRemoteRuleSources(context).filter { it.enabled }
+            val hasNonBundledRemote = sources.any { !isBuiltInRemoteRuleSource(it.id) }
+            if (hasNonBundledRemote) return@runCatching
+
+            val bundledRawIds = intArrayOf(
+                com.HanFeng.R.raw.hanfeng_adblock_rules,
+                com.HanFeng.R.raw.domestic_safe_ad_sdk_rules
+            )
+            val seedRules = mutableListOf<BlockRule>()
+            bundledRawIds.forEach { rawId ->
+                context.resources.openRawResource(rawId).bufferedReader().use { reader ->
+                    val lines = reader.lineSequence().filter { it.isNotBlank() }
+                    val added = addRules(context, lines.toList(), RuleSource.REFERENCE, allowWhitelistDomains = false)
+                    seedRules.addAll(added)
+                }
+            }
+            if (seedRules.isNotEmpty()) {
+                LogRepository.append(context, "冷启动兜底：从内置 raw 资源导入 ${seedRules.size} 条基础规则")
+            }
+        }.onFailure { e ->
+            LogRepository.append(context, "ensureBundledRulesFallback 失败：${e.message ?: e.javaClass.simpleName}")
+        }
     }
 
     private fun buildAllCachesFromFile(context: Context) {
@@ -998,6 +1033,16 @@ object RuleRepository {
     private const val SECURITY_SOURCE_NAME = "StevenBlack 安全防护"
     private const val SECURITY_SOURCE_URL = "https://cdn.jsdelivr.net/gh/StevenBlack/hosts@master/hosts"
 
+    /**
+     * 默认规则源的备用镜像：jsdelivr 在国内时通时不通，依次回退 raw.githubusercontent、
+     * ghproxy 与 staticaly。任一可用即视为同步成功。
+     */
+    private val SECURITY_SOURCE_FALLBACK_URLS = listOf(
+        "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+        "https://ghproxy.com/https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+        "https://cdn.staticaly.com/gh/StevenBlack/hosts@master/hosts"
+    )
+
     fun ensureSecurityRuleSource(context: Context) {
         val sources = getRemoteRuleSources(context)
         if (sources.any { it.id == SECURITY_SOURCE_ID || it.url.equals(SECURITY_SOURCE_URL, ignoreCase = true) }) return
@@ -1008,13 +1053,14 @@ object RuleRepository {
                 name = SECURITY_SOURCE_NAME,
                 url = SECURITY_SOURCE_URL,
                 enabled = true,
-                authorId = "stevenblack"
+                authorId = "stevenblack",
+                fallbackUrls = SECURITY_SOURCE_FALLBACK_URLS
             )
         )
     }
 
     fun isBuiltInRemoteRuleSource(sourceId: String): Boolean {
-        return false
+        return sourceId == SECURITY_SOURCE_ID
     }
 
     fun getRulesForRemoteSource(context: Context, sourceId: String): List<BlockRule> {
