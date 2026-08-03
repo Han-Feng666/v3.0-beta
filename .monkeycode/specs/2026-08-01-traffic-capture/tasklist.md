@@ -1,0 +1,148 @@
+# 需求实施计划 — traffic-capture
+
+参照 `.monkeycode/specs/2026-08-01-traffic-capture/design.md` 与 `requirements.md` 制定, 共 10 个新增组件 + 6 处现有改动 + 9 项必测单元。环境无 JDK/Android SDK, 实施全程采用静态审计 + 纯 Kotlin 单元测试兜底; Mockito mock Android Context(沿袭 `TrafficDecisionEngineTest` 模式)。
+
+- [ ] 1. 数据模型与环缓冲底座
+  - [ ] 1.1 创建 `app/src/main/java/com/HanFeng/capture/CaptureEntry.kt` 与 `app/src/main/java/com/HanFeng/capture/CaptureTypes.kt`
+    - 实现 `CaptureEntry` 全字段(data class, 含 `txnId/timestampMs/appName/packageName/scheme/method/host/path/httpVersion/requestHeaders/requestBodyPreview/requestBodyTruncated/responseStatus/responseHeaders/responseBodyPreview/responseBodyTruncated/durationMs/error/intercepted/tlsMeta/replayed`), 并提供 `isComplete`/`isPendingBreakpoint` 派生属性
+    - 同文件定义 `TlsMeta`、`CertMeta` 数据类(对齐 design.md Data Models)
+    - 同包定义 `BreakpointMatchRule`、`BreakpointKind`、`BreakpointAction` sealed interface (`PassThrough`/`ReplaceWith`/`Drop`)、`CaptureDraftRequest`、`CaptureDraftResponse`、`CaptureTemplate` 数据类
+    - 引用 requirements R4 / R8 / R9 / R11 与 design Data Models
+  - [ ] 1.2 创建 `CaptureRingBuffer.kt`: 容量参数化、`ConcurrentLinkedDeque` + `ConcurrentHashMap<Long, CaptureEntry>` 索引
+    - 提供 `putRequest(...) / putResponse(txnId, ...) / snapshot() / clear() / capacity()` API
+    - 满丢弃最旧条目同时同步移除索引项, 防止泄漏
+    - body 字节数组在入队前已切到 ring-buffer 独占, 不复用底层 ByteBuffer
+    - 引用 requirements R4.3 / R4.4 与 design correctness 3
+  - [ ] 1.3 创建 `app/src/test/java/com/hanfeng/adblocker/capture/CaptureRingBufferTest.kt`, 覆盖满丢弃 / byTxn 索引更新 / 全清三场景
+    - 对应 design 必测项 1
+- [ ] 2. 控制中枢 `CaptureController`
+  - [ ] 2.1 创建 `CaptureController.kt` (object), `AtomicReference<Snapshot>` 状态机 + `MutableSharedFlow<CaptureEntry>`(replay=0, extraBufferCapacity=512) + 单独 `breakpointHits: SharedFlow<Long>`(replay=1 缓存最近命中, design correctness 11)
+    - `enable(mode, targetApps)` / `disable()` / `snapshot()` / `current: StateFlow<Snapshot>` API
+    - `internal fun onDecodedRequest/onDecodedResponse/onDecodedHttp2Headers/onDecodedHttp2Body` 4 个旁路入口, 内部 try/catch + `withContext(Dispatchers.IO)` 吞错; 不阻主线程(default correctness 1)
+    - `disable()` 调用 `CaptureRingBuffer.clear()` 并 await 完成后再切到 inactive, 避免 toggle race
+    - 引用 requirements R2 / R4 / R12 与 design Components #1
+  - [ ] 2.2 `enable()` 内调用 `HttpsMitmRepository.isCertificateReady/isCertificateInstalled` 检测证书; 未就绪返回 `Result.failure(CaptureError.PendingCert)`, UI 据此走"前往安装"路径
+    - 引用 requirements R3 与 design correctness 2
+  - [ ] 2.3 `enable()` 中检测 HTTPS MITM 全局开关 `FeatureSettingsRepository.isHttpDecryptEnabled`, 若未开则调用 `setHttpDecryptEnabled(true)` 共享 CA; `disable()` **不动** MITM 全局开关
+    - 引用 requirements R3.1 / R3.4 与 design 现有组件改动表
+  - [ ] 2.4 创建 `CaptureControllerTest.kt`: enable/disable 状态机 / 模式切换互斥 / 旁路回调无异常 / 模式 BY_APP 仅采集目标 App / 模式 ALL_APPS 采集所有 App / OOM 与 onTrimMemory 降配回退路径(stub `HttpsMitmRepository.isCertificateReady` 沿用项目 mockStatic 风险评估后用 reflection 注入或桩 interface)
+    - 对应 design 必测项 2
+- [ ] 3. 检查点 — 数据底座与控制中枢可独立编译并测试通过
+  - 确保 `CaptureRingBufferTest` 与 `CaptureControllerTest` 静态结构 OK; 有疑问则询问用户确认 mock 策略
+- [ ] 4. HTTP MITM 旁路接入
+  - [ ] 4.1 `HttpMitmFilter.kt` 4 个 `inspect*` 方法返回点插入 `tapCapture(...)` 包装(纯 try-catch), 仅做只读采样写入 `CaptureController.onXxx`, 不影响原 `FilterResult`
+    - 涉及: `inspectRequest`(line ~1303) / `inspectBufferedHttp1Response`(line ~1801) / `inspectHttp2Headers`(line ~6227) / `inspectHttp2DataSample`(line ~1856)
+    - 引用 requirements R4 + design 接入点表
+  - [ ] 4.2 `CaptureController` 增加 `fun onTlsHandshakeComplete(session, sslSession)` 旁路入口, 提取 SNI/protocol/cipherSuite/ALPN/peerCertificates 写入 `CaptureEntry.tlsMeta`; 失败时把 reason 写入 `tlsMeta.error` 不丢 entry
+    - 引用 requirements R11.2 / R11.3 与 design correctness 13 与 Error Handling 末行
+  - [ ] 4.3 `AdBlockVpnService.onVpnStarted` 调用 `CaptureController.syncFromPrefs()` 一行, 让 VPN 重启时仍按 SP 配置恢复 active
+    - 引用 requirements R12 与 design 现有组件改动表
+  - [ ] 4.4 创建 `HttpMitmFilterTapCaptureTest.kt`(可选): mock 4 个 inspect 入口, 验证主路径返回值等于原 FilterResult 不被旁路修改
+    - 对应 design 必测项 9
+- [ ] 5. 断点机制 `BreakpointRepo` 与改写执行器
+  - [ ] 5.1 创建 `BreakpointRepo.kt` (object): `ConcurrentHashMap<MatchRule, BreakpointChannel>` + `ConcurrentHashMap<Long, CompletableDeferred<ByteArray?>>` 按 txnId 等待
+    - API: `registerRule / unregisterRule / match(host, method, path) / awaitResume(txnId, 30s) / resolveFromBreakpoint(txnId, action, draft?) / clearAll()`
+    - `awaitResume` 内部用 `withTimeoutOrNull(30.seconds)` 超时回退 `PassThrough(useOriginal=true)` (requirements R12.5 / design correctness 8)
+    - 引用 requirements R8 与 design Components #8
+  - [ ] 5.2 创建 `BreakpointActionExecutor.kt`: 应用 `BreakpointAction` 到请求 chunk / 响应 chunk
+    - 请求侧: `applyToRequest(originalChunk, draft)` → 输出替换 chunk(`method host path HTTP/1.1\r\n<headers>\r\n\r\n<body>`)
+    - 响应侧: `applyToResponse(originalChunk, draft)` → 输出替换 chunk, **强制重算 Content-Length** + **删除 `Transfer-Encoding: chunked` 头** (requirements R8.7 / design correctness 9)
+    - body 越界或非法编码 → 回退透传原 body 并发 toast 字段(写 `CaptureEntry.error`)
+    - 对应 design 必测项 5
+  - [ ] 5.3 `CaptureController.onDecodedRequest/onDecodedResponse` 调用 `BreakpointRepo.match(...)`, 命中则 await 用户裁决, 用结果替换 chunk; 同时 `breakpointHits.emit(txnId)` 通知 UI
+    - 引用 requirements R8.3 与 design 断点流 mermaid
+  - [ ] 5.4 创建 `BreakpointRepoTest.kt`: rule register/unregister / match 矩阵(host only / host+method / host+method+pathPrefix) / awaitResume 30s 超时回退 PassThrough / resolve 后 channel 关闭
+    - 对应 design 必测项 4
+  - [ ] 5.5 创建 `BreakpointActionExecutorTest.kt`: ApplyOnResponse 重算 Content-Length / 移除 chunked / body 越界 fallback 透传 / EditRequest-Apply 后 chunk == 草稿字节
+    - 对应 design 必测项 5
+- [ ] 6. 重放引擎与请求模板持久化
+  - [ ] 6.1 创建 `CaptureReplayEngine.kt`: 独立 socket 客户端, 不复用 VPN 数据路径
+    - 流程: 打开 Socket → 若 https 则用系统 `SSLSocketFactory` 默认信任链(不复用 Local CA, design correctness 10) → 写 HTTP/1.1 请求 → 读响应 → 转 `CaptureEntry`(`replayed=true`/`packageName=本App`/`txnId=replay-${seq}`) 写入 ring buffer
+    - 失败捕获异常类与消息写 `entry.error`(不抛) / 16MB 上限超即截断标 `error=replay-truncated` (requirements R9.2 / design Error Handling)
+    - 全程 IO 线程, 不阻 UI
+    - 引用 requirements R9 与 design Components #9
+  - [ ] 6.2 创建 `CaptureTemplateRepository.kt` (object, SharedPreferences 持久化): `list() / save(template) / delete(id) / get(id)`
+    - JSON 序列化走项目现有 Gson(参考 `RemoteRuleSourceConfig` 用法); 模板 id 用 `UUID.randomUUID().toString()` 保证唯一
+    - 仅存 method/host/path/headers/body, 不耦合捕包上下文
+    - 引用 requirements R9.4 与 design Components #10
+  - [ ] 6.3 创建 `CaptureReplayEngineTest.kt`: 连接失败写 entry.error / 16MB 截断标 replay-truncated / replayed=true 标记 / entry packageName=本App(用本地 ServerSocket 起一个假目标跑通端到端, 不走真实网络)
+    - 对应 design 必测项 6
+  - [ ] 6.4 创建 `CaptureTemplateRepositoryTest.kt`: round-trip serialize / 跨 disable 不丢 / 模板 id 唯一性(mock Context + SharedPreferences 内存版)
+    - 对应 design 必测项 7
+- [ ] 7. 检查点 — 旁路与改写路径全部就绪, 单元测试静态结构 OK
+  - 确保 `BreakpointRepoTest` / `BreakpointActionExecutorTest` / `CaptureReplayEngineTest` / `CaptureTemplateRepositoryTest` 静态结构 OK; 有疑问询问用户
+- [ ] 8. 导出器 `CaptureExporter`
+  - [ ] 8.1 创建 `CaptureExporter.kt`: `toHarJson(entries): String` 严格 HAR 1.2 schema(`log.version="1.2"`, 每条 entry 含 `request/response` 完整字段, 缺响应项填 `response.status=0` 与空 headers/no body)
+    - `redactMode=true` 默认; 对 `Authorization/Cookie/Set-Cookie/X-Token` 值替换 `***`, 文件头 `_comment` 标注脱敏范围
+    - `formatAs(entry, LanguageEnum)`: 5 种语言 cURL/Postman Collection v2.1/Python(requests)/Java(OkHttp)/JS(fetch); cURL 含 `--resolve host:443:127.0.0.1` + `-k` 兜底自签证书
+    - 引用 requirements R7 与 design Components #7
+  - [ ] 8.2 创建 `CaptureExporterTest.kt`: HAR 1.2 schema 合规(Gson 解析回对象) / 脱敏 ON 含 Authorization 与 Cookie / 脱敏 OFF 原样输出 / 缺响应字段填 0 / cURL 含 --resolve -k / Postman v2.1 schema 合法(`info.schema` 字段) / Python requests 含 `requests.post(...)` 与 `data=body`
+    - 对应 design 必测项 3
+- [ ] 9. 持久化层 `CaptureRepository`
+  - [ ] 9.1 创建 `CaptureRepository.kt`: SharedPreferences 持久化抓包相关配置(`targetApps`/`mode`/`maxEntries`/`redactMode`)
+    - 接口风格对齐 `HttpsMitmRepository` / `FeatureSettingsRepository`, SharedPreferences name = `capture_prefs`
+    - `redactMode = true` 默认值写入 (requirements R7.4 / R12 与 design correctness 7)
+    - 引用 design Components #6
+  - [ ] 9.2 `CaptureController.enable/disable` 改为通过 `CaptureRepository` 读写持久化, 让状态跨 VPN 重启可恢复(仍 honor "抓包不持久化条目", 仅持久化开关与配置)
+    - 对应 design correctness 4 例外
+- [ ] 10. 检查点 — 后端逻辑全套独立可测, 进入 UI 层
+  - 确认 `CaptureRepository` API 与 `CaptureController` 已闭合; 有疑问询问用户
+- [ ] 11. UI 入口: MainPagerAdapter + MainActivity 第 4 Tab
+  - [ ] 11.1 修改 `MainPagerAdapter.kt`: `getItemCount()` 3→4, 新增 `position=3 -> CaptureFragment()`
+    - 引用 requirements R1.1 与 design 现有组件改动表
+  - [ ] 11.2 在 `MainActivity.xml` 与 `MainActivity.kt` 增加 tabLayout 第 4 项标题"抓包", 放在末尾, 不打乱现有 3 项顺序
+    - 引用 requirements R1.1
+- [ ] 12. 抓包 Tab 主页 `CaptureFragment`
+  - [ ] 12.1 创建 `CaptureFragment.kt` + `fragment_capture.xml`: 顶部 ControlBar(启用开关 + 模式切换 BY_APP/ALL_APPS + 目标 App 选择按钮 + 清空按钮 + 导出 HAR 按钮 + 从模板重放入口), 其下 RecyclerView 列表
+    - 订阅 `CaptureController.entries` Flow, 实时 append;
+    - 空态展示启用说明 + 安全提示("抓包仅作用于本机 VPN 范围, HAR 默认脱敏")
+    - `CaptureController.enable()` 返回 `PendingCert` 时显示"证书未就绪, 前往安装"按钮跳转现有证书安装页
+    - 引用 requirements R1 / R2 / R3.2 / R6
+  - [ ] 12.2 创建 `CaptureEntryListAdapter.kt` + `item_capture_entry.xml`: 每行 method 图标色 + host + path + status + timingMs + appName + intercepted 标识 + replayed 标识
+    - 长按 row 弹"加入模板" / "对此路径加断点"菜单
+    - 引用 requirements R6.1 / R8.1 / R9.4
+  - [ ] 12.3 顶部筛选条 `CaptureFilterBar`: host 输入 + method 下拉(GET/POST/PUT/DELETE/ALL) + status 范围(2xx/3xx/4xx/5xx/ALL) + 关键字输入 + "仅看被拦截"开关
+    - 筛选条件变化即对 ring buffer snapshot 过滤, 不改原顺序
+    - 关键字做 contains 不区分大小写, 对 path+headers+body 预览
+    - 引用 requirements R10
+  - [ ] 12.4 关闭抓包时 `CaptureController.disable()` 调用清 ring buffer 与所有断点; UI 保留当前 list 不主动清屏, 直到用户离开 Tab (requirements R1.4 / R6.4)
+- [ ] 13. 抓包详情页 `CaptureDetailActivity`
+  - [ ] 13.1 创建 `CaptureDetailActivity.kt` + `activity_capture_detail.xml`: 顶部 entry info + Tabs(Headers / Body / Preview / cURL / Raw / TLS / 重放)
+    - Headers Tab: 请求 / 响应 卡片 view; Body Tab: 文本 body 用 `JsonFormatter`/`HtmlBeautifier`/`XmlBeautifier` 美化, 失败回退 hex dump; 二进制 body 走 hex dump 视图
+    - TLS Tab: 展示 `tlsMeta` 全字段, 无则隐藏 Tab
+    - 引用 requirements R6.2 / R6.3 / R11.1
+  - [ ] 13.2 "改请求" / "改响应"按钮: 进入编辑模式, 用户可改 method/host/path/headers/body(请求) 或 statusLine/headers/body(响应); 退出编辑时草稿仅本地不生效
+    - 引用 requirements R8.1 / R8.2 / R8.4
+  - [ ] 13.3 改请求草稿 + "开启断点"按钮 → 注册 `BreakpointMatchRule(kind=REQUEST)` 到 `BreakpointRepo`; 改响应 + "应用到下一条"按钮 → 注册 `BreakpointMatchRule(kind=RESPONSE)` 一次性规则
+    - 引用 requirements R8.3 / R8.5
+  - [ ] 13.4 断点命中后 UI: 详情页自动切到对应方向编辑 Tab, 顶部显眼"放行 / 替换后放行 / 丢弃"三按钮, 按钮 onClick 调 `CaptureController.resumeFromBreakpoint(txnId, action, draft?)`, 用户操作后断点 channel 自动关闭
+    - 引用 requirements R8.3 与 design 断点流 mermaid
+  - [ ] 13.5 "导出"按钮: 弹底部 BottomSheet 列 5 种语言选项 + 原样/脱敏 toggle(读 `CaptureRepository.redactMode` 默认值); 选中后调 `CaptureExporter.formatAs` 写入剪贴板并 toast "已含敏感字段, 谨慎分享"(若原样 toggle 开则不提示)
+    - 引用 requirements R7.2 / R7.4
+  - [ ] 13.6 "重放"Tab: 进入重放编辑模式预填原 entry, 改完点"发送"调 `CaptureReplayEngine.replay(...)`, 进度期间 spinner, 成功后切回 Entries 视图高亮 replayed=true 新条目; 失败显示异常类与消息
+    - 引用 requirements R9.1 / R9.2 / R9.3
+- [ ] 14. 悬浮窗 `CaptureFloatingService`
+  - [ ] 14.1 创建 `CaptureFloatingService.kt`(foreground Service), 复用 `FloatingBallService` 范式
+    - `onCreate` 同步 `WindowManager.addView`(半透明圆角矩形 280-360dp 高 wrap, 初始位置顶贴顶偏下 80dp); 沿袭 `WirelessDebugFloatingService` 学到的 HyperOS addView 同步策略
+    - 内嵌 RecyclerView 5 行, 订阅 `CaptureController.entries`; 新条目从顶部进入, 旧条目滚出 (design Components #3 / requirements R5.2)
+    - 点击 row → 跳转 `MainActivity` extras `tab=capture&focus=txnId`
+    - 长按悬浮窗 → 弹关闭按钮, 调 `CaptureController.disable()` 并移除悬浮窗
+    - 无 `Settings.canDrawOverlays` 权限时跳过悬浮窗渲染, 仅 App 内列表
+    - 引用 requirements R5 + design correctness 6
+  - [ ] 14.2 `CaptureController.enable()` 末尾若已授悬浮窗权限调 `CaptureFloatingService.start(context)`; `disable()` 末尾 `stopService` 移除悬浮窗
+    - 引用 requirements R5.1 / R5.4
+  - [ ] 14.3 悬浮窗命中断点 entry 时整条 row 亮起特殊颜色(参考 `FloatingBallService` shape drawable 体系) + 顶部小图标显示"断点"
+- [ ] 15. AndroidManifest 与资源注册
+  - [ ] 15.1 `AndroidManifest.xml` 注册 `CaptureFloatingService`(foreground service with `FOREGROUND_SERVICE` + `SYSTEM_ALERT_WINDOW` 权限已存在)与 `CaptureDetailActivity`
+    -meta 通道: `CaptureFragment` 由 FragmentStateAdapter 自动管理不需注册
+  - [ ] 15.2 新建 `res/layout/fragment_capture.xml` / `item_capture_entry.xml` / `activity_capture_detail.xml` / 悬浮窗 layout
+    - 沿用项目现有颜色 `@color/hf_text_primary` 等(参考 `activity_remote_rule_sources.xml`)
+  - [ ] 15.3 新建 strings.xml 抓包相关文案(中文, 沿袭 `R.string.*` 风格)
+- [ ] 16. 全量静态审计与最终检查点
+  - [ ] 16.1 grep 检查所有新文件 package 路径与 import 是否齐整; 再 grep 项目内是否有 `mockStatic(RuleRepository::class.java)` 或 `getSharedPreferences("capture_prefs"...)` 命名冲突
+  - [ ] 16.2 静态审计 `HttpMitmFilter` 4 个接入点改动是否仅插入 `tapCapture`, 不改原 FilterResult 返回分支
+  - [ ] 16.3 静态审计 `BreakpointActionExecutor.applyToResponse` 确实重算 Content-Length + 删除 chunked, 用 grep `Content-Length` / `Transfer-Encoding` 字面量在附近
+  - [ ] 16.4 静态审计 `CaptureController.disable()` 调 `BreakpointRepo.clearAll()` + `CaptureRingBuffer.clear()` + `CaptureFloatingService.stop` 顺序, 防泄漏
+  - [ ] 16.5 全套必测单元(7 必 + 2 可选)文件 + import + 类声明静态检查通过, 类名/包路径无错位
+  - [ ] 16.6 提交规范: 按 `260716-feat-enhance-ad-detection` 分支或新建子分支 `260801-feat-traffic-capture`, 按 submodule-commit-workflow 规则提交本批次改动
+

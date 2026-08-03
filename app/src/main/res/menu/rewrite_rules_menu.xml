@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/action_import_rules"
+        android:title="@string/rewrite_rules_import"
+        android:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/action_export_rules"
+        android:title="@string/rewrite_rules_export"
+        android:showAsAction="ifRoom" />
+</menu>

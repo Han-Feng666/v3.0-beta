@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ImageView
+        android:id="@+id/detailBackground"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="拦截详情界面背景图"
+        android:scaleType="centerCrop"
+        android:src="@drawable/bg_fallback_capture" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/detailToolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="?attr/colorPrimaryContainer"
+        app:navigationIcon="?attr/homeAsUpIndicator"
+        app:menu="@menu/capture_detail"
+        app:titleTextColor="?attr/colorOnPrimaryContainer" />
+
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/detailTabs"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:tabMode="scrollable" />
+
+    <androidx.viewpager2.widget.ViewPager2
+        android:id="@+id/detailPager"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <LinearLayout
+        android:id="@+id/breakpointActionBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp"
+        android:visibility="gone">
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnPassThrough"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="4dp"
+            android:text="@string/capture_action_pass_through" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnReplace"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="4dp"
+            android:text="@string/capture_action_replace" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnDrop"
+            style="@style/Widget.Material3.Button"
+            android:backgroundTint="?attr/colorError"
+            android:textColor="?attr/colorOnError"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="@string/capture_action_drop" />
+    </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/action_breakpoint_rules"
+        android:title="@string/capture_breakpoint_rules_title"
+        android:showAsAction="never" />
+    <item
+        android:id="@+id/action_breakpoint_add_request"
+        android:title="@string/capture_breakpoint_kind_request"
+        android:showAsAction="never" />
+    <item
+        android:id="@+id/action_breakpoint_add_response"
+        android:title="@string/capture_breakpoint_kind_response"
+        android:showAsAction="never" />
+    <item
+        android:id="@+id/action_edit_toggle"
+        android:title="@string/capture_detail_action_edit"
+        android:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/action_replay"
+        android:title="@string/capture_detail_action_replay"
+        android:showAsAction="ifRoom" />
+    <item
+        android:id="@+id/action_add_to_adblock"
+        android:title="@string/capture_add_to_adblock"
+        android:showAsAction="never" />
+    <item
+        android:id="@+id/action_save_as_rule_request"
+        android:title="@string/rewrite_rules_save_as_rule_request"
+        android:showAsAction="never" />
+    <item
+        android:id="@+id/action_save_as_rule_response"
+        android:title="@string/rewrite_rules_save_as_rule_response"
+        android:showAsAction="never" />
+</menu>

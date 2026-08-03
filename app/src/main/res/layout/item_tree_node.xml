@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:paddingTop="3dp"
+    android:paddingBottom="3dp">
+
+    <TextView
+        android:id="@+id/tvIndent"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:textColor="@color/hf_text_secondary"
+        android:textSize="12sp" />
+
+    <TextView
+        android:id="@+id/tvExpand"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:paddingEnd="4dp"
+        android:textColor="@color/hf_text_secondary"
+        android:textSize="13sp" />
+
+    <TextView
+        android:id="@+id/tvNodeText"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:fontFamily="monospace"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="12sp" />
+
+</LinearLayout>

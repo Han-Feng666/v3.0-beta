@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <RadioGroup
+        android:id="@+id/rgKind"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="8dp">
+        <RadioButton
+            android:id="@+id/rbRequest"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            android:text="@string/capture_breakpoint_kind_request"
+            android:textSize="14sp" />
+        <RadioButton
+            android:id="@+id/rbResponse"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="@string/capture_breakpoint_kind_response"
+            android:textSize="14sp" />
+    </RadioGroup>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/capture_breakpoint_field_host"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="13sp" />
+    <EditText
+        android:id="@+id/etHost"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="example.com"
+        android:inputType="textUri"
+        android:fontFamily="monospace"
+        android:textSize="14sp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/capture_breakpoint_field_method"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="13sp" />
+    <EditText
+        android:id="@+id/etMethod"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="GET / POST *"
+        android:inputType="textCapCharacters"
+        android:fontFamily="monospace"
+        android:textSize="14sp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/capture_breakpoint_field_path"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="13sp" />
+    <EditText
+        android:id="@+id/etPath"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="/api/   (空 = 全部)"
+        android:inputType="textUri"
+        android:fontFamily="monospace"
+        android:textSize="14sp" />
+
+</LinearLayout>

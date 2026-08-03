@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fitsSystemWindows="false">
+
+    <ImageView
+        android:id="@+id/captureBackground"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="抓包界面背景图"
+        android:scaleType="centerCrop"
+        android:src="@drawable/bg_fallback_capture" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/captureToolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="?attr/colorPrimaryContainer"
+        android:title="@string/capture_title"
+        app:titleTextColor="?attr/colorOnPrimaryContainer" />
+
+    <com.google.android.material.materialswitch.MaterialSwitch
+        android:id="@+id/captureToggle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="16dp"
+        android:text="@string/capture_enable_toggle"
+        android:textOn="@string/capture_status_on"
+        android:textOff="@string/capture_status_off" />
+
+    <!-- 批次 D4 联动: 批量重放入口 + 选择条 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="4dp">
+        <Button
+            android:id="@+id/btnEnterSelection"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/capture_batch_select"
+            style="@style/Widget.Material3.Button.TextButton" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/selectionBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="8dp"
+        android:gravity="center_vertical"
+        android:background="?attr/colorSecondaryContainer"
+        android:visibility="gone">
+        <TextView
+            android:id="@+id/replaySelectedLabel"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="@string/capture_batch_replay_selected" />
+        <Button
+            android:id="@+id/btnReplaySelected"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/capture_detail_action_replay"
+            style="@style/Widget.Material3.Button.TonalButton" />
+        <Button
+            android:id="@+id/btnClearSelection"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/capture_batch_clear_selection"
+            style="@style/Widget.Material3.Button.TextButton" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="8dp">
+        <com.google.android.material.chip.Chip
+            android:id="@+id/modeChipByApp"
+            style="@style/Widget.Material3.Chip.Filter"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="@string/capture_mode_by_app" />
+        <com.google.android.material.chip.Chip
+            android:id="@+id/modeChipAllApps"
+            style="@style/Widget.Material3.Chip.Filter"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            android:text="@string/capture_mode_all_apps" />
+        <com.google.android.material.chip.Chip
+            android:id="@+id/filterChip"
+            style="@style/Widget.Material3.Chip.Filter"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="@string/capture_filter" />
+    </LinearLayout>
+
+    <!-- 批次 E5d: 跨条目关键字搜索框 — 实时过滤列表 -->
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/quickSearchLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="4dp"
+        android:hint="@string/capture_search_hint"
+        style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/quickSearch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:imeOptions="actionSearch"
+            android:inputType="text"
+            android:maxLines="1"
+            android:textSize="13sp" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/captureList"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingBottom="80dp" />
+        <TextView
+            android:id="@android:id/empty"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="@string/capture_empty_hint"
+            android:visibility="gone" />
+    </FrameLayout>
+    </LinearLayout>
+</FrameLayout>

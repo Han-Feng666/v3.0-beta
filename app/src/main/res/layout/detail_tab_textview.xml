@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <!-- 查看模式: 三个 Chip 单选 -->
+    <RadioGroup
+        android:id="@+id/rgViewMode"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingHorizontal="8dp"
+        android:paddingVertical="4dp">
+
+        <RadioButton
+            android:id="@+id/rbRaw"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:checked="true"
+            android:text="@string/capture_view_mode_raw"
+            android:textSize="13sp" />
+
+        <RadioButton
+            android:id="@+id/rbTree"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/capture_view_mode_tree"
+            android:textSize="13sp" />
+
+        <RadioButton
+            android:id="@+id/rbPreview"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/capture_view_mode_preview"
+            android:textSize="13sp" />
+    </RadioGroup>
+
+    <ScrollView
+        android:id="@+id/scroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:id="@+id/headerLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textStyle="bold"
+                android:paddingBottom="4dp" />
+
+            <EditText
+                android:id="@+id/headersEditor"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minLines="3"
+                android:gravity="top|start"
+                android:fontFamily="monospace"
+                android:textSize="13sp"
+                android:background="@android:drawable/editbox_background"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:enabled="false" />
+
+            <TextView
+                android:id="@+id/bodyLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textStyle="bold"
+                android:paddingTop="8dp"
+                android:paddingBottom="4dp"
+                android:text="@string/capture_detail_body_label" />
+
+            <!-- Body 区域: 三态切换 -->
+            <!-- Raw 模式: 可编辑 EditText -->
+            <EditText
+                android:id="@+id/bodyEditor"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minLines="6"
+                android:gravity="top|start"
+                android:fontFamily="monospace"
+                android:textSize="13sp"
+                android:background="@android:drawable/editbox_background"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:enabled="false" />
+
+            <!-- Tree 模式: RecyclerView 渲染 JSON/XML 节点 -->
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/treeView"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="gone"
+                android:nestedScrollingEnabled="false" />
+
+            <!-- Preview 模式: 图片渲染 + Hex 视图 -->
+            <FrameLayout
+                android:id="@+id/previewContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="gone">
+
+                <ImageView
+                    android:id="@+id/imgPreview"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:adjustViewBounds="true"
+                    android:scaleType="fitCenter" />
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/hexView"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:nestedScrollingEnabled="false" />
+            </FrameLayout>
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>
