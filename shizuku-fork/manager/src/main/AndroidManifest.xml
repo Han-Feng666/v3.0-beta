@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <!-- Shizuku API permission (license-mandated rename) -->
+    <permission-group
+        android:name="com.HanFeng.permission.shizuku-group.API"
+        android:description="@string/permission_group_description"
+        android:icon="@drawable/ic_system_icon"
+        android:label="@string/permission_group_label" />
+
+    <permission
+        android:name="com.HanFeng.permission.shizuku.MANAGER"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.HanFeng.permission.shizuku.MANAGER" />
+
+    <permission
+        android:name="com.HanFeng.permission.shizuku.API_V23"
+        android:description="@string/permission_description"
+        android:icon="@drawable/ic_system_icon"
+        android:label="@string/permission_label"
+        android:permissionGroup="com.HanFeng.permission.shizuku-group.API"
+        android:protectionLevel="dangerous" />
+    <uses-permission
+        android:name="com.HanFeng.permission.shizuku.API_V23"
+        tools:node="remove" />
+
+    <!--
+      兼容官方 Shizuku SDK (dev.rikka.shizuku:api / dev.rikka.shizuku:provider) 客户端声明:
+      第三方 APP 的 manifest 里通常只写 <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />。
+      不声明同名 <permission> 元素,系统就把该串视作未定义权限——
+      PermissionManagerApis.checkPermission / grantRuntimePermission 在某些 ROM 上会一律拒绝。
+      fork 同时声明一份同名 <permission> 让这一类官方 SDK 客户端的运行时权限查询能落到本权威定义,
+      protectionLevel=dangerous 与官方保持一致,允许第三方 APP 申请并通过用户授权拿到。
+    -->
+    <permission
+        android:name="moe.shizuku.manager.permission.API_V23"
+        android:description="@string/permission_description"
+        android:icon="@drawable/ic_system_icon"
+        android:label="@string/permission_label"
+        android:permissionGroup="com.HanFeng.permission.shizuku-group.API"
+        android:protectionLevel="dangerous" />
+
+    <permission
+        android:name="${applicationId}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+        android:protectionLevel="signature"
+        tools:node="remove" />
+    <uses-permission
+        android:name="${applicationId}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+        tools:node="remove" />
+
+    <application
+        android:allowBackup="true"
+        android:autoRevokePermissions="allowed"
+        android:directBootAware="true"
+        android:enableOnBackInvokedCallback="true"
+        tools:ignore="GoogleAppIndexingWarning"
+        tools:remove="android:appComponentFactory"
+        tools:targetApi="33">
+
+        <!-- 第三方应用申请 Shizuku 授权对话框 -->
+        <activity
+            android:name="moe.shizuku.manager.authorization.RequestPermissionActivity"
+            android:directBootAware="true"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL"
+            android:theme="@style/GrantPermissions">
+            <intent-filter>
+                <action android:name="${applicationId}.intent.action.REQUEST_PERMISSION" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- 兼容老 v10 客户端的 binder 请求(我们空实现,仅占位) -->
+        <receiver
+            android:name="moe.shizuku.manager.receiver.ShizukuReceiver"
+            android:directBootAware="true"
+            android:enabled="true"
+            android:exported="true"
+            tools:ignore="ExportedReceiver">
+            <intent-filter>
+                <action android:name="rikka.shizuku.intent.action.REQUEST_BINDER" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 开机自启 Shizuku server(root 路径) -->
+        <receiver
+            android:name="moe.shizuku.manager.receiver.BootCompleteReceiver"
+            android:directBootAware="true"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Shizuku server binder 暴露 -->
+        <provider
+            android:name="moe.shizuku.manager.ShizukuManagerProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:directBootAware="true"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+    </application>
+
+</manifest>

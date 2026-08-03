@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    快捷设置磁贴图标: “HF”两个大写英文 (HanFeng 缩写)。
+    SystemUI 会按单色 tint 渲染, 使用纯白矩形笔画保证小尺寸清晰。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- H: 左竖 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M3,4h2v16h-2z" />
+    <!-- H: 右竖 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M12,4h2v16h-2z" />
+    <!-- H: 中横 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M3,11h11v2h-11z" />
+
+    <!-- F: 竖 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M16,4h2v16h-2z" />
+    <!-- F: 顶横 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M16,4h6v2h-6z" />
+    <!-- F: 中横 -->
+    <path android:fillColor="#FFFFFF" android:pathData="M16,11h5v2h-5z" />
+</vector>

@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@drawable/bg_main">
+
+    <!-- 标题栏 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="应用进程监控"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnBack"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:background="@drawable/bg_button"
+            android:backgroundTint="@null"
+            android:minWidth="56dp"
+            android:paddingHorizontal="12dp"
+            android:text="返回"
+            android:textAllCaps="false"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <!-- 汇总信息 -->
+    <TextView
+        android:id="@+id/tvRunningSummary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginBottom="8dp"
+        android:background="@drawable/bg_panel"
+        android:padding="12dp"
+        android:text="正在加载..."
+        android:textColor="@color/hf_text_primary"
+        android:textSize="13sp" />
+
+    <!-- 排序切换 -->
+    <RadioGroup
+        android:id="@+id/rgSort"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginBottom="8dp"
+        android:orientation="horizontal">
+        <RadioButton
+            android:id="@+id/rbSortMem"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            android:text="按内存"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="13sp" />
+        <RadioButton
+            android:id="@+id/rbSortCpu"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="按 CPU"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="13sp" />
+    </RadioGroup>
+
+    <!-- 授权入口（未授予「使用情况访问」权限时显示） -->
+    <Button
+        android:id="@+id/btnGrantUsage"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginBottom="8dp"
+        android:background="@drawable/bg_button"
+        android:backgroundTint="@null"
+        android:padding="12dp"
+        android:text="点击授予「使用情况访问」权限"
+        android:textAllCaps="false"
+        android:textColor="@color/hf_text_primary"
+        android:textSize="14sp"
+        android:visibility="gone" />
+
+    <!-- 列表区域 -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rvRunningApps"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false"
+        android:paddingHorizontal="16dp"
+        android:paddingBottom="16dp" />
+
+</LinearLayout>

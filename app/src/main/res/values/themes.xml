@@ -2,47 +2,82 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <style name="Theme.HanFengAdBlock" parent="Theme.Material3.Light.NoActionBar">
         <item name="android:windowTranslucentStatus">false</item>
+        <item name="android:windowBackground">@drawable/bg_main</item>
+        <item name="android:colorBackground">@color/hf_background_start</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="o_mr1">shortEdges</item>
-        <item name="colorPrimary">@color/hf_text_primary</item>
+        <item name="colorPrimary">@color/hf_brand_primary</item>
+        <item name="colorPrimaryDark">@color/hf_brand_primary_dark</item>
+        <item name="colorAccent">@color/hf_brand_accent</item>
+        <item name="colorOnPrimary">@color/hf_button_primary_text</item>
         <item name="colorSurface">@color/hf_surface</item>
         <item name="android:colorButtonNormal">@color/hf_surface</item>
         <item name="colorButtonNormal">@color/hf_surface</item>
         <item name="buttonStyle">@style/Widget.HanFeng.Button</item>
         <item name="android:buttonStyle">@style/Widget.HanFeng.Button</item>
         <item name="materialButtonStyle">@style/Widget.HanFeng.MaterialButton</item>
+        <!-- 关键修复:Xiaomi MIUI/HyperOS Android 16 上 m3_alert_dialog 布局 line 38 缺 layout_width
+             导致 MaterialAlertDialogBuilder.show() 必崩。统一指向 AppCompat AlertDialog 主题规避。 -->
         <item name="android:alertDialogTheme">@style/ThemeOverlay.HanFeng.AppCompatDialog</item>
         <item name="alertDialogTheme">@style/ThemeOverlay.HanFeng.AppCompatDialog</item>
-        <item name="materialAlertDialogTheme">@style/ThemeOverlay.HanFeng.Dialog</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.HanFeng.AppCompatDialog</item>
     </style>
 
-    <style name="ThemeOverlay.HanFeng.Dialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
-        <item name="materialAlertDialogBodyTextStyle">@style/TextAppearance.HanFeng.DialogBody</item>
-        <item name="materialAlertDialogTitleTextStyle">@style/TextAppearance.HanFeng.DialogTitle</item>
-        <item name="backgroundTint">@color/hf_surface_strong</item>
+    <!-- 已弃用:保留以兼容老代码引用 ThemeOverlay.HanFeng.Dialog 的地方,但内部直接走 AppCompat 主题,
+         避免 m3_alert_dialog 布局在 Xiaomi ROM 上 inflate 失败 -->
+    <style name="ThemeOverlay.HanFeng.Dialog" parent="ThemeOverlay.AppCompat.Dialog.Alert">
         <item name="android:windowBackground">@drawable/bg_dialog_window</item>
-        <item name="shapeAppearanceOverlay">@style/ShapeAppearanceOverlayHanFengDialog</item>
+        <item name="android:colorBackground">@color/hf_surface_elevated</item>
+        <item name="colorAccent">@color/hf_brand_primary</item>
+        <item name="android:textColorPrimary">@color/hf_text_primary</item>
+        <item name="android:textColorSecondary">@color/hf_text_secondary</item>
+        <item name="android:windowAnimationStyle">@style/HanFengDialogAnimation</item>
     </style>
 
     <style name="ThemeOverlay.HanFeng.AppCompatDialog" parent="ThemeOverlay.AppCompat.Dialog.Alert">
         <item name="android:windowBackground">@drawable/bg_dialog_window</item>
-        <item name="android:colorBackground">@color/hf_surface_strong</item>
-        <item name="colorAccent">@color/hf_text_primary</item>
+        <item name="android:colorBackground">@color/hf_surface_elevated</item>
+        <item name="colorAccent">@color/hf_brand_primary</item>
+        <item name="android:textColorPrimary">@color/hf_text_primary</item>
+        <item name="android:textColorSecondary">@color/hf_text_secondary</item>
     </style>
 
     <style name="ShapeAppearanceOverlayHanFengDialog" parent="ShapeAppearance.Material3.Corner.Full">
         <item name="cornerFamily">rounded</item>
-        <item name="cornerSize">24dp</item>
+        <item name="cornerSize">20dp</item>
+    </style>
+
+    <style name="HanFengDialogAnimation">
+        <item name="android:windowEnterAnimation">@anim/dialog_enter</item>
+        <item name="android:windowExitAnimation">@anim/dialog_exit</item>
     </style>
 
     <style name="TextAppearance.HanFeng.DialogTitle" parent="TextAppearance.Material3.TitleLarge">
         <item name="android:textColor">@color/hf_text_primary</item>
+        <item name="android:textStyle">bold</item>
     </style>
 
     <style name="TextAppearance.HanFeng.DialogBody" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textColor">@color/hf_text_secondary</item>
+        <item name="android:lineSpacingMultiplier">1.25</item>
+    </style>
+
+    <style name="Widget.HanFeng.DialogButton.Positive" parent="Widget.Material3.Button.TextButton.Dialog">
+        <item name="android:textColor">@color/hf_brand_primary</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+
+    <style name="Widget.HanFeng.DialogButton.Negative" parent="Widget.Material3.Button.TextButton.Dialog">
+        <item name="android:textColor">@color/hf_text_secondary</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+
+    <style name="Widget.HanFeng.DialogButton.Neutral" parent="Widget.Material3.Button.TextButton.Dialog">
         <item name="android:textColor">@color/hf_text_primary</item>
+        <item name="android:textAllCaps">false</item>
     </style>
 
     <style name="Widget.HanFeng.Button" parent="Widget.AppCompat.Button">
@@ -65,5 +100,42 @@
         <item name="android:textColor">@color/hf_text_primary</item>
         <item name="android:textAllCaps">false</item>
         <item name="cornerRadius">16dp</item>
+    </style>
+
+    <style name="Widget.HanFeng.MaterialButton.Primary" parent="Widget.Material3.Button">
+        <item name="android:background">@drawable/bg_button_primary</item>
+        <item name="backgroundTint">@color/hf_brand_primary</item>
+        <item name="android:textColor">@color/hf_button_primary_text</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="cornerRadius">16dp</item>
+        <item name="android:elevation">2dp</item>
+        <item name="android:minHeight">48dp</item>
+    </style>
+
+    <style name="Widget.HanFeng.Chip.Blocked" parent="Widget.Material3.Chip.Assist">
+        <item name="chipBackgroundColor">@color/hf_chip_blocked</item>
+        <item name="android:textColor">#FFFFFFFF</item>
+        <item name="chipStrokeWidth">0dp</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+
+    <style name="Widget.HanFeng.Chip.Allowed" parent="Widget.Material3.Chip.Assist">
+        <item name="chipBackgroundColor">@color/hf_chip_allowed</item>
+        <item name="android:textColor">#FFFFFFFF</item>
+        <item name="chipStrokeWidth">0dp</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+
+    <style name="TextAppearance.HanFeng.HeadingLarge" parent="TextAppearance.Material3.HeadlineSmall">
+        <item name="android:textColor">@color/hf_text_primary</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+    <style name="TextAppearance.HanFeng.HeadingMedium" parent="TextAppearance.Material3.TitleMedium">
+        <item name="android:textColor">@color/hf_text_primary</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+    <style name="TextAppearance.HanFeng.BodyMuted" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textColor">@color/hf_text_secondary</item>
     </style>
 </resources>

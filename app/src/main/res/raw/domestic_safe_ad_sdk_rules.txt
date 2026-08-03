@@ -1,0 +1,130 @@
+# 寒枫保守版国内主流广告 SDK 规则
+# 目标：优先拦截明显的广告投放、竞价、素材、广告日志域名，尽量不影响正常联网功能
+# 说明：
+# 1. 本文件故意不做激进泛封禁，不直接屏蔽大厂主站、登录、支付、云服务、更新域名
+# 2. 适合先小范围导入测试；如果个别应用广告仍残留，再结合 unknown-vendors.txt 继续补
+# 3. 格式使用纯域名，便于当前应用直接导入
+
+# 腾讯广告 / 优量汇
+c.gdt.qq.com
+i.gdt.qq.com
+p.gdt.qq.com
+v.gdt.qq.com
+win.gdt.qq.com
+qzs.gdtimg.com
+union.gdtimg.com
+
+# 字节跳动 / 穿山甲 / GroMore
+api-access.pangolin-sdk-toutiao.com
+api-access.pangolin-sdk-toutiao1.com
+api-access.pangolin-sdk-toutiao2.com
+api-access.pangolin-sdk-toutiao-b.com
+log-api.pangolin-sdk-toutiao.com
+log-api.pangolin-sdk-toutiao1.com
+log-api.pangolin-sdk-toutiao2.com
+log-api.pangolin-sdk-toutiao-b.com
+
+# 百度联盟 / MobAds
+mobads.baidu.com
+mobads-logs.baidu.com
+cpro.baidu.com
+pos.baidu.com
+afd.baidu.com
+
+# 快手广告
+open.e.kuaishou.com
+adkwai.com
+adtrack.e.kuaishou.com
+
+# 华为广告
+ads-drcn.hispace.hicloud.com
+ads-drcn.hismarttv.com
+
+# 小米广告
+ad.xiaomi.com
+api.ad.xiaomi.com
+sdkconfig.ad.xiaomi.com
+tracking.miui.com
+
+# OPPO 广告
+uapi.ads.heytapmobi.com
+adx.ads.heytapmobi.com
+ck.ads.heytapmobi.com
+adsfs.heytapimage.com
+
+# vivo 广告
+adlog.vivo.com.cn
+adreq.vivo.com.cn
+ads-marketing-vivofs.vivo.com.cn
+
+# Sigmob
+sdk.ad.sigmob.com
+log.sigmob.com
+adservice.sigmob.cn
+
+# Mintegral / Mobvista / MBridge
+api.mbridge.com
+analytics.mbridge.com
+setting.mobvista.com
+adx-api.mobvista.com
+bid.machine.mbridge.com
+
+# TopOn / AnyThink
+api.toponad.com
+tk.anythinktech.com
+da.anythinktech.com
+
+# TradPlus
+sdk.tradplusad.com
+tracking.tradplusad.com
+config.tradplusad.com
+
+# Reyun 热云
+log.reyun.com
+tracker.trackingio.com
+
+# 个推广告相关
+sdk.open.talk.getui.com
+sdk-open-phone.getui.com
+
+# 极光广告相关
+ad.jiguang.cn
+jads.jiguang.cn
+
+# 友盟广告 / 统计中的广告相关上报
+alog.umeng.com
+ulogs.umeng.com
+
+# Vpon
+ad.vpon.com
+
+# Bigo Ads
+ads.bigo.sg
+
+# Maticoo
+ads.maticoo.com
+sdk.maticoo.com
+
+# Kidoz
+sdkapi.kidoz.net
+
+# 腾讯 / QQ 浏览器补充
+sdk.e.qq.com
+adsmind.gdtimg.com
+
+# 阿里 / UC / 阿里妈妈补充
+adashbc.m.taobao.com
+h-adashx.ut.taobao.com
+adashx4yt.m.taobao.com
+applog.uc.cn
+
+# 百度补充
+unionimage.baidu.com
+eclick.baidu.com
+duclick.baidu.com
+
+# 小说类高频广告子域
+adlaunch.qimao.com
+adlaunch.fqnovel.com
+readerads.qidian.com
+adapi.wtzw.com

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- LSPosed 引擎默认作用域: system + 联网关键应用 (用户可在 LSPosed 内进一步勾选具体应用) -->
+    <string-array name="xposed_scope">
+        <item>android</item>
+        <item>com.android.systemui</item>
+        <item>com.android.settings</item>
+        <item>com.google.android.gms</item>
+        <item>com.google.android.gsf</item>
+    </string-array>
+</resources>

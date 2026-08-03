@@ -5,6 +5,7 @@
     <color name="hf_border">#33000000</color>
     <color name="hf_text_primary">#DE000000</color>
     <color name="hf_text_secondary">#99000000</color>
+    <color name="hf_text_hint">#66000000</color>
     <color name="hf_manual_rule">#CC0D47A1</color>
     <color name="hf_import_rule">#CC2E7D32</color>
     <color name="hf_selected">#33FFB300</color>
@@ -12,4 +13,27 @@
     <color name="hf_allowed_green">#2E7D32</color>
     <color name="hf_background_start">#FFE6EEF9</color>
     <color name="hf_background_end">#FFD8EDE8</color>
+
+    <!-- Brand & enhanced UI palette -->
+    <color name="hf_brand_primary">#FF3367D6</color>
+    <color name="hf_brand_primary_dark">#FF1A4FA0</color>
+    <color name="hf_brand_primary_light">#FF6B9BFF</color>
+    <color name="hf_brand_accent">#FF00BFA5</color>
+    <color name="hf_brand_danger">#FFE53935</color>
+    <color name="hf_brand_warning">#FFFFA000</color>
+    <color name="hf_surface_elevated">#FFFFFFFF</color>
+    <color name="hf_surface_dim">#CCFFFFFF</color>
+    <color name="hf_border_subtle">#1A000000</color>
+    <color name="hf_shadow">#14000000</color>
+    <color name="hf_chip_blocked">#FFE53935</color>
+    <color name="hf_chip_allowed">#FF00BFA5</color>
+    <color name="hf_chip_pending">#FFFFA000</color>
+    <color name="hf_gradient_block_start">#FFE53935</color>
+    <color name="hf_gradient_block_end">#FFB71C1C</color>
+    <color name="hf_gradient_allow_start">#FF00BFA5</color>
+    <color name="hf_gradient_allow_end">#FF00897B</color>
+    <color name="hf_button_primary">#FF3367D6</color>
+    <color name="hf_button_primary_text">#FFFFFFFF</color>
+    <color name="hf_button_secondary">#33000000</color>
+    <color name="hf_button_secondary_text">#DE000000</color>
 </resources>

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>HanFeng 地图选点</title>
+<style>
+  html,body{height:100%;margin:0;overflow:hidden;font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:#dbe7ef;color:#1f2933}
+  #map{position:absolute;inset:0;background:#dbe7ef;background-image:linear-gradient(rgba(31,41,51,.22) 1px,transparent 1px),linear-gradient(90deg,rgba(31,41,51,.22) 1px,transparent 1px);background-size:48px 48px;touch-action:none;overflow:hidden}
+  #tiles{position:absolute;left:0;top:0;right:0;bottom:0;will-change:transform}
+  .tile{position:absolute;width:256px;height:256px;background:#e7eef4;border:1px solid rgba(31,41,51,.08);box-sizing:border-box}
+  .tile.fail{display:flex;align-items:center;justify-content:center;font-size:11px;color:#5b6773;background:#e7eef4}
+  #searchRow{position:absolute;top:10px;left:10px;right:10px;z-index:20;display:flex;gap:6px}
+  #q{flex:1;min-width:0;padding:8px 10px;border:1px solid #b5c0ca;border-radius:6px;font-size:14px;background:rgba(255,255,255,.96);box-shadow:0 1px 4px rgba(0,0,0,.15)}
+  button{border:none;border-radius:6px;background:#2f6fed;color:#fff;font-size:14px;box-shadow:0 1px 4px rgba(0,0,0,.15)}
+  #searchBtn{padding:8px 14px}
+  #zoom{position:absolute;right:10px;top:58px;z-index:20;display:flex;flex-direction:column;gap:6px}
+  #zoom button{width:38px;height:38px;font-size:20px;font-weight:700;background:#fff;color:#243447}
+  #results{position:absolute;top:54px;left:10px;right:56px;z-index:20;background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.25);max-height:42%;overflow:auto;display:none}
+  .res{padding:9px 12px;font-size:13px;border-bottom:1px solid #f0f0f0;cursor:pointer;line-height:1.35}.res:active{background:#f0f4ff}
+  #info{position:absolute;bottom:10px;left:10px;right:10px;z-index:20;background:rgba(255,255,255,.96);border-radius:10px;padding:10px 12px;font-size:12px;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+  #info .coord{font-weight:700;color:#2f6fed}#pickBtn{width:100%;margin-top:8px;padding:11px;border-radius:8px;background:#e05d2f;font-size:15px;font-weight:700}
+  #hint{margin-top:4px;color:#5b6773}.crosshair{position:absolute;left:50%;top:50%;z-index:15;width:0;height:0;pointer-events:none}.crosshair:before{content:"";position:absolute;left:-14px;top:0;width:28px;border-top:2px solid #e05d2f}.crosshair:after{content:"";position:absolute;left:0;top:-14px;height:28px;border-left:2px solid #e05d2f}.ring{position:absolute;left:50%;top:50%;z-index:15;width:22px;height:22px;margin-left:-11px;margin-top:-11px;border:2px solid #e05d2f;border-radius:50%;background:rgba(224,93,47,.15);pointer-events:none}
+</style>
+</head>
+<body>
+<div id="map"><div id="tiles"></div></div>
+<div class="crosshair"></div><div class="ring"></div>
+<div id="searchRow"><input id="q" inputmode="search" enterkeyhint="search" autocomplete="off" placeholder="搜索地名 / 地址，如 上海外滩"><button id="searchBtn">搜索</button></div>
+<div id="zoom"><button id="zin">+</button><button id="zout">-</button></div>
+<div id="results"></div>
+<div id="info">拖动地图，十字准星中心即所选坐标<br>纬度: <span class="coord" id="lat">-</span>&nbsp;&nbsp;经度: <span class="coord" id="lng">-</span><div id="hint">地图瓦片来自 OpenStreetMap；网络不可用时仍可根据网格和坐标选点。</div><button id="pickBtn">使用此坐标开启模拟</button></div>
+<script>
+var center={lat:31.2304,lng:121.4737}, zoom=12, tileSize=256, dragging=false, last={x:0,y:0};
+var tiles=document.getElementById('tiles'), map=document.getElementById('map');
+function clamp(v,min,max){return Math.max(min,Math.max(v,min));}
+function project(lat,lng,z){var s=tileSize*Math.pow(2,z), sin=Math.sin(lat*Math.PI/180); return {x:(lng+180)/360*s,y:(0.5-Math.log((1+sin)/(1-sin))/(4*Math.PI))*s};}
+function unproject(x,y,z){var s=tileSize*Math.pow(2,z), lng=x/s*360-180, n=Math.PI-2*Math.PI*y/s, lat=180/Math.PI*Math.atan(0.5*(Math.exp(n)-Math.exp(-n))); return {lat:lat,lng:lng};}
+function updateText(){document.getElementById('lat').textContent=center.lat.toFixed(6);document.getElementById('lng').textContent=center.lng.toFixed(6);}
+// 瓦片多源回退: OSM 在国内常被墙, 依次尝试 高德/腾讯/OSM。全部失败显示提示并保留网格底图。
+function tileSources(z,x,y){
+  return [
+    'https://webrd01.is.autonavi.com/appmaptile?style=7&x='+x+'&y='+y+'&z='+z,
+    'https://rt0.map.gtimg.com/tile?z='+z+'&x='+x+'&y='+y+'&type=vector&styleid=1',
+    'https://tile.openstreetmap.org/'+z+'/'+x+'/'+y+'.png'
+  ];
+}
+function loadTile(img,z,x,y,idx){
+  if(idx>=tileSources(z,x,y).length){img.className='tile fail';img.removeAttribute('src');img.textContent='瓦片不可用(可拖动网格选点)';return;}
+  img.onerror=function(){img.onerror=null;img.removeAttribute('src');loadTile(img,z,x,y,idx+1);};
+  img.className='tile';
+  img.src=tileSources(z,x,y)[idx];
+}
+function render(){
+  var w=map.clientWidth||document.documentElement.clientWidth||360;
+  var h=map.clientHeight||document.documentElement.clientHeight||480;
+  updateText();
+  var c=project(center.lat,center.lng,zoom), startX=Math.floor((c.x-w/2)/tileSize)-1,endX=Math.floor((c.x+w/2)/tileSize)+1,startY=Math.floor((c.y-h/2)/tileSize)-1,endY=Math.floor((c.y+h/2)/tileSize)+1,max=Math.pow(2,zoom);
+  tiles.innerHTML='';
+  for(var x=startX;x<=endX;x++){for(var y=startY;y<=endY;y++){if(y<0||y>=max)continue;var tx=((x%max)+max)%max, left=x*tileSize-c.x+w/2, top=y*tileSize-c.y+h/2, img=document.createElement('img');img.className='tile';img.style.left=left+'px';img.style.top=top+'px';img._lastFailed=-1;loadTile(img,zoom,tx,y,0);tiles.appendChild(img);}}
+}
+// 关键修复: WebView 在 dialog.show() 之前 loadUrl 时 clientWidth=0, 首帧瓦片渲染范围为空。
+// 监听尺寸变化 + 首帧延迟重试, 弹窗真正获得布局后重绘地图。
+window.addEventListener('resize',function(){render();});
+setTimeout(function(){render();},200);
+function pan(dx,dy){var p=project(center.lat,center.lng,zoom);center=unproject(p.x-dx,p.y-dy,zoom);center.lat=clamp(center.lat,-85,85);render();}
+map.addEventListener('pointerdown',function(e){dragging=true;last={x:e.clientX,y:e.clientY};map.setPointerCapture(e.pointerId);});
+map.addEventListener('pointermove',function(e){if(!dragging)return;pan(e.clientX-last.x,e.clientY-last.y);last={x:e.clientX,y:e.clientY};});
+map.addEventListener('pointerup',function(e){dragging=false;try{map.releasePointerCapture(e.pointerId);}catch(_){}});
+document.getElementById('zin').onclick=function(){zoom=clamp(zoom+1,3,18);render();};document.getElementById('zout').onclick=function(){zoom=clamp(zoom-1,3,18);render();};
+function hideResults(){document.getElementById('results').style.display='none';}
+// 点击输入框强制获得焦点并请求键盘: Dialog 内 WebView 偶发 input 聚焦但不弹软键盘,
+// 显式 focus() 触发 InputMethodManager 弹起。
+var q=document.getElementById('q');
+q.addEventListener('touchstart',function(e){q.focus();}, {passive:true});
+q.addEventListener('click',function(e){q.focus();});
+document.getElementById('searchBtn').onclick=doSearch;document.getElementById('q').addEventListener('keydown',function(e){if(e.key==='Enter')doSearch();});
+function doSearch(){var q=document.getElementById('q').value.trim(),box=document.getElementById('results');if(!q)return;box.style.display='block';box.innerHTML='<div class="res">搜索中...</div>';fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&accept-language=zh&q='+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(items){box.innerHTML='';if(!items||!items.length){box.innerHTML='<div class="res">未找到结果，可拖动地图或手动输入坐标</div>';return;}items.forEach(function(it){var d=document.createElement('div');d.className='res';d.textContent=it.display_name||it.name||'';d.onclick=function(){center={lat:parseFloat(it.lat),lng:parseFloat(it.lon)};zoom=16;hideResults();render();};box.appendChild(d);});}).catch(function(){box.innerHTML='<div class="res">搜索失败，请检查网络；仍可拖动网格按坐标选点</div>';});}
+document.getElementById('pickBtn').onclick=function(){try{AndroidPicker.onPick(center.lat,center.lng);}catch(e){document.getElementById('hint').textContent='桥接失败: '+e.message;}};
+render();
+</script>
+</body>
+</html>

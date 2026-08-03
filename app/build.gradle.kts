@@ -11,8 +11,8 @@ android {
         applicationId = "com.HanFeng"
         minSdk = 24
         targetSdk = 35
-        versionCode = 302
-        versionName = "2.12.4"
+        versionCode = 306
+        versionName = "3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -46,6 +46,13 @@ android {
         resources {
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
+        jniLibs {
+            // 让 PM 在安装时把 APK 内的 .so 解压到 /data/app/<pkg>/lib/<abi>/
+            // Shizuku server 进程(app_process root)以绝对路径加载 libshizuku-rish.so / librish.so
+            // 必须解压到磁盘上才能被 root 进程透过 isolated namespace 加载,
+            // 仅有 zip 中的 .so 在 Android 13+ 的 isolated loader 下 dlopen 会 "not found"
+            useLegacyPackaging = true
+        }
     }
 }
 
@@ -70,7 +77,25 @@ dependencies {
     implementation("org.brotli:dec:0.1.2")
     implementation("dev.rikka.shizuku:api:$shizukuVersion")
     implementation("dev.rikka.shizuku:provider:$shizukuVersion")
-    
+    // 官方 AuthorizationManager 通过 binder 事务 getApplications 拿应用列表时,
+    // reply 里用 ParcelableListSlice 反序列化,必须依赖此包
+    implementation("dev.rikka.rikkax.parcelablelist:parcelablelist:2.0.1")
+
+    // 内置 Shizuku fork：仅取 starter native 二进制 (libshizuku.so / librish.so)，
+    // RequestPermissionActivity、BootCompleteReceiver 等 Activity/Receiver 组件也是从这里来的。
+    // 客户端 SDK 仍然使用 dev.rikka.shizuku:api，不重复引入 fork 的 :api module
+    implementation(project(":shizuku-fork:manager"))
+    implementation(project(":shizuku-fork:server"))
+    implementation(project(":shizuku-fork:starter"))
+    implementation(project(":shizuku-fork:server-shared"))
+
+    // shizuku-fork:manager 拉的 transitive deps 可能升到 androidx.core 1.16.0，需 AGP 8.6+，
+    // 当前是 AGP 8.5.0，故强制压回 1.13.1
+    configurations.all {
+        resolutionStrategy.force("androidx.core:core:1.13.1")
+        resolutionStrategy.force("androidx.core:core-ktx:1.13.1")
+    }
+
     // P2.2 新增：单元测试依赖
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.mockito:mockito-core:5.12.0")
@@ -78,4 +103,7 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+
+    // LSPosed/Xposed API - 仅编译期需要, 运行期由用户设备上的 LSPosed 框架提供
+    compileOnly("de.robv.android.xposed:api:82")
 }

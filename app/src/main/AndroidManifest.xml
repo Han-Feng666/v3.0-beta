@@ -6,10 +6,21 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- ============ 定位模拟权限 (MockLocationProvider) ============ -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_MOCK_LOCATION" tools:ignore="MockLocation" />
+    <!-- 用于查 WiFi 信息 (某些场景的扫描结果 hook 兜底确认) -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
@@ -17,10 +28,19 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+
+    <!-- Fork server 用的 Shizuku 客户端权限认证。server 端 BinderSender.sendBinder 通过此权限识别客户端 -->
+    <uses-permission android:name="com.HanFeng.permission.shizuku.API_V23" />
+    <!-- 官方 SDK dev.rikka.shizuku:provider 旧版本兼容 (server 端同时识别官方包名) -->
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+    <!-- Manager 权限 (主 app 既是客户端也是宿主管理端,声明避免子模块 Provider 配置不通过) -->
+    <uses-permission android:name="com.HanFeng.permission.shizuku.MANAGER" />
 
     <application
         android:name="com.HanFeng.HanFengApp"
         android:allowBackup="true"
+        android:extractNativeLibs="true"
         android:largeHeap="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -29,6 +49,20 @@
         android:theme="@style/Theme.HanFengAdBlock"
         android:usesCleartextTraffic="true"
         tools:targetApi="31">
+
+        <!-- ============ LSPosed/Xposed 模块声明 ============ -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="HanFeng 定位模拟 + WiFi 信息改写模块" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="82" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
 
         <activity
             android:name="com.HanFeng.ui.WhitelistActivity"
@@ -39,7 +73,18 @@
             android:exported="false" />
 
         <activity
+            android:name="com.HanFeng.ui.MapPickerActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize|stateHidden" />
+
+        <activity
             android:name="com.HanFeng.ui.SettingsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name="com.HanFeng.ui.ShizukuPermissionManageActivity"
             android:exported="false" />
 
         <activity
@@ -75,12 +120,56 @@
             android:exported="false" />
 
         <activity
+            android:name="com.HanFeng.ui.AppFreezeActivity"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.GameAntiMarkActivity"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.GamePackageListActivity"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.RewardActivity"
+            android:exported="false" />
+
+        <activity
             android:name="com.HanFeng.ui.PromoComponentGovernActivity"
             android:exported="false" />
 
         <activity
             android:name="com.HanFeng.ui.GuideActivity"
             android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.RunningAppsActivity"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.FloatingBallSettingsActivity"
+            android:exported="false" />
+
+        <activity
+            android:name="com.HanFeng.ui.capture.CaptureDetailActivity"
+            android:exported="false"
+            android:label="@string/capture_detail_title" />
+
+        <activity
+            android:name="com.HanFeng.ui.capture.BreakpointRulesActivity"
+            android:exported="false"
+            android:label="@string/capture_breakpoint_rules_title" />
+
+        <activity
+            android:name="com.HanFeng.ui.capture.CaptureSettingsActivity"
+            android:exported="false"
+            android:label="@string/capture_settings_title" />
+
+        <activity
+            android:name="com.HanFeng.ui.capture.RewriteRulesActivity"
+            android:exported="false"
+            android:label="@string/rewrite_rules_title" />
 
         <activity
             android:name="com.HanFeng.ui.RankingDetailActivity"
@@ -131,6 +220,16 @@
             android:process=":shizuku_conn_owner"
             tools:ignore="Instantiatable" />
 
+        <service
+            android:name="com.HanFeng.service.WirelessDebugFloatingService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="wireless-pairing-overlay" />
+        </service>
+
         <receiver
             android:name="com.HanFeng.service.VpnAutoRestartReceiver"
             android:enabled="true"
@@ -154,11 +253,56 @@
 
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
+            tools:node="remove" />
+
+        <provider
+            android:name="moe.shizuku.manager.ShizukuManagerProvider"
             android:authorities="${applicationId}.shizuku"
-            android:multiprocess="false"
-            android:enabled="true"
             android:exported="true"
+            android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <service
+            android:name="com.HanFeng.service.FloatingBallService"
+            android:exported="false" />
+
+        <service
+            android:name="com.HanFeng.service.CaptureFloatingService"
+            android:exported="false" />
+
+        <!-- 实时广告通知拦截，需用户系统设置中授予"通知访问权限"后才会触发 -->
+        <service
+            android:name="com.HanFeng.service.AdNotificationListenerService"
+            android:label="广告通知拦截"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- 下拉通知栏快捷设置磁贴,快捷开关广告拦截 -->
+        <service
+            android:name="com.HanFeng.service.AdBlockTileService"
+            android:label="寒枫"
+            android:icon="@drawable/ic_ad_block_tile"
+            android:exported="true"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- ============ 定位模拟服务 (免 root 走 MockLocationProvider) ============ -->
+        <service
+            android:name="com.HanFeng.xposed.MockLocationService"
+            android:exported="false"
+            android:foregroundServiceType="location">
+            <intent-filter>
+                <action android:name="com.HanFeng.action.START_MOCK" />
+                <action android:name="com.HanFeng.action.STOP_MOCK" />
+            </intent-filter>
+        </service>
     </application>
 
 </manifest>

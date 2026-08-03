@@ -85,7 +85,7 @@
                 android:textSize="18sp" />
 
             <Button
-                android:id="@+id/btnWhitelist"
+                android:id="@+id/btnReward"
                 android:layout_width="@dimen/home_button_max_width"
                 android:layout_height="@dimen/home_button_height"
                 android:layout_marginBottom="12dp"
@@ -93,7 +93,7 @@
                 android:backgroundTint="@null"
                 android:minWidth="120dp"
                 android:paddingHorizontal="@dimen/home_button_horizontal_padding"
-                android:text="黑白名单"
+                android:text="赞赏作者"
                 android:textAllCaps="false"
                 android:textColor="@color/hf_text_primary"
                 android:textSize="18sp" />

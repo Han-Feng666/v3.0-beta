@@ -28,8 +28,9 @@ class HttpsHandshakeEngineTest {
 
     @Test
     fun `unmatched non 443 port is ignored`() {
+        // 选择一个明确不在 TlsPortSet 中的端口做"不会被 MITM 处理"的代表
         val decision = HttpsHandshakeEngine.decide(
-            input(destinationPort = 5228, bridgePort = 443)
+            input(destinationPort = 9999, bridgePort = 443)
         )
 
         assertFalse(decision.shouldHandle)
