@@ -16,10 +16,12 @@ private const val MASK_PERMISSION = FLAG_ALLOWED or FLAG_DENIED
  * 与官方 Shizuku Manager 的授权逻辑一致。
  *
  * 关键链路（与 fork 中 ShizukuService.updateFlagsForUid 一一对齐）:
- *  1) 本应用必须先拿到 Shizuku 自授权 (checkSelfPermission==GRANTED) —— 否则 server 不接受
- *     我们以 manager 身份调 updateFlagsForUid (server 端用 managerAppId==本应用 appId 校验)。
- *  2) 本应用已被 server 标为 manager (MANAGER_APPLICATION_ID == "com.HanFeng"),
- *     所以 updateFlagsForUid 调用应当通过 checkCallerManagerPermission 校验。
+ *  1) 授权操作只需 binder 存活 (isServerAlive)。server 端 checkCallerManagerPermission
+ *     按 appId(callingUid) == MANAGER_APPLICATION_ID("com.HanFeng") 校验调用方为 manager,
+ *     与 manager 自身的 checkSelfPermission() 状态无关 —— 这与官方 Shizuku Manager 的
+ *     AuthorizationManager 一致(官方也只凭 binder 直接 transact 管理授权表)。
+ *  2) 本应用已被 server 标为 manager, 所以 updateFlagsForUid 调用能通过
+ *     checkCallerManagerPermission 校验, 无需等待"自授权"落地。
  *  3) 授权真正生效取决于被授权 app 的 manifest 是否声明任一合法客户端 permission:
  *       - com.HanFeng.permission.shizuku.API_V23
  *       - moe.shizuku.manager.permission.API_V23 (官方 SDK 老格式)
@@ -36,10 +38,10 @@ object ShizukuAuthorizationRepository {
     }
 
     /**
-     * 本应用是否已自我授权 (manager 自己也得有 Shizuku 权限)。
-     * managerAppId 的校验在 server 端基于 Binder.getCallingUid 的 appId 比对,
-     * 与本应用是否 manager 无关 —— 但本应用若没自我授权, server 不会给我们
-     * 推 binder,反射 attach 不上去,所有 binder 调用都会失败。
+     * 本应用是否已自我授权 (manager 自己也得有 Shizuku 权限才能当普通客户端用用户服务)。
+     * 注意: 授权其它应用的管理操作**不依赖**此状态 —— server 按 appId 认 manager,
+     * 所以哪怕 SDK 缓存了旧的 DENIED, getFlagsForUid/updateFlagsForUid 依然可用。
+     * 本方法仅用于 UI 展示 manager 自身作为客户端的授权状态。
      */
     fun selfAuthorized(): Boolean {
         if (!isServerAlive()) return false
@@ -52,8 +54,8 @@ object ShizukuAuthorizationRepository {
      * 使用本地 PackageManager 列举已安装应用，通过 Shizuku binder 查询授权状态。
      */
     fun listInstalledAppsForAuth(context: android.content.Context): List<AuthorizedApp> {
-        if (!selfAuthorized()) {
-            Log.w(TAG, "listInstalledAppsForAuth: 本应用未获得 Shizuku 自授权,跳过 binder 查询")
+        if (!isServerAlive()) {
+            Log.w(TAG, "listInstalledAppsForAuth: Shizuku server 未存活,跳过 binder 查询")
             return emptyList()
         }
         return try {
@@ -95,8 +97,8 @@ object ShizukuAuthorizationRepository {
      * 不依赖外部 AuthorizationManager。
      */
     fun grantAuthorization(packageName: String, uid: Int): Boolean {
-        if (!selfAuthorized()) {
-            Log.w(TAG, "grantAuthorization: 本应用未自我授权,无法执行授权操作")
+        if (!isServerAlive()) {
+            Log.w(TAG, "grantAuthorization: Shizuku server 未存活,无法执行授权操作")
             return false
         }
         return try {
@@ -116,8 +118,8 @@ object ShizukuAuthorizationRepository {
     }
 
     fun revokeAuthorization(packageName: String, uid: Int): Boolean {
-        if (!selfAuthorized()) {
-            Log.w(TAG, "revokeAuthorization: 本应用未自我授权,无法执行取消授权操作")
+        if (!isServerAlive()) {
+            Log.w(TAG, "revokeAuthorization: Shizuku server 未存活,无法执行取消授权操作")
             return false
         }
         return try {
@@ -133,7 +135,7 @@ object ShizukuAuthorizationRepository {
     }
 
     fun isAuthorized(uid: Int): Boolean {
-        if (!selfAuthorized()) return false
+        if (!isServerAlive()) return false
         val flags = runCatching { Shizuku.getFlagsForUid(uid, MASK_PERMISSION) }.getOrDefault(0)
         return (flags and FLAG_ALLOWED) == FLAG_ALLOWED
     }

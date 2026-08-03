@@ -687,11 +687,27 @@ class DeviceIdModifier {
     /** prop 同源集, 主路 gsm.imei (HyperOS 实测) */
     private val IMEI_WRITE_PROPS = listOf(
         "gsm.imei",
+        "gsm.imei1",
+        "gsm.imei2",
         "ril.imei",
+        "ril.imei1",
+        "ril.imei2",
         "persist.sys.imei",
         "persist.sys.imei2",
+        "persist.vendor.radio.imei",
+        "persist.vendor.radio.imei2",
         "ro.boot.imei",
-        "sys.imei"
+        "ro.boot.imei1",
+        "ro.boot.imei2",
+        "ro.boot.miui.imei1",
+        "ro.boot.miui.imei2",
+        "ro.vendor.radio.imei",
+        "ro.vendor.radio.imei2",
+        "vendor.radio.imei",
+        "vendor.radio.imei2",
+        "sys.imei",
+        "sys.imei1",
+        "sys.imei2"
     )
 
     /**
@@ -700,39 +716,48 @@ class DeviceIdModifier {
      * 实际可靠源只剩 prop. 这里尽可能拉全厂商衍生项, 任一非空都能展示.
      */
     private val IMEI_READ_PROPS = IMEI_WRITE_PROPS + listOf(
-        // MIUI / HyperOS boot 段
-        "ro.boot.imei1",
-        "ro.boot.imei2",
-        "ro.boot.miui.imei1",
-        "ro.boot.miui.imei2",
-        // Qualcomm / vendor radio 段
-        "persist.vendor.radio.imei",
-        "persist.vendor.radio.imei2",
-        "ro.vendor.radio.imei",
-        "ro.vendor.radio.imei2",
-        // MTK 平台常见
         "ro.boot.imei_label",
-        // 临时段 (有时被 vendor init 写)
-        "vendor.radio.imei",
-        "vendor.radio.imei2"
+        "ro.boot.imei_alpha",
+        "ro.boot.miui.imei_label"
     )
 
-    /** MEID prop 同源集 (CDMA 机型使用, 与 GSM IMEI 互斥) */
+    /** MEID prop 同源集 (CDMA 机型使用, 与 GSM IMEI 互斥; MEID 单一标识无 MEID2) */
     private val MEID_WRITE_PROPS = listOf(
         "gsm.meid",
         "ril.meid",
         "persist.sys.meid",
+        "persist.vendor.radio.meid",
         "ro.boot.meid",
+        "ro.boot.miui.meid",
+        "ro.vendor.radio.meid",
+        "vendor.radio.meid",
         "sys.meid"
     )
 
     private val MEID_READ_PROPS = MEID_WRITE_PROPS + listOf(
-        "ro.boot.miui.meid",
         "persist.sys.meid2",
-        "persist.vendor.radio.meid",
-        "ro.vendor.radio.meid",
-        "vendor.radio.meid"
+        "ro.boot.meid_alpha"
     )
+
+    /**
+     * 动态扫描设备当前存在的 IMEI/meid prop (模块思路移植)。
+     * 补足硬编码列表漏网的 OEM 专属 prop, 例如 Samsung 的 ro.boot.imei_alpha。
+     * 返回 (key, value) 对, value 长度 >= 14 才视为合法 IMEI (过滤 TAC/SN 短字段)。
+     */
+    private fun scanExistingImeiProps(): List<Pair<String, String>> {
+        val cmd = "getprop | grep -iE 'imei|meid' | grep -E ']=[0-9A-Fa-z]{14,}'"
+        val r = runRootShell(cmd)
+        if (r.exitCode != 0) return emptyList()
+        val out = r.output.trim()
+        if (out.isBlank()) return emptyList()
+        return out.lines().mapNotNull { line ->
+            // getprop 输出格式: [key]: [value]
+            val m = Regex("\\[([^\\]]+)\\]:\\s*\\[([^\\]]*)\\]").find(line) ?: return@mapNotNull null
+            val key = m.groupValues[1].trim()
+            val value = m.groupValues[2].trim()
+            if (key.isBlank() || value.length < 14) null else key to value
+        }
+    }
 
     /** EFS / QCN 关键备份路径(用于 NV 写入前手动备份) */
     private val IMEI_BACKUP = "/data/local/tmp/.hf_imei_backup"
@@ -1011,31 +1036,96 @@ class DeviceIdModifier {
     /**
      * prop 伪装层 - 沿用 writeSn 套路 (resetprop + setprop + kill phone + module 落地)
      */
-    private fun writeImeiProp(newImei: String): ShellResult {
-        val escaped = SuSession.getInstance().escapeShell(newImei).replace("\$", "\\$")
+    /**
+     * 写 IMEI prop。支持:
+     * - 双卡双 IMEI 分离写入(关键升级: 防止 IMEI1/IMEI2 共用一个数导致运营商验证异常)
+     * - 动态扫描设备真实存在的 imei prop 补足硬编码列表漏网项
+     * - 同源 prop 全部 resetprop 写入 + 落入统一模块
+     * - 严格分卡: 写 IMEI1 时只动 imei1 段 prop, IMEI2 同理。共用段(gsm.imei / ril.imei / sys.imei)在双卡模式下写 mainImei。
+     *
+     * @param mainImei 主 IMEI(IMEI1)
+     * @param subImei 副 IMEI(IMEI2, 单卡可传空, 默认走 mainImei)
+     */
+    private fun writeImeiProp(mainImei: String, subImei: String? = null): ShellResult {
+        val escMain = SuSession.getInstance().escapeShell(mainImei).replace("\$", "\\$")
+        val escSub = (subImei ?: mainImei).let { SuSession.getInstance().escapeShell(it).replace("\$", "\\$") }
+
+        // IMEI2 主写入集 (imei2 / imei1 标签 prop)
+        val imei2Keys = IMEI_WRITE_PROPS.filter { it.contains("imei2") }
+        // IMEI1 主写入集 (imei1 标签 + 共用段)
+        val imei1Keys = IMEI_WRITE_PROPS.filterNot { it.contains("imei2") }
+
         val cmds = mutableListOf<String>()
-        for (key in IMEI_WRITE_PROPS) {
-            cmds.add("resetprop $key '$escaped' 2>/dev/null || setprop $key '$escaped' 2>/dev/null || true")
+        fun writeSet(keys: List<String>, esc: String) {
+            for (key in keys) {
+                cmds.add("resetprop $key '$esc' 2>/dev/null || setprop $key '$esc' 2>/dev/null || true")
+            }
         }
-        // 杀 com.android.phone 让它下次从 prop 回读
+        writeSet(imei1Keys, escMain)
+        if (imei2Keys.isNotEmpty()) writeSet(imei2Keys, escSub)
+
+        // 动态扫描补全: 处理硬编码列表漏网的 OEM 专属 prop (长度 >= 14)
+        val scanned = scanExistingImeiProps()
+        if (scanned.isNotEmpty()) {
+            cmds.add("echo 'SCANNED_IMEI_PROPS=${scanned.size}'")
+            for ((key, originalValue) in scanned) {
+                // 已在硬编码列表里的跳过
+                if (key in IMEI_WRITE_PROPS) continue
+                // 否则按 key 名分发: 含 imei2 → 用副 IMEI; 否则 → 用主 IMEI (仅写 value 长 >=14 的)
+                val escaped = if (key.contains("imei2")) {
+                    if ((subImei ?: mainImei).length >= 14) escSub else escMain
+                } else {
+                    if (mainImei.length >= 14) escMain else continue
+                }
+                cmds.add("resetprop $key '$escaped' 2>/dev/null || setprop $key '$escaped' 2>/dev/null || true")
+            }
+        }
+
+        // 杀 com.android.phone 让它下次从 prop 回读, 模块经验: 等解锁屏幕更稳, 但这里强行 kill
         cmds.add("killall com.android.phone 2>/dev/null || true")
         cmds.add("am force-stop com.android.phone 2>/dev/null || true")
-        cmds.add("echo 'IMEI_PROP_DONE'")
-        // 落地到统一 module
-        val shEsc = SuSession.getInstance().escapeShell(newImei)
-        upsertModuleProps(IMEI_WRITE_PROPS.map { it to shEsc })
+        // 部分 ROM 上 com.android.phone 由 system_server fork, 需要 stop-start telephony 服务
+        cmds.add("stop ril-daemon 2>/dev/null || true")
+        cmds.add("start ril-daemon 2>/dev/null || true")
+        cmds.add("echo 'IMEI_PROP_DONE main=${mainImei} sub=${subImei ?: mainImei}'")
+
+        // 落地到统一 module: 主 IMEI 写入 IMEI1 段, 副 IMEI 写入 IMEI2 段
+        upsertModuleProps(imei1Keys.map { it to SuSession.getInstance().escapeShell(mainImei) })
+        if (imei2Keys.isNotEmpty() && subImei != null) {
+            upsertModuleProps(imei2Keys.map { it to SuSession.getInstance().escapeShell(subImei) })
+        }
         return runRootShell(cmds.joinToString("\n"))
     }
 
+    /**
+     * 写 MEID prop。MEID 在 CDMA 机型是单一标识, 不像 IMEI 分主副卡, 维持单值写。
+     * 仍走动态扫描 + 强 RIL 重启。
+     */
     private fun writeMeidProp(newMeid: String): ShellResult {
         val escaped = SuSession.getInstance().escapeShell(newMeid).replace("\$", "\\$")
+
         val cmds = mutableListOf<String>()
         for (key in MEID_WRITE_PROPS) {
             cmds.add("resetprop $key '$escaped' 2>/dev/null || setprop $key '$escaped' 2>/dev/null || true")
         }
+
+        // 动态扫描补全 (过滤 <14 字符的短字段)
+        val scanned = scanExistingImeiProps().filter { it.first.contains("meid") }
+        if (scanned.isNotEmpty()) {
+            cmds.add("echo 'SCANNED_MEID_PROPS=${scanned.size}'")
+            for ((key, _) in scanned) {
+                if (key in MEID_WRITE_PROPS) continue
+                if (newMeid.length < 14) continue
+                cmds.add("resetprop $key '$escaped' 2>/dev/null || setprop $key '$escaped' 2>/dev/null || true")
+            }
+        }
+
         cmds.add("killall com.android.phone 2>/dev/null || true")
         cmds.add("am force-stop com.android.phone 2>/dev/null || true")
-        cmds.add("echo 'MEID_PROP_DONE'")
+        cmds.add("stop ril-daemon 2>/dev/null || true")
+        cmds.add("start ril-daemon 2>/dev/null || true")
+        cmds.add("echo 'MEID_PROP_DONE meid=${newMeid}'")
+
         val shEsc = SuSession.getInstance().escapeShell(newMeid)
         upsertModuleProps(MEID_WRITE_PROPS.map { it to shEsc })
         return runRootShell(cmds.joinToString("\n"))
@@ -1043,20 +1133,26 @@ class DeviceIdModifier {
 
     /**
      * 复合写 IMEI - 先 EFS 备份 → 再 NV 写入(可能失败) → 必跑 prop 伪装
+     * @param mainImei 主 IMEI(IMEI1)
+     * @param subImei 副 IMEI(IMEI2, 双卡机型用; 传 null 或与 mainImei 相同则 IMEI1/IMEI2 共用同一值 (旧行为))
      * 返回 ShellResult, output 含两层执行结果摘要
      */
-    fun writeImei(newImei: String): ShellResult {
-        if (newImei.isBlank()) return ShellResult(-1, "IMEI 不能为空")
-        if (!isValidImei15(newImei)) {
-            return ShellResult(-1, "IMEI 必须是 15 位数字 + Luhn 校验和合规")
+    fun writeImei(mainImei: String, subImei: String? = null): ShellResult {
+        if (mainImei.isBlank()) return ShellResult(-1, "IMEI 不能为空")
+        if (!isValidImei15(mainImei)) {
+            return ShellResult(-1, "主 IMEI 必须是 15 位数字 + Luhn 校验和合规")
         }
+        if (subImei != null && subImei.isNotBlank() && !isValidImei15(subImei)) {
+            return ShellResult(-1, "副 IMEI 必须是 15 位数字 + Luhn 校验和合规")
+        }
+        val effectiveSub = if (subImei.isNullOrBlank()) mainImei else subImei
         // 1) 备份 + EFS 备份
         backupCurrentImei()
         backupEfs()
-        // 2) NV 写入(可失败)
-        val nvResult = tryWriteNvImeiAtc(newImei)
+        // 2) NV 写入(可失败, 仅写 IMEI1 这一项 NV 写入)
+        val nvResult = tryWriteNvImeiAtc(mainImei)
         // 3) prop 伪装(必跑, 即便 NV 失败也对 SDK 反射有效)
-        val propResult = writeImeiProp(newImei)
+        val propResult = writeImeiProp(mainImei, effectiveSub)
         val summary = buildString {
             appendLine("=== NV 写入层 ===")
             appendLine("exitCode=${nvResult.exitCode}")
@@ -1066,6 +1162,10 @@ class DeviceIdModifier {
             appendLine(propResult.output)
             appendLine()
             appendLine("已备份原值到 $IMEI_BACKUP  (EFS 备份在 /data/local/tmp/.hf_efs_backup)")
+            appendLine("已写 IMEI1=$mainImei")
+            if (!subImei.isNullOrBlank() && subImei != mainImei) {
+                appendLine("已写 IMEI2=$subImei (双卡模式, 分离生成)")
+            }
             appendLine("可使用 restoreImei() 一键恢复")
         }
         return ShellResult(propResult.exitCode, summary)
@@ -1413,6 +1513,196 @@ class DeviceIdModifier {
         "ro.product.system_ext.marketname"
     )
 
+    // ==================== SoC (处理器) ====================
+    //
+    // 机型伪装社区常改的 SoC 相关 prop:
+    //   ro.soc.model          - 用户可见的 SoC 名称, 如 "Snapdragon 8 Gen 3" / "qcom,lahaina"
+    //   ro.soc.manufacturer   - SoC 厂商, 如 "Qualcomm" / "qcom" / "MediaTek"
+    //   ro.board.platform     - SoC 平台代号 (检测脚本高频读取项), 如 "kalama" / "pineapple" / "mt6985"
+    //
+    // 部分机型没有 vendor/board 衍生 prop, 写入被命令自带 2>/dev/null 静默。
+    private val SOC_MODEL_PROPS = listOf(
+        "ro.soc.model",
+        "ro.vendor.soc.model",
+        "ro.odm.soc.model",
+        "ro.product.soc.model",
+        "ro.system.soc.model",
+        "ro.boot.soc.model",
+        "ro.board.platform"
+    )
+    private val SOC_MANUFACTURER_PROPS = listOf(
+        "ro.soc.manufacturer",
+        "ro.vendor.soc.manufacturer",
+        "ro.odm.soc.manufacturer",
+        "ro.product.soc.manufacturer",
+        "ro.system.soc.manufacturer",
+        "ro.hardware"
+    )
+
+    /**
+     * SoC codename → (营销名, 厂商) 反查表。
+     * 覆盖 Qualcomm / MediaTek / Google / Samsung / Huawei 主流 SoC 的官方 codename。
+     * 用户填 codename (如 SM8650) 时, 调用 resolveSocCanonical() 反查得到营销名 + 厂商。
+     * 写入 ro.soc.model 时优先使用营销名 (检测脚本读到的更直观), 同时也兼容直接传营销名。
+     */
+    private val SOC_CODENAME_MAP: Map<String, Pair<String, String>> = mapOf(
+        // Qualcomm Snapdragon (codename → 国产长营销名 → 厂商=Qualcomm)
+        "sm8650" to ("第三代骁龙®8移动平台" to "Qualcomm"),
+        "sm8650-ab" to ("第三代骁龙®8移动平台" to "Qualcomm"),
+        "sm8650p" to ("第三代骁龙®8移动平台 (Galaxy)" to "Qualcomm"),
+        "sm8750" to ("第四代骁龙®8移动平台" to "Qualcomm"),
+        "sm8550" to ("第二代骁龙®8移动平台" to "Qualcomm"),
+        "sm8550-ab" to ("第二代骁龙®8移动平台" to "Qualcomm"),
+        "sm8550-ac" to ("第二代骁龙®8移动平台" to "Qualcomm"),
+        "sm8475" to ("第一代骁龙®8+移动平台" to "Qualcomm"),
+        "sm8450" to ("第一代骁龙®8移动平台" to "Qualcomm"),
+        "sm8350" to ("骁龙®888" to "Qualcomm"),
+        "sm8250" to ("骁龙®865" to "Qualcomm"),
+        "sm8150" to ("骁龙®855" to "Qualcomm"),
+        "sm7675" to ("第三代骁龙®7+移动平台" to "Qualcomm"),
+        "sm7635" to ("第三代骁龙®7移动平台" to "Qualcomm"),
+        "sm7475" to ("第二代骁龙®7+移动平台" to "Qualcomm"),
+        "sm7350" to ("第一代骁龙®7移动平台" to "Qualcomm"),
+        "sm7250" to ("骁龙®765G" to "Qualcomm"),
+        "sm6375" to ("第一代骁龙®6移动平台" to "Qualcomm"),
+        "sm7450" to ("骁龙®695" to "Qualcomm"),
+        "sm6225" to ("骁龙®680" to "Qualcomm"),
+        "sm4450" to ("第二代骁龙®4移动平台" to "Qualcomm"),
+        "sec5w" to ("骁龙®X Elite" to "Qualcomm"),
+        // Qualcomm codename (board.platform 风格)
+        "kalama" to ("第二代骁龙®8移动平台" to "Qualcomm"),
+        "sky" to ("第二代骁龙®8移动平台" to "Qualcomm"),
+        "pineapple" to ("第三代骁龙®8移动平台" to "Qualcomm"),
+        "cliffs" to ("第四代骁龙®8移动平台" to "Qualcomm"),
+        "diwali" to ("第一代骁龙®8移动平台" to "Qualcomm"),
+        "taro" to ("第一代骁龙®8移动平台" to "Qualcomm"),
+        "lahaina" to ("骁龙®888" to "Qualcomm"),
+        "kona" to ("骁龙®865" to "Qualcomm"),
+        "msmnile" to ("骁龙®855" to "Qualcomm"),
+        // MediaTek Dimensity (国产长名, 无 ® 标志)
+        "mt6989" to ("天玑9400" to "MediaTek"),
+        "mt6985" to ("天玑9300" to "MediaTek"),
+        "mt6983" to ("天玑9200" to "MediaTek"),
+        "mt6979" to ("天玑9200" to "MediaTek"),
+        "mt6985z" to ("天玑9300+" to "MediaTek"),
+        "ezo" to ("天玑9400" to "MediaTek"),
+        "magpie" to ("天玑9300" to "MediaTek"),
+        "pacific" to ("天玑9200" to "MediaTek"),
+        // Google Tensor
+        "zuma" to ("Tensor G3" to "Google"),
+        "zumapro" to ("Tensor G4" to "Google"),
+        "darwin" to ("Tensor G5" to "Google"),
+        "gs201" to ("Tensor G2" to "Google"),
+        "gs101" to ("Tensor G1" to "Google"),
+        // Samsung Exynos
+        "s5e9945" to ("Exynos 2400" to "Samsung"),
+        "s5e9925" to ("Exynos 2200" to "Samsung"),
+        "s5e8835" to ("Exynos 1380" to "Samsung"),
+        "s5e8825" to ("Exynos 1280" to "Samsung"),
+        // Huawei Kirin
+        "kirin9020" to ("麒麟9020" to "华为"),
+        "kirin9010" to ("麒麟9010" to "华为"),
+        "kirin9000s" to ("麒麟9000s" to "华为"),
+        "kirin990" to ("麒麟990" to "华为"),
+        "kirin9000" to ("麒麟9000" to "华为"),
+        "kirin985" to ("麒麟985" to "华为"),
+        "kirin970" to ("麒麟970" to "华为"),
+        "kirin820" to ("麒麟820" to "华为"),
+        "kirin810" to ("麒麟810" to "华为")
+    )
+
+    /**
+     * 反查 SoC codename/营销名 → 规范 (营销名, 厂商)。
+     * 输入支持:
+     *   - Qualcomm codename (SM8650 / kalama / pineapple)
+     *   - MediaTek codename (MT6985 / magpie)
+     *   - Google codename (zuma / zumapro)
+     *   - 营销名 (骁龙 8 Gen 3 / Snapdragon 8 Gen 3 / 天玑 9400 / Tensor G4)
+     * 返回值: 规范后的 (营销名, 厂商) 或 null (无法识别)。
+     * 调用者可据此:
+     *   - 用户填 codename 时自动用营销名写入 ro.soc.model (读出更直观)
+     *   - 厂商自动确定, 无需用户手填
+     */
+    fun resolveSocCanonical(input: String): Pair<String, String>? {
+        val k = input.trim().lowercase()
+        if (k.isBlank()) return null
+        // 1. 直接 codename 反查
+        SOC_CODENAME_MAP[k]?.let { return it }
+        // 2. 营销名 → 国产长名 + 厂商匹配
+        when {
+            // 国产长名格式 (第X代骁龙8/骁龙8 Elite)
+            k.contains("骁龙") && k.contains("8 elite") ->
+                return "第四代骁龙®8移动平台" to "Qualcomm"
+            k.contains("骁龙") && k.contains("第三代") && k.contains("8") ->
+                return "第三代骁龙®8移动平台" to "Qualcomm"
+            k.contains("骁龙") && k.contains("第二代") && k.contains("8") ->
+                return "第二代骁龙®8移动平台" to "Qualcomm"
+            k.contains("骁龙") && k.contains("第一代") && k.contains("8") ->
+                return "第一代骁龙®8移动平台" to "Qualcomm"
+            // Snapdragon 8 Elite / 第4代 (sm8750)
+            (k.contains("snapdragon") || k.contains("骁龙")) && k.contains("8 elite") ->
+                return "第四代骁龙®8移动平台" to "Qualcomm"
+            // Snapdragon 8 Gen 3 / 第3代 (sm8650/pineapple)
+            (k.contains("snapdragon") || k.contains("骁龙")) && k.contains("8 gen 3") ->
+                return "第三代骁龙®8移动平台" to "Qualcomm"
+            // Snapdragon 8 Gen 2 / 第2代 (sm8550/kalama)
+            (k.contains("snapdragon") || k.contains("骁龙")) && k.contains("8 gen 2") ->
+                return "第二代骁龙®8移动平台" to "Qualcomm"
+            // Snapdragon 8+ Gen 1 (sm8475)
+            (k.contains("snapdragon") || k.contains("骁龙")) && k.contains("8+") && k.contains("gen 1") ->
+                return "第一代骁龙®8+移动平台" to "Qualcomm"
+            // Snapdragon 8 Gen 1 / 第1代 (sm8450)
+            (k.contains("snapdragon") || k.contains("骁龙")) && k.contains("8 gen 1") ->
+                return "第一代骁龙®8移动平台" to "Qualcomm"
+            // Snapdragon 7+ Gen 3 (sm7675)
+            (k.contains("snapdragon") || k.contains("骁龙")) && k.contains("7+") && k.contains("gen 3") ->
+                return "第三代骁龙®7+移动平台" to "Qualcomm"
+            k.contains("骁龙") && k.contains("第三代") && k.contains("7") ->
+                return "第三代骁龙®7移动平台" to "Qualcomm"
+            // Snapdragon 7 Gen 3 (sm7635)
+            (k.contains("snapdragon") || k.contains("骁龙")) && k.contains("7 gen 3") ->
+                return "第三代骁龙®7移动平台" to "Qualcomm"
+            // Snapdragon 6 Gen 1 (sm6375)
+            (k.contains("snapdragon") || k.contains("骁龙")) && k.contains("6 gen 1") ->
+                return "第一代骁龙®6移动平台" to "Qualcomm"
+            // Snapdragon 4 Gen 2 (sm4450)
+            (k.contains("snapdragon") || k.contains("骁龙")) && k.contains("4 gen 2") ->
+                return "第二代骁龙®4移动平台" to "Qualcomm"
+            // 老款不带 Gen 后缀的旗舰
+            (k.contains("骁龙") || k.contains("snapdragon")) && k.contains("888") -> return "骁龙®888" to "Qualcomm"
+            (k.contains("骁龙") || k.contains("snapdragon")) && k.contains("865") -> return "骁龙®865" to "Qualcomm"
+            (k.contains("骁龙") || k.contains("snapdragon")) && k.contains("855") -> return "骁龙®855" to "Qualcomm"
+            // MediaTek Dimensity
+            k.contains("天玑") && k.contains("9400") -> return "天玑9400" to "MediaTek"
+            k.contains("dimensity") && k.contains("9400") -> return "天玑9400" to "MediaTek"
+            k.contains("天玑") && k.contains("9300+") -> return "天玑9300+" to "MediaTek"
+            k.contains("天玑") && k.contains("9300") -> return "天玑9300" to "MediaTek"
+            k.contains("dimensity") && k.contains("9300") -> return "天玑9300" to "MediaTek"
+            k.contains("天玑") && k.contains("9200") -> return "天玑9200" to "MediaTek"
+            k.contains("dimensity") && k.contains("9200") -> return "天玑9200" to "MediaTek"
+            // Google Tensor
+            k.contains("tensor g4") -> return "Tensor G4" to "Google"
+            k.contains("tensor g3") -> return "Tensor G3" to "Google"
+            k.contains("tensor g2") -> return "Tensor G2" to "Google"
+            // Samsung Exynos
+            k.contains("exynos 2400") -> return "Exynos 2400" to "Samsung"
+            k.contains("exynos 2200") -> return "Exynos 2200" to "Samsung"
+            // Huawei Kirin
+            k.contains("麒麟") && k.contains("9020") -> return "麒麟9020" to "华为"
+            k.contains("麒麟") && k.contains("9010") -> return "麒麟9010" to "华为"
+            k.contains("麒麟") && k.contains("9000s") -> return "麒麟9000s" to "华为"
+            k.contains("麒麟") && k.contains("9000") -> return "麒麟9000" to "华为"
+            k.contains("kirin") && k.contains("9020") -> return "麒麟9020" to "华为"
+            k.contains("kirin") && k.contains("9010") -> return "麒麟9010" to "华为"
+        }
+        return null
+    }
+
+    data class SocFields(
+        val model: String,
+        val manufacturer: String
+    )
+
     fun readModel(): ShellResult {
         val sb = StringBuilder()
         val allKeys = MANUFACTURER_PROPS + BRAND_PROPS + MODEL_PROPS + MARKETNAME_PROPS
@@ -1498,6 +1788,74 @@ class DeviceIdModifier {
             cmds.add("resetprop --delete $key 2>/dev/null || true")
         }
         cmds.add("echo 'MODEL_CLEAR_DONE'")
+        return runRootShell(cmds.joinToString("\n"))
+    }
+
+    fun readSoC(): ShellResult {
+        val sb = StringBuilder()
+        fun readProp(label: String, prop: String) {
+            val v = runRootShell("getprop $prop 2>/dev/null").output.trim()
+            sb.append("$prop=").append(v.ifBlank { "(空)" }).append("\n")
+        }
+        readProp("soc.model", "ro.soc.model")
+        readProp("soc.manufacturer", "ro.soc.manufacturer")
+        readProp("board.platform", "ro.board.platform")
+        readProp("vendor.soc.model", "ro.vendor.soc.model")
+        readProp("vendor.soc.manufacturer", "ro.vendor.soc.manufacturer")
+        readProp("odm.soc.model", "ro.odm.soc.model")
+        readProp("product.soc.model", "ro.product.soc.model")
+        readProp("hardware", "ro.hardware")
+        // 去掉末尾换行
+        if (sb.endsWith("\n")) sb.setLength(sb.length - 1)
+        return ShellResult(0, sb.toString())
+    }
+
+    fun writeSoC(fields: SocFields): ShellResult {
+        if (fields.model.isBlank() && fields.manufacturer.isBlank()) {
+            return ShellResult(-1, "至少填写一个字段")
+        }
+        val sb = StringBuilder()
+        fun validField(name: String, v: String) {
+            if (v.isBlank()) return
+            if (v.length > 64) sb.append("$name 长度过长\n")
+            if (!v.matches(Regex("[A-Za-z0-9 ._\\-/+()&,\\u4e00-\\u9fa5]+"))) sb.append("$name 含不支持字符\n")
+        }
+        validField("SoC 型号", fields.model)
+        validField("SoC 厂商", fields.manufacturer)
+        if (sb.isNotEmpty()) return ShellResult(-1, sb.toString().trim())
+
+        val esc = { v: String -> SuSession.getInstance().escapeShell(v).replace("\$", "\\$") }
+        val cmds = mutableListOf<String>()
+        val plan = mutableListOf<Pair<String, List<String>>>()
+        if (fields.model.isNotBlank()) plan.add(fields.model to SOC_MODEL_PROPS)
+        if (fields.manufacturer.isNotBlank()) plan.add(fields.manufacturer to SOC_MANUFACTURER_PROPS)
+
+        for ((value, props) in plan) {
+            val escaped = esc(value)
+            for (key in props) {
+                cmds.add("resetprop $key '$escaped' 2>/dev/null || setprop $key '$escaped' 2>/dev/null || true")
+            }
+        }
+        cmds.add("echo 'SOC_DONE'")
+
+        val upsertPairs = mutableListOf<Pair<String, String>>()
+        val shEsc = { v: String -> SuSession.getInstance().escapeShell(v) }
+        for ((value, props) in plan) {
+            val shv = shEsc(value)
+            for (key in props) upsertPairs.add(key to shv)
+        }
+        upsertModuleProps(upsertPairs)
+
+        return runRootShell(cmds.joinToString("\n"))
+    }
+
+    fun clearSoCModule(): ShellResult {
+        removeModuleProps(SOC_MODEL_PROPS + SOC_MANUFACTURER_PROPS)
+        val cmds = mutableListOf<String>()
+        for (key in SOC_MODEL_PROPS + SOC_MANUFACTURER_PROPS) {
+            cmds.add("resetprop --delete $key 2>/dev/null || true")
+        }
+        cmds.add("echo 'SOC_CLEAR_DONE'")
         return runRootShell(cmds.joinToString("\n"))
     }
 

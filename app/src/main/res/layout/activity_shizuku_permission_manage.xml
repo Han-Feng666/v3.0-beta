@@ -109,15 +109,31 @@
     </LinearLayout>
 
     <!-- "授权应用"标题 -->
-    <TextView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
         android:paddingHorizontal="16dp"
-        android:paddingBottom="4dp"
-        android:text="授权应用（开关开启=授权 / 关闭=取消授权）"
-        android:textColor="@color/hf_text_primary"
-        android:textSize="14sp"
-        android:textStyle="bold" />
+        android:paddingBottom="4dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="授权应用（开关开启=授权 / 关闭=取消授权）"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchShowAllApps"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="显示全部"
+            android:textColor="@color/hf_text_primary"
+            android:textSize="13sp" />
+    </LinearLayout>
 
     <!-- 搜索框(固定,不再嵌在 ScrollView 内)
          注意:绝不能用 textVisiblePassword,会触发小米/HyperOS 安全键盘导致无法输入中文 -->
