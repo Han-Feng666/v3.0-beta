@@ -11,7 +11,10 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments("-DANDROID_STL=none")
+                // org.lsposed.libcxx:27.0.12077973 由 LLVM 27 编译，与 NDK r26 编译器
+                // data layout 不一致(i128:128 vs i128:64)，LTO 链接报错。改用 NDK 自带
+                // c++_static(LLVM 18)，与编译器匹配。
+                arguments("-DANDROID_STL=c++_static")
             }
         }
     }
@@ -42,5 +45,4 @@ android {
 dependencies {
     implementation(project(":shizuku-fork:api"))
     implementation("androidx.annotation:annotation:1.8.0")
-    implementation("org.lsposed.libcxx:libcxx:27.0.12077973")
 }

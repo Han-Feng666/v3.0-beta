@@ -54,10 +54,15 @@ android {
             useLegacyPackaging = true
         }
     }
+
+    lint {
+        // app 内置 Shizuku manager，有意同时保留 com.HanFeng 与 moe.shizuku.manager
+        // 两套 API_V23 权限名以兼容授权检测，UniquePermission 报错属于预期，放行。
+        disable += "UniquePermission"
+    }
 }
 
 dependencies {
-    val shizukuVersion = "13.1.5"
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
@@ -75,8 +80,11 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
     implementation("org.brotli:dec:0.1.2")
-    implementation("dev.rikka.shizuku:api:$shizukuVersion")
-    implementation("dev.rikka.shizuku:provider:$shizukuVersion")
+    // 客户端 SDK 使用内置 shizuku-fork 的 api/provider（与官方 dev.rikka.shizuku 同包同名，
+    // 若同时引用会在 mergeDexRelease 时产生重复类 BinderContainer 等），
+    // fork:manager 也会传递依赖 fork:api/provider，故统一用 fork 版本。
+    implementation(project(":shizuku-fork:api"))
+    implementation(project(":shizuku-fork:provider"))
     // 官方 AuthorizationManager 通过 binder 事务 getApplications 拿应用列表时,
     // reply 里用 ParcelableListSlice 反序列化,必须依赖此包
     implementation("dev.rikka.rikkax.parcelablelist:parcelablelist:2.0.1")

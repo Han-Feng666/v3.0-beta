@@ -11,10 +11,11 @@ android {
     defaultConfig {
         minSdk = 24
 
-        // native build 配置（boringssl + libcxx prefab 通过 maven 拉）
+        // native build 配置（boringssl 通过 prefab 拉；libcxx 改用 NDK 自带 c++_static，
+        // org.lsposed.libcxx:27.0.12077973 由 LLVM 27 编译与 NDK r26 data layout 不一致会 LTO 报错）
         externalNativeBuild {
             cmake {
-                arguments("-DANDROID_STL=none")
+                arguments("-DANDROID_STL=c++_static")
             }
         }
     }
@@ -77,7 +78,6 @@ dependencies {
 
     // Native build prefab deps
     implementation("io.github.vvb2060.ndk:boringssl:20250114")
-    implementation("org.lsposed.libcxx:libcxx:27.0.12077973")
 
     configurations.all {
         resolutionStrategy.force("androidx.core:core:1.13.1", "androidx.core:core-ktx:1.13.1")
