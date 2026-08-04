@@ -424,6 +424,46 @@
                     android:layout_height="wrap_content" />
             </LinearLayout>
 
+            <!-- 隐藏 VPN 检测 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                android:background="@drawable/bg_panel"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="16dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="隐藏 VPN 检测"
+                        android:textColor="@color/hf_text_primary"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:id="@+id/textHideVpnDesc"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="向其他应用隐藏 VPN 开启状态，解决部分应用因检测到 VPN 而拒绝打开的问题，需重启目标应用后生效"
+                        android:textColor="@color/hf_text_secondary"
+                        android:textSize="12sp" />
+
+                </LinearLayout>
+
+                <Switch
+                    android:id="@+id/switchHideVpn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
             <!-- 隐身模式 -->
             <LinearLayout
                 android:layout_width="match_parent"

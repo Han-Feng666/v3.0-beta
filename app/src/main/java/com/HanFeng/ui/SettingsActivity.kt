@@ -64,6 +64,8 @@ class SettingsActivity : BaseActivity() {
     private lateinit var switchStealthRemoveFingerprintHeaders: Switch
     private lateinit var switchAdFreeReward: Switch
     private lateinit var textAdFreeRewardDesc: TextView
+    private lateinit var switchHideVpn: Switch
+    private lateinit var textHideVpnDesc: TextView
     private lateinit var btnManageCustomTrackingParams: Button
     private lateinit var textCustomTrackingParamsPreview: TextView
     private lateinit var btnManageCustomTrackingHeaders: Button
@@ -169,6 +171,8 @@ class SettingsActivity : BaseActivity() {
         switchStealthRemoveFingerprintHeaders = findViewById(R.id.switchStealthRemoveFingerprintHeaders)
         switchAdFreeReward = findViewById(R.id.switchAdFreeReward)
         textAdFreeRewardDesc = findViewById(R.id.textAdFreeRewardDesc)
+        switchHideVpn = findViewById(R.id.switchHideVpn)
+        textHideVpnDesc = findViewById(R.id.textHideVpnDesc)
         btnManageCustomTrackingParams = findViewById(R.id.btnManageCustomTrackingParams)
         textCustomTrackingParamsPreview = findViewById(R.id.textCustomTrackingParamsPreview)
         btnManageCustomTrackingHeaders = findViewById(R.id.btnManageCustomTrackingHeaders)
@@ -244,6 +248,7 @@ class SettingsActivity : BaseActivity() {
         switchStealthHideReferer.isChecked = FeatureSettingsRepository.isStealthHideRefererEnabled(this)
         switchStealthRemoveFingerprintHeaders.isChecked = FeatureSettingsRepository.isStealthRemoveFingerprintHeadersEnabled(this)
         switchAdFreeReward.isChecked = FeatureSettingsRepository.isAdFreeRewardEnabled(this)
+        switchHideVpn.isChecked = FeatureSettingsRepository.isHideVpnEnabled(this)
 
         switchHideBackground.setOnCheckedChangeListener { _, isChecked ->
             AppSettingsRepository.setHideBackgroundEnabled(this, isChecked)
@@ -279,6 +284,11 @@ class SettingsActivity : BaseActivity() {
         }
         switchAdFreeReward.setOnCheckedChangeListener { _, isChecked ->
             FeatureSettingsRepository.setAdFreeRewardEnabled(this, isChecked)
+        }
+        switchHideVpn.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setHideVpnEnabled(this, isChecked)
+            com.HanFeng.xposed.FakeDataStore.writeHideVpn(this, isChecked)
+            if (isChecked) showShortToast("已开启，重启目标应用后生效") else showShortToast("已关闭")
         }
 
         refreshCustomBackgroundPreview()
@@ -504,6 +514,7 @@ btnRootHide.setOnClickListener {
         syncHideBackgroundSwitch()
         syncStealthModeSwitch()
         syncAdFreeRewardSwitch()
+        syncHideVpnSwitch()
         refreshCustomBackgroundPreview()
         refreshNotificationAccessHintAsync()
     }
@@ -575,6 +586,18 @@ btnRootHide.setOnClickListener {
         switchAdFreeReward.isChecked = enabled
         switchAdFreeReward.setOnCheckedChangeListener { _, isChecked ->
             FeatureSettingsRepository.setAdFreeRewardEnabled(this, isChecked)
+        }
+    }
+
+    private fun syncHideVpnSwitch() {
+        val enabled = FeatureSettingsRepository.isHideVpnEnabled(this)
+        if (switchHideVpn.isChecked == enabled) return
+        switchHideVpn.setOnCheckedChangeListener(null)
+        switchHideVpn.isChecked = enabled
+        switchHideVpn.setOnCheckedChangeListener { _, isChecked ->
+            FeatureSettingsRepository.setHideVpnEnabled(this, isChecked)
+            com.HanFeng.xposed.FakeDataStore.writeHideVpn(this, isChecked)
+            if (isChecked) showShortToast("已开启，重启目标应用后生效") else showShortToast("已关闭")
         }
     }
 

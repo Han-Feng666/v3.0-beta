@@ -36,6 +36,7 @@ object FeatureSettingsRepository {
     private const val KEY_IDLE_SHUTDOWN_THRESHOLD = "idle_shutdown_threshold"
     private const val KEY_NOTIFICATION_AD_BLOCK_ENABLED = "notification_ad_block_enabled"
     private const val KEY_NOTIFICATION_AD_BLOCK_KEYWORDS = "notification_ad_block_keywords"
+    private const val KEY_HIDE_VPN_ENABLED = "hide_vpn_enabled"
     private const val MAX_PENDING_FEEDBACK_RULES = 50
     private val gson = Gson()
     @Volatile private var cachedAdFreeRewardEnabled: Boolean? = null
@@ -53,6 +54,7 @@ object FeatureSettingsRepository {
     @Volatile private var cachedHotspotBlockEnabled: Boolean? = null
     @Volatile private var cachedHotspotBlockMode: String? = null
     @Volatile private var cachedAutoInstallSystemCert: Boolean? = null
+    @Volatile private var cachedHideVpnEnabled: Boolean? = null
 
     fun isAdBlockEnabled(context: Context): Boolean {
         cachedAdBlockEnabled?.let { return it }
@@ -287,6 +289,21 @@ object FeatureSettingsRepository {
             .putBoolean(KEY_AD_FREE_REWARD_ENABLED, enabled)
             .apply()
         cachedAdFreeRewardEnabled = enabled
+    }
+
+    fun isHideVpnEnabled(context: Context): Boolean {
+        cachedHideVpnEnabled?.let { return it }
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_HIDE_VPN_ENABLED, false)
+            .also { cachedHideVpnEnabled = it }
+    }
+
+    fun setHideVpnEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_HIDE_VPN_ENABLED, enabled)
+            .apply()
+        cachedHideVpnEnabled = enabled
     }
 
     fun getAdRewardInterceptCount(context: Context): Long {

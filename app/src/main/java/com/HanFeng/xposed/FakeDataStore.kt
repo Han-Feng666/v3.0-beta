@@ -25,6 +25,7 @@ object FakeDataStore {
     const val KEY_WIFI = "wifi"
     const val KEY_LOCATION = "location"
     const val KEY_CELL = "cell"
+    const val KEY_HIDE_VPN = "hideVpn"
     const val KEY_ENABLED = "enabled"
 
     /**
@@ -87,6 +88,21 @@ object FakeDataStore {
         }
         val root = JSONObject().apply { put(KEY_CELL, json) }
         writeBoth(ctx, root)
+    }
+
+    /**
+     * 写入"隐藏 VPN 检测"开关状态。Hook 进程经 prop / 公开 JSON 读取后,
+     * 对目标 App 隐藏 VPN 的网络类型 / 传输能力 / tun 接口痕迹。
+     */
+    fun writeHideVpn(ctx: Context, enabled: Boolean) {
+        writeBoth(ctx, JSONObject().apply { put(KEY_HIDE_VPN, enabled) })
+    }
+
+    /**
+     * 读隐藏 VPN 开关 (hook 进程读取)。
+     */
+    fun readHideVpnPublic(): Boolean {
+        return readPublic().optBoolean(KEY_HIDE_VPN, false)
     }
 
     /**
@@ -268,6 +284,11 @@ object FakeDataStore {
                             .append(parts.joinToString("|")).append("'; ")
                     }
                 }
+            }
+            if (root.has(KEY_HIDE_VPN)) {
+                sb.append("setprop sys.hf_hide_vpn '")
+                    .append(if (root.optBoolean(KEY_HIDE_VPN, false)) '1' else '0')
+                    .append("'; ")
             }
             if (sb.isNotEmpty()) {
                 su.execute(sb.toString(), 6)

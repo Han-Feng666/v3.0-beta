@@ -17,6 +17,7 @@ import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.lang.reflect.Method
 import java.lang.reflect.Constructor
+import java.util.Enumeration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.function.Consumer
@@ -137,6 +138,12 @@ class HookMain : IXposedHookLoadPackage {
             return FakeDataStore.readWifiInfoPublic()
         }
 
+        @JvmStatic
+        internal fun readHideVpn(): Boolean {
+            if (systemProp("sys.hf_hide_vpn", "0") == "1") return true
+            return FakeDataStore.readHideVpnPublic()
+        }
+
         /**
          * 构造假 Location (App 进程内直接返回, 不走系统 mock provider 广播)。
          */
@@ -173,6 +180,11 @@ class HookMain : IXposedHookLoadPackage {
         //    App 用 getActiveNetworkInfo 判断"当前是 WiFi 还是数据", 补 hook 让类型显示为 WiFi,
         //    与 WiFi 模拟一致(仅改类型, 不影响联网能力判断)
         hookConnectivity(lpparam)
+
+        // 4.5 Hook 隐藏 VPN 检测: 拦截(VPN)开启时, 让目标 App 看不到 VPN 的网络类型 /
+        //     传输能力 / tun 接口, 避免"检测到 VPN 拒绝打开/使用"的应用拦截失效。
+        //     独立开关"隐藏 VPN 检测", 动态判断, 与 WiFi 伪装互不干扰。
+        hookHideVpn(lpparam)
 
         // 5. Hook MockLocation 反检测 (system_server 进程)
         if (pkg == "android" || pkg == "com.google.android.gms") {
@@ -870,6 +882,212 @@ class HookMain : IXposedHookLoadPackage {
             } catch (e: Throwable) {}
         } catch (e: Throwable) {
             XposedBridge.log("[HF-Hook] hookConnectivity skip: ${e.message}")
+        }
+    }
+
+    /**
+     * 隐藏 VPN 检测: 开关开启时, 对目标 App 抹除 VPN 存在痕迹。
+     *
+     * App 检测 VPN 的常见途径与对应 hook:
+     * - NetworkCapabilities.hasTransport(TRANSPORT_VPN) → false
+     * - NetworkCapabilities.getTransportTypes() → 过滤掉 TRANSPORT_VPN
+     * - NetworkInfo.getType() == TYPE_VPN → 返回底层网络类型 (WIFI/MOBILE)
+     * - NetworkInfo.getTypeName() == "VPN" → 返回底层类型名
+     * - ConnectivityManager.getAllNetworkInfo / getNetworkInfo(TYPE_VPN) → 过滤 VPN 网络
+     * - ConnectivityManager.isVpnLockdownEnabled → false
+     * - NetworkInterface.getNetworkInterfaces / getByName 枚举 tun/ppp 接口 → 过滤/置空
+     * - LinkProperties.getInterfaceName == "tun0" → 置空
+     *
+     * 所有 hook 动态读取开关状态, 关闭时不改变任何返回值, 与 WiFi 伪装逻辑独立。
+     */
+    private fun hookHideVpn(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val clsNc = XposedHelpers.findClass("android.net.NetworkCapabilities", lpparam.classLoader)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsNc, "hasTransport",
+                    Int::class.javaPrimitiveType,
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!readHideVpn()) return
+                            val transport = (param.args[0] as? Int) ?: return
+                            if (transport == android.net.NetworkCapabilities.TRANSPORT_VPN) {
+                                param.result = false
+                            }
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsNc, "getTransportTypes",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!readHideVpn()) return
+                            val types = param.result as? IntArray ?: return
+                            val filtered = types.filter { it != android.net.NetworkCapabilities.TRANSPORT_VPN }
+                            if (filtered.size != types.size) param.result = filtered.toIntArray()
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+        } catch (e: Throwable) {}
+
+        try {
+            val clsNi = XposedHelpers.findClass("android.net.NetworkInfo", lpparam.classLoader)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsNi, "getType",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!readHideVpn()) return
+                            if (param.result as? Int == android.net.ConnectivityManager.TYPE_VPN) {
+                                param.result = resolveBaseNetworkType()
+                            }
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsNi, "getTypeName",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!readHideVpn()) return
+                            if (param.result == "VPN") param.result = resolveBaseNetworkTypeName()
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+        } catch (e: Throwable) {}
+
+        try {
+            val clsCm = XposedHelpers.findClass("android.net.ConnectivityManager", lpparam.classLoader)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsCm, "getAllNetworkInfo",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!readHideVpn()) return
+                            val arr = param.result as? Array<*> ?: return
+                            val filtered = arr.filter { ni ->
+                                val t = (ni as? android.net.NetworkInfo)?.type ?: return@filter true
+                                t != android.net.ConnectivityManager.TYPE_VPN
+                            }
+                            if (filtered.size != arr.size) param.result = filtered.toTypedArray()
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsCm, "getNetworkInfo",
+                    Int::class.javaPrimitiveType,
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!readHideVpn()) return
+                            val t = param.args[0] as? Int ?: return
+                            if (t == android.net.ConnectivityManager.TYPE_VPN) param.result = null
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsCm, "isVpnLockdownEnabled",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (readHideVpn()) param.result = false
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+        } catch (e: Throwable) {}
+
+        try {
+            val clsNi = XposedHelpers.findClass("java.net.NetworkInterface", lpparam.classLoader)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsNi, "getNetworkInterfaces",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!readHideVpn()) return
+                            val enum = param.result as? Enumeration<*> ?: return
+                            val rawList: List<Any?> = enum.toList()
+                            val list = rawList.filter { ni ->
+                                val name = (ni as? java.net.NetworkInterface)?.name ?: return@filter true
+                                !isVpnIfaceName(name)
+                            }
+                            param.result = java.util.Collections.enumeration(list)
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsNi, "getByName",
+                    String::class.java,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (!readHideVpn()) return
+                            val name = param.args[0] as? String ?: return
+                            if (isVpnIfaceName(name)) param.result = null
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+        } catch (e: Throwable) {}
+
+        try {
+            val clsLp = XposedHelpers.findClass("android.net.LinkProperties", lpparam.classLoader)
+            XposedHelpers.findAndHookMethod(
+                clsLp, "getInterfaceName",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!readHideVpn()) return
+                        val name = param.result as? String ?: return
+                        if (isVpnIfaceName(name)) param.result = ""
+                    }
+                }
+            )
+        } catch (e: Throwable) {}
+    }
+
+    /** VPN 接口名: tun/ppp/ipsec/vpn 开头的网络接口。 */
+    private fun isVpnIfaceName(name: String): Boolean {
+        val n = name.lowercase()
+        return n.startsWith("tun") || n.startsWith("ppp") || n.startsWith("ipsec") || n.startsWith("vpn")
+    }
+
+    /** 取 VPN 覆盖的底层网络类型 (WIFI 优先, 否则 MOBILE), 拿不到时返回 WIFI。 */
+    private fun resolveBaseNetworkType(): Int {
+        return try {
+            val cm = connectivityManager()
+            val caps = cm?.getNetworkCapabilities(cm.activeNetwork) ?: return android.net.ConnectivityManager.TYPE_WIFI
+            if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) {
+                android.net.ConnectivityManager.TYPE_WIFI
+            } else if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                android.net.ConnectivityManager.TYPE_MOBILE
+            } else {
+                android.net.ConnectivityManager.TYPE_WIFI
+            }
+        } catch (t: Throwable) {
+            android.net.ConnectivityManager.TYPE_WIFI
+        }
+    }
+
+    private fun resolveBaseNetworkTypeName(): String {
+        return if (resolveBaseNetworkType() == android.net.ConnectivityManager.TYPE_MOBILE) "MOBILE" else "WIFI"
+    }
+
+    private fun connectivityManager(): android.net.ConnectivityManager? {
+        return try {
+            val at = XposedHelpers.callStaticMethod(
+                XposedHelpers.findClass("android.app.ActivityThread", null), "currentApplication")
+            val ctx = at as? android.content.Context ?: return null
+            ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+        } catch (t: Throwable) {
+            null
         }
     }
 
