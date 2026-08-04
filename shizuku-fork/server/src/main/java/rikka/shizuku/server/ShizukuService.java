@@ -385,9 +385,17 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
                 if (permToGrant == null) continue;
                 final String permName = permToGrant;
                 if (allowed) {
-                    PermissionManagerApis.grantRuntimePermission(packageName, permName, userId);
+                    try {
+                        PermissionManagerApis.grantRuntimePermission(packageName, permName, userId);
+                    } catch (Throwable e) {
+                        LOGGER.w(e, "grantRuntimePermission failed");
+                    }
                 } else {
-                    PermissionManagerApis.revokeRuntimePermission(packageName, permName, userId);
+                    try {
+                        PermissionManagerApis.revokeRuntimePermission(packageName, permName, userId);
+                    } catch (Throwable e) {
+                        LOGGER.w(e, "revokeRuntimePermission failed");
+                    }
                 }
             }
         }
@@ -473,9 +481,21 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
                 if (permToGrant == null) continue;
                 final String permName = permToGrant;
                 if (allowed) {
-                    PermissionManagerApis.grantRuntimePermission(packageName, permName, userId);
+                    // 运行时权限授予失败不得中断授权写入: 本 fork 的授权源是 configManager
+                    // (addClient attach 时读 configManager.find), 运行时权限仅用于官方列表联动。
+                    // 若这里抛异常会跳过后面的 configManager.update → 授权不持久,
+                    // 客户端重启后 attach 仍读到旧 DENIED, 表现为"授权不生效"。
+                    try {
+                        PermissionManagerApis.grantRuntimePermission(packageName, permName, userId);
+                    } catch (Throwable e) {
+                        LOGGER.w(e, "grantRuntimePermission failed");
+                    }
                 } else {
-                    PermissionManagerApis.revokeRuntimePermission(packageName, permName, userId);
+                    try {
+                        PermissionManagerApis.revokeRuntimePermission(packageName, permName, userId);
+                    } catch (Throwable e) {
+                        LOGGER.w(e, "revokeRuntimePermission failed");
+                    }
                 }
 
                 // TODO kill user service using

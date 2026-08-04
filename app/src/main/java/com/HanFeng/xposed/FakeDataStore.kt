@@ -212,6 +212,69 @@ object FakeDataStore {
         } catch (e: Exception) {
             // 没写权限(无 root 时), 仅依赖 PREF 路径。LSPosed 通过 XSharedPreferences 读
         }
+
+        // 3. root 可用时把坐标/基站同步到系统属性: 目标 App 进程(untrusted_app 域)读不了
+        //    /data/local/tmp 与我们的私有 PREF, 但任何进程都能读 prop。LSPosed hook 在
+        //    目标 App 进程内经 prop 拿假数据, 否则 hookLocationInAppProcess / hookTelephonyCell
+        //    拿到的 FakeDataStore 恒空 → hook 实际不生效, 表现为"有些 App 仍读真实位置"。
+        pushPropsToSystem(merged)
+    }
+
+    private fun pushPropsToSystem(root: JSONObject) {
+        try {
+            val su = com.HanFeng.adblocker.shizuku.SuSession.getInstance()
+            if (!su.open(8)) return
+            val sb = StringBuilder()
+            val loc = root.optJSONObject(KEY_LOCATION)
+            if (loc != null) {
+                sb.append("setprop sys.hf_fake_loc '")
+                    .append(loc.optDouble("latitude", 0.0)).append(',')
+                    .append(loc.optDouble("longitude", 0.0)).append(',')
+                    .append(if (loc.optBoolean("enabled", false)) '1' else '0')
+                    .append("'; ")
+            }
+            val cell = root.optJSONObject(KEY_CELL)
+            if (cell != null) {
+                sb.append("setprop sys.hf_fake_cell '")
+                    .append(cell.optInt("mcc", -1)).append(',')
+                    .append(cell.optInt("mnc", -1)).append(',')
+                    .append(cell.optInt("lac", 0)).append(',')
+                    .append(cell.optInt("cid", 0)).append(',')
+                    .append(if (cell.optBoolean("enabled", false)) '1' else '0')
+                    .append("'; ")
+            }
+            val wifi = root.optJSONObject(KEY_WIFI)
+            if (wifi != null) {
+                // 用 | 分隔防 SSID 含逗号; scans 简化成 "bssid:rssi:freq|..." 塞进单独 prop
+                sb.append("setprop sys.hf_fake_wifi '")
+                    .append(if (wifi.optBoolean("enabled", false)) '1' else '0').append('|')
+                    .append(wifi.optString("ssid", "")).append('|')
+                    .append(wifi.optString("bssid", "")).append('|')
+                    .append(wifi.optString("mac", "")).append('|')
+                    .append(wifi.optInt("rssi", -55)).append('|')
+                    .append(wifi.optInt("linkSpeed", 433)).append('|')
+                    .append(wifi.optInt("frequency", 2437))
+                    .append("'; ")
+                val scans = wifi.optJSONArray("scanResults")
+                if (scans != null && scans.length() > 0) {
+                    val parts = (0 until scans.length()).mapNotNull { i ->
+                        val o = scans.optJSONObject(i)
+                        val bssid = o?.optString("bssid", "") ?: return@mapNotNull null
+                        if (bssid.isBlank()) return@mapNotNull null
+                        "${bssid}:${o.optInt("rssi", -60)}:${o.optInt("frequency", 2437)}"
+                    }
+                    if (parts.isNotEmpty()) {
+                        sb.append("setprop sys.hf_fake_wifi_scans '")
+                            .append(parts.joinToString("|")).append("'; ")
+                    }
+                }
+            }
+            if (sb.isNotEmpty()) {
+                su.execute(sb.toString(), 6)
+            }
+        } catch (t: Throwable) {
+            // prop 同步失败不影响主路径
+        }
     }
 
     private fun readPublic(): JSONObject {

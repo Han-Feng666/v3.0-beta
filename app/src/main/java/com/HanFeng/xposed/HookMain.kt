@@ -44,6 +44,99 @@ class HookMain : IXposedHookLoadPackage {
         // 记录 origin listener → proxy 的映射, removeUpdates 时换回原 listener 才能成功移除
         private val listenerProxies = ConcurrentHashMap<LocationListener, LocationListener>()
 
+        // 假数据跨进程通道: 目标 App 进程(untrusted_app 域)读不了 /data/local/tmp 与 HanFeng 私有 PREF,
+        // 但 prop 任意进程可读。root 设备上 FakeDataStore.writeBoth 会把坐标/基站同步到 sys.hf_fake_loc /
+        // sys.hf_fake_cell, hook 进程优先读 prop, 读不到再 fallback 公开 JSON。
+        private const val PROP_LOC = "sys.hf_fake_loc"
+        private const val PROP_CELL = "sys.hf_fake_cell"
+
+        private fun systemProp(key: String, def: String): String {
+            return try {
+                val cls = XposedHelpers.findClass("android.os.SystemProperties", null)
+                val m = cls.getMethod("get", String::class.java, String::class.java)
+                m.invoke(null, key, def) as? String ?: def
+            } catch (t: Throwable) {
+                def
+            }
+        }
+
+        @JvmStatic
+        internal fun readFakeLocation(): FakeLocationPoint? {
+            try {
+                val raw = systemProp(PROP_LOC, "").trim()
+                if (raw.isNotEmpty()) {
+                    val p = raw.split(',')
+                    if (p.size >= 3 && p[2] == "1") {
+                        val lat = p[0].toDoubleOrNull()
+                        val lng = p[1].toDoubleOrNull()
+                        if (lat != null && lng != null) {
+                            return FakeLocationPoint(
+                                enabled = true, latitude = lat, longitude = lng,
+                                altitude = 0.0, accuracy = 5.0f, speed = 0.0f,
+                                bearing = 0.0f, provider = "gps", timestamp = 0L
+                            )
+                        }
+                    }
+                }
+            } catch (t: Throwable) {}
+            return FakeDataStore.readLocationPublic()
+        }
+
+        @JvmStatic
+        internal fun readFakeCell(): FakeCellInfo? {
+            try {
+                val raw = systemProp(PROP_CELL, "").trim()
+                if (raw.isNotEmpty()) {
+                    val p = raw.split(',')
+                    if (p.size >= 5 && p[4] == "1") {
+                        return FakeCellInfo(
+                            enabled = true,
+                            mcc = p[0].toIntOrNull() ?: -1,
+                            mnc = p[1].toIntOrNull() ?: -1,
+                            lac = p[2].toIntOrNull() ?: 0,
+                            cid = p[3].toIntOrNull() ?: 0
+                        )
+                    }
+                }
+            } catch (t: Throwable) {}
+            return FakeDataStore.readCellInfo()
+        }
+
+        @JvmStatic
+        internal fun readFakeWifi(): FakeWifiInfo? {
+            try {
+                val raw = systemProp("sys.hf_fake_wifi", "").trim()
+                if (raw.isNotEmpty()) {
+                    val p = raw.split('|')
+                    // enabled|ssid|bssid|mac|rssi|linkSpeed|frequency
+                    if (p.size >= 7 && p[0] == "1") {
+                        val scanRaw = systemProp("sys.hf_fake_wifi_scans", "").trim()
+                        val scans = if (scanRaw.isNotEmpty()) {
+                            scanRaw.split('|').mapNotNull { part ->
+                                val sp = part.split(':')
+                                if (sp.size >= 2) FakeScanResult(
+                                    ssid = "HanFeng", bssid = sp[0],
+                                    rssi = sp[1].toIntOrNull() ?: -60,
+                                    frequency = sp.getOrNull(2)?.toIntOrNull() ?: 2437,
+                                    channelWidth = 0, timestamp = 0L,
+                                    capabilities = "[WPA2-PSK-CCMP][ESS]"
+                                ) else null
+                            }
+                        } else emptyList()
+                        return FakeWifiInfo(
+                            enabled = true, ssid = p[1], bssid = p[2], mac = p[3],
+                            rssi = p[4].toIntOrNull() ?: -55,
+                            linkSpeed = p[5].toIntOrNull() ?: 433,
+                            frequency = p[6].toIntOrNull() ?: 2437,
+                            ipAddress = 0, networkId = -1, hiddenSSID = false,
+                            fakeScanResults = scans
+                        )
+                    }
+                }
+            } catch (t: Throwable) {}
+            return FakeDataStore.readWifiInfoPublic()
+        }
+
         /**
          * 构造假 Location (App 进程内直接返回, 不走系统 mock provider 广播)。
          */
@@ -76,7 +169,12 @@ class HookMain : IXposedHookLoadPackage {
         // 3. Hook 基站定位 (TelephonyManager.getCellLocation / getAllCellInfo / getNeighboringCellInfo)
         hookTelephonyCell(lpparam)
 
-        // 4. Hook MockLocation 反检测 (system_server 进程)
+        // 4. Hook 网络类型判断 (ConnectivityManager/NetworkInfo): WiFi+数据同时开时,
+        //    App 用 getActiveNetworkInfo 判断"当前是 WiFi 还是数据", 补 hook 让类型显示为 WiFi,
+        //    与 WiFi 模拟一致(仅改类型, 不影响联网能力判断)
+        hookConnectivity(lpparam)
+
+        // 5. Hook MockLocation 反检测 (system_server 进程)
         if (pkg == "android" || pkg == "com.google.android.gms") {
             hookMockLocationAntiDetect(lpparam)
         }
@@ -94,14 +192,24 @@ class HookMain : IXposedHookLoadPackage {
         val clsWifiManager = XposedHelpers.findClass("android.net.wifi.WifiManager", lpparam.classLoader)
         val clsWifiInfo = XposedHelpers.findClass("android.net.wifi.WifiInfo", lpparam.classLoader)
 
-        // Hook getConnectionInfo: 替换返回的 WifiInfo 里的字段
+        // Hook getConnectionInfo: 替换返回的 WifiInfo 里的字段。
+        // 只连数据流量(真实 WiFi 关闭)时系统返回 null, 必须构造一个假 WifiInfo 实例,
+        // 否则 App 拿到 null 判断"未连接 WiFi", WiFi 模拟失效。
         XposedHelpers.findAndHookMethod(
             clsWifiManager, "getConnectionInfo",
             object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    val fake = FakeDataStore.readWifiInfoPublic() ?: return
+                    val fake = readFakeWifi() ?: return
                     if (!fake.enabled) return
-                    val info = param.result ?: return
+                    var info = param.result
+                    if (info == null) {
+                        info = try {
+                            clsWifiInfo.getDeclaredConstructor().newInstance()
+                        } catch (e: Throwable) {
+                            XposedHelpers.newInstance(clsWifiInfo)
+                        }
+                        param.result = info
+                    }
                     patchWifiInfo(info, fake)
                 }
             }
@@ -113,17 +221,17 @@ class HookMain : IXposedHookLoadPackage {
                 clsWifiManager, "getScanResults",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        val fake = FakeDataStore.readWifiInfoPublic() ?: return
+                        val fake = readFakeWifi() ?: return
                         if (!fake.enabled || fake.fakeScanResults.isEmpty()) return
                         @Suppress("UNCHECKED_CAST")
-                        val orig = param.result as? List<Any> ?: return
+                        val orig = param.result as? List<Any>
                         // 在原 list 前面插入伪造 scan result + 把第一条改为我们的假 AP
                         val clsScanResult = XposedHelpers.findClass("android.net.wifi.ScanResult", lpparam.classLoader)
                         val fakeResults = fake.fakeScanResults.map { fr ->
                             constructScanResult(clsScanResult, fr)
                         }
-                        // 合并: 先假后真 (假排在前面让 APP 当成最近 AP)
-                        param.result = fakeResults + orig
+                        // 只连数据流量(无真实扫描)时 orig 可能为 null/空, 此时仅返回伪造列表
+                        param.result = fakeResults + (orig ?: emptyList())
                     }
                 }
             )
@@ -143,6 +251,44 @@ class HookMain : IXposedHookLoadPackage {
         } catch (e: Throwable) {
             // 老 ROM 没这方法跳过
         }
+
+        // Hook isWifiEnabled: WiFi+数据同时开时, App 判断"WiFi 开关"应与模拟一致。
+        // 位置 SDK 也常先判 isWifiEnabled 再决定是否采集 WiFi 指纹; 返回 false 会跳过指纹采集(读真实),
+        // 返回 true 则走已被 getScanResults hook 覆盖的假指纹路径。动态判断 enabled。
+        try {
+            XposedHelpers.findAndHookMethod(
+                clsWifiManager, "isWifiEnabled",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val fake = readFakeWifi()
+                        if (fake?.enabled == true) param.result = true
+                    }
+                }
+            )
+        } catch (e: Throwable) {}
+
+        // Hook getConfiguredNetworks: 位置 SDK / 网络诊断会枚举已保存 WiFi 列表。
+        // 返回仅含假 AP 的列表, 避免枚举到真实已保存网络。
+        try {
+            XposedHelpers.findAndHookMethod(
+                clsWifiManager, "getConfiguredNetworks",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val fake = readFakeWifi() ?: return
+                        if (!fake.enabled) return
+                        val clsWifiConfiguration = XposedHelpers.findClass("android.net.wifi.WifiConfiguration", lpparam.classLoader)
+                        val cfg = try { clsWifiConfiguration.getDeclaredConstructor().newInstance() } catch (e: Throwable) { null }
+                        if (cfg == null) return
+                        try {
+                            setFieldSilently(cfg, "SSID", "\"${fake.ssid}\"")
+                            setFieldSilently(cfg, "BSSID", fake.bssid)
+                            setFieldSilently(cfg, "networkId", fake.networkId)
+                        } catch (e: Throwable) {}
+                        param.result = listOf(cfg)
+                    }
+                }
+            )
+        } catch (e: Throwable) {}
     }
 
     /**
@@ -249,6 +395,15 @@ class HookMain : IXposedHookLoadPackage {
                     XC_MethodReplacement.returnConstant(false)
                 )
             } catch (e: Throwable) {}
+            // Android 12+ 新增 Location.isMock(): 检测 mock 的现代入口。
+            // 大厂定位 SDK(字节/腾讯/高德/百度)多数直接调 isMock() 而非老版 isFromMockProvider(),
+            // 不 hook 的话它们仍会读到系统在 setTestProviderLocation 时打上的 mIsMock=true。
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsLoc, "isMock",
+                    XC_MethodReplacement.returnConstant(false)
+                )
+            } catch (e: Throwable) {}
 
             val clsLocMan = XposedHelpers.findClass("android.location.LocationManager", lpparam.classLoader)
 
@@ -259,7 +414,7 @@ class HookMain : IXposedHookLoadPackage {
                     String::class.java,
                     object : XC_MethodHook() {
                         override fun afterHookedMethod(param: MethodHookParam) {
-                            val fake = FakeDataStore.readLocationPublic() ?: return
+                            val fake = readFakeLocation() ?: return
                             if (!fake.enabled) return
                             val provider = param.args.getOrNull(0) as? String ?: fake.provider
                             param.result = buildFakeLocation(fake, provider)
@@ -345,7 +500,7 @@ class HookMain : IXposedHookLoadPackage {
                     Executor::class.java, Consumer::class.java,
                     object : XC_MethodReplacement() {
                         override fun replaceHookedMethod(param: MethodHookParam): Any? {
-                            val fake = FakeDataStore.readLocationPublic()
+                            val fake = readFakeLocation()
                             if (fake?.enabled == true) {
                                 val provider = param.args.getOrNull(0) as? String ?: fake.provider
                                 val exec = param.args.getOrNull(2) as? Executor
@@ -369,7 +524,7 @@ class HookMain : IXposedHookLoadPackage {
                     Executor::class.java, Consumer::class.java,
                     object : XC_MethodReplacement() {
                         override fun replaceHookedMethod(param: MethodHookParam): Any? {
-                            val fake = FakeDataStore.readLocationPublic()
+                            val fake = readFakeLocation()
                             if (fake?.enabled == true) {
                                 val exec = param.args.getOrNull(2) as? Executor
                                 @Suppress("UNCHECKED_CAST")
@@ -397,7 +552,7 @@ class HookMain : IXposedHookLoadPackage {
         if (index < 0 || index >= param.args.size) return
         val orig = param.args[index] as? LocationListener ?: return
         if (orig is FakeLocationListenerProxy) return
-        val fake = FakeDataStore.readLocationPublic() ?: return
+        val fake = readFakeLocation() ?: return
         if (!fake.enabled) return
         val proxy = FakeLocationListenerProxy(orig, fake.provider)
         listenerProxies[orig] = proxy
@@ -438,7 +593,7 @@ class HookMain : IXposedHookLoadPackage {
     ) : LocationListener {
 
         override fun onLocationChanged(location: Location) {
-            val fake = FakeDataStore.readLocationPublic()
+            val fake = readFakeLocation()
             if (fake?.enabled == true) {
                 original.onLocationChanged(HookMain.buildFakeLocation(fake, provider))
             } else {
@@ -482,7 +637,7 @@ class HookMain : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun afterHookedMethod(param: MethodHookParam) {
                             val cell = param.result ?: return
-                            val fake = FakeDataStore.readCellInfo() ?: return
+                            val fake = readFakeCell() ?: return
                             if (!fake.enabled) return
                             try {
                                 val clsGsm = XposedHelpers.findClass("android.telephony.gsm.GsmCellLocation", lpparam.classLoader)
@@ -514,7 +669,7 @@ class HookMain : IXposedHookLoadPackage {
                         override fun afterHookedMethod(param: MethodHookParam) {
                             @Suppress("UNCHECKED_CAST")
                             val list = param.result as? List<*> ?: return
-                            val fake = FakeDataStore.readCellInfo() ?: return
+                            val fake = readFakeCell() ?: return
                             if (!fake.enabled) return
                             for (ci in list) {
                                 val cell = ci ?: continue
@@ -533,7 +688,7 @@ class HookMain : IXposedHookLoadPackage {
                         override fun afterHookedMethod(param: MethodHookParam) {
                             @Suppress("UNCHECKED_CAST")
                             val list = param.result as? List<*> ?: return
-                            val fake = FakeDataStore.readCellInfo() ?: return
+                            val fake = readFakeCell() ?: return
                             if (!fake.enabled) return
                             for (ci in list) {
                                 val cell = ci ?: continue
@@ -546,8 +701,175 @@ class HookMain : IXposedHookLoadPackage {
                     }
                 )
             } catch (e: Throwable) {}
+
+            // 运营商信息: 位置 SDK 会把 MCC/MNC 与基站一并上报查库。返回与假基站一致的假运营商。
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsTm, "getNetworkOperator",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeCell() ?: return
+                            if (!fake.enabled || fake.mcc < 0 || fake.mnc < 0) return
+                            param.result = "${fake.mcc}${String.format("%02d", fake.mnc)}"
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsTm, "getSimOperator",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeCell() ?: return
+                            if (!fake.enabled || fake.mcc < 0 || fake.mnc < 0) return
+                            param.result = "${fake.mcc}${String.format("%02d", fake.mnc)}"
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsTm, "getNetworkOperatorName",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeCell() ?: return
+                            if (!fake.enabled || fake.mcc < 0) return
+                            param.result = operatorName(fake.mcc, fake.mnc)
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsTm, "getSimOperatorName",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeCell() ?: return
+                            if (!fake.enabled || fake.mcc < 0) return
+                            param.result = operatorName(fake.mcc, fake.mnc)
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
         } catch (e: Throwable) {
             XposedBridge.log("[HF-Hook] hookTelephonyCell skip: ${e.message}")
+        }
+    }
+
+    private fun operatorName(mcc: Int, mnc: Int): String {
+        return when {
+            mcc == 460 && mnc == 0 -> "中国移动"
+            mcc == 460 && (mnc == 1 || mnc == 11) -> "中国联通"
+            mcc == 460 && (mnc == 3 || mnc == 5) -> "中国电信"
+            mcc == 460 -> "中国移动"
+            else -> "移动网络"
+        }
+    }
+
+    /**
+     * Hook 网络类型判断: WiFi+数据同时开时, App 通过 NetworkInfo/ConnectivityManager 判断
+     * "当前是 WiFi 还是移动数据"。只改类型返回值(WiFi), 不影响 isConnected/能力位,
+     * 避免破坏 App 的联网可用性判断。仅在 WiFi 模拟 enabled 时生效(动态判断)。
+     */
+    private fun hookConnectivity(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val clsNetworkInfo = XposedHelpers.findClass("android.net.NetworkInfo", lpparam.classLoader)
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsNetworkInfo, "getType",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeWifi()
+                            if (fake?.enabled == true) param.result = android.net.ConnectivityManager.TYPE_WIFI
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsNetworkInfo, "getTypeName",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeWifi()
+                            if (fake?.enabled == true) param.result = "WIFI"
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            // WiFi 无子类型: 数据流量才有 getSubtype > 0 (LTE/5G 等)。
+            // 只开数据流量时若不覆盖, App 会因"类型=WIFI 但子类型=LTE"自相矛盾。
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsNetworkInfo, "getSubtype",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeWifi()
+                            if (fake?.enabled == true) param.result = 0
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+            try {
+                XposedHelpers.findAndHookMethod(
+                    clsNetworkInfo, "getSubtypeName",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeWifi()
+                            if (fake?.enabled == true) param.result = ""
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+
+            // NetworkCapabilities.hasTransport: 新 API 判断"传输类型"的主要入口。
+            // 只开数据流量时 hasTransport(TRANSPORT_CELLULAR)=true / (TRANSPORT_WIFI)=false,
+            // 必须反转才能让 App 以为走 WiFi。
+            try {
+                val clsNc = XposedHelpers.findClass("android.net.NetworkCapabilities", lpparam.classLoader)
+                XposedHelpers.findAndHookMethod(
+                    clsNc, "hasTransport",
+                    Int::class.javaPrimitiveType,
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeWifi()
+                            if (fake?.enabled != true) return
+                            val transport = (param.args[0] as? Int) ?: return
+                            if (transport == android.net.NetworkCapabilities.TRANSPORT_CELLULAR) param.result = false
+                            else if (transport == android.net.NetworkCapabilities.TRANSPORT_WIFI) param.result = true
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+
+            // isActiveNetworkMetered: 数据流量是计费(metered=true), WiFi 通常非计费。
+            try {
+                val clsCm = XposedHelpers.findClass("android.net.ConnectivityManager", lpparam.classLoader)
+                XposedHelpers.findAndHookMethod(
+                    clsCm, "isActiveNetworkMetered",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeWifi()
+                            if (fake?.enabled == true) param.result = false
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+
+            // 蜂窝数据网络类型: 伪装 WiFi 时数据网络应为未知, 否则 App 看到"已连接 5G/LTE"。
+            try {
+                val clsTm = XposedHelpers.findClass("android.telephony.TelephonyManager", lpparam.classLoader)
+                XposedHelpers.findAndHookMethod(
+                    clsTm, "getDataNetworkType",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val fake = readFakeWifi()
+                            if (fake?.enabled == true) param.result = android.telephony.TelephonyManager.NETWORK_TYPE_UNKNOWN
+                        }
+                    }
+                )
+            } catch (e: Throwable) {}
+        } catch (e: Throwable) {
+            XposedBridge.log("[HF-Hook] hookConnectivity skip: ${e.message}")
         }
     }
 
@@ -592,6 +914,11 @@ class HookMain : IXposedHookLoadPackage {
             // Location.isFromMockProvider()
             XposedHelpers.findAndHookMethod(
                 clsLoc, "isFromMockProvider",
+                XC_MethodReplacement.returnConstant(false)
+            )
+            // Android 12+ isMock(): 与 App 进程内一致, 掩盖系统在 mock 注入时打的 mIsMock=true
+            XposedHelpers.findAndHookMethod(
+                clsLoc, "isMock",
                 XC_MethodReplacement.returnConstant(false)
             )
         } catch (e: Throwable) {

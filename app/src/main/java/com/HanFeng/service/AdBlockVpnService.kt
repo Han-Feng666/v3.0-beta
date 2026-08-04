@@ -10222,7 +10222,11 @@ class AdBlockVpnService : VpnService() {
         // 其余应用绕过 VPN 直连, 不会因全量 MITM 解密失败而断网。
         // 仅当用户显式选择「全部应用」抓包时才启用全局 (MITM_GLOBAL) 路由。
         val captureSnapshot = com.HanFeng.capture.CaptureController.current.value
-        val captureModeAllApps = captureSnapshot.active && captureSnapshot.mode == com.HanFeng.capture.CaptureController.Mode.ALL_APPS
+        // 全量抓包语义: 显式「全部应用」或「按应用但未选目标」(targetApps 空 = 全采集占位)。
+        // 后者若按 MITM_APP 处理 target 恒空 → 路由 NONE 且 tap 全跳过, 必然零条目。
+        val captureModeAllApps = captureSnapshot.active &&
+            (captureSnapshot.mode == com.HanFeng.capture.CaptureController.Mode.ALL_APPS ||
+                (captureSnapshot.mode == com.HanFeng.capture.CaptureController.Mode.BY_APP && captureSnapshot.targetApps.isEmpty()))
         val captureTargetApps = if (captureSnapshot.active && captureSnapshot.mode == com.HanFeng.capture.CaptureController.Mode.BY_APP) {
             captureSnapshot.targetApps
         } else {

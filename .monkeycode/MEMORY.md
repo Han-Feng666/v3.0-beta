@@ -1029,3 +1029,24 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 冷启动白屏十秒先查三个主线程阻塞点: (1) `BaseActivity.applyHideBackgroundPolicyIfNeeded` 即使 hideBackground 默认 false 也会执行 `am.appTasks.forEach{setExcludeFromRecents}` 跨进程 IPC 遍历所有 task, 单次数百 ms~数秒, 是最大嫌疑; 修复: `!enabled && lastAppliedHideBackground==null` 直接 return, 未启用隐藏后台不做 IPC。(2) `HomeFragment.onViewCreated` 首次 `updateAllStatus()` 主线程同步 SP read + Gson 反序列化, 改为 `view.post{}` 延后到首帧后。(3) `checkAndPromptBatteryOptimization` 的 `isIgnoringBatteryOptimizations` 是 binder IPC, 改丢 `Dispatchers.Default` 协程, 弹窗回主线程。
   - `WhitelistRepository.getLocalProxyCoexistConfig` 无缓存、每次 Gson 反序列化, 冷启动被 `NetworkKernel.snapshot`→`CoexistExecutionEngine.isAvailable` 反复调用, 需加 `@Volatile cachedLocalProxyCoexistConfig` 内存缓存。
   - 首次打开闪退根因: `MainActivity` 曾设 `ViewPager2.offscreenPageLimit=0`, 非法值(仅允许 -1 或 >0)抛 IllegalArgumentException 必崩; 已改回 1。
+
+[Shizuku 授权不生效终极根因 + 抓包 BY_APP 空 target 定论]
+- Date: 2026-08-03
+- Context: 用户反馈"给需要 Shizuku 权限的 APP 打开授权开关，进入该 APP 仍显示未获得 Shizuku 权限；抓包装好系统证书仍一个包都抓不到"
+- Category: 排错调试
+- Instructions:
+  - [Shizuku 授权即时+持久双失效根因] fork server `ShizukuService.updateFlagsForUid`(:432) 授权分支里 `PermissionManagerApis.grantRuntimePermission(packageName, permName, userId)` 无 try-catch。Shizuku 客户端权限 `com.HanFeng.permission.shizuku.API_V23`(未定义保护级别) 与 `moe.shizuku.manager.permission.API_V23`(signature) 都不是 changeable runtime 权限，`grantRuntimePermission` 必抛 SecurityException → 中断 updateFlagsForUid → 后面的 `configManager.update`(:493) 不执行 → 授权内存表未写入：已 attach 客户端虽收到 push 但新进程/重启 attach 读 configManager 恒 DENIED，表现为"授权不生效"。官方 Shizuku 源码此处是有 try-catch 的，fork 改代码时丢了。修复(2026-08-03): grant/revokeRuntimePermission 全部包 `catch(Throwable)` 记 LOGGER.w，configManager.update 保证执行（本 fork 授权源是 configManager，运行时权限仅用于官方列表联动，失败不影响授权）。
+  - [授权持久化路径] fork 内置 server 以 root 运行(BuiltInShizukuStarter 经 su 拉起)，`ShizukuConfigManager.FILE` 原写 `/data/user_de/0/com.android.shell/shizuku.json`(官方 shell 用户场景)，root 下该目录/文件受 SELinux 与存在性约束，AtomicFile 写盘可能静默失败 → 授权重启后丢失。修复(2026-08-03): 改 `/data/local/tmp/hanfeng_shizuku/shizuku.json`(root/shell 均可写，librish 落盘已用同目录验证) + static 块 mkdirs 父目录。另注意 server 每次启动构造会按运行时权限重建 config(ShizukuConfigManager 构造函数 updateLocked 全量重算 + changed 必写盘)，因此运行时权限 grant 失败时持久化全依赖 config 文件本身可写。
+   - [抓包 BY_APP 空 target 双杀] `CaptureRepository` 默认抓包模式 BY_APP，而 `CaptureFragment.currentTargetApps()` 恒返回 emptySet()(UI 未提供目标应用选择)。BY_APP + targetApps 空 → ① `CaptureController.onDecodedRequest`:317 / tapSessionEnded:505 过滤全跳过(Inactive) ② `AdBlockVpnService.resolveFullCaptureRouteMode`:10226 captureTargetApps 空 → mitmAppTargets 空 → `mitmAppFullCaptureEnabled=false` 且 captureModeAllApps=false → resolve 返回 NONE 无路由。双杀必零条目。修复(2026-08-03): CaptureController 两处过滤加 `s.targetApps.isNotEmpty()` 前置(空 target 视为全采集占位)；resolveFullCaptureRouteMode 里 `captureModeAllApps = active && (mode==ALL_APPS || (mode==BY_APP && targetApps.isEmpty()))`，BY_APP 空 target 走 MITM_GLOBAL 全量路由。
+
+[定位模拟"所有 App 伪装"三支柱 + LSPosed 全局作用域 root 方案]
+- Date: 2026-08-03
+- Context: 用户要求位置模拟对字节/腾讯/高德/百度等所有 App 生效并伪装过去(有 root)，Agent 探索 LSPosed 作用域自动化后定型
+- Category: 排错调试
+- Instructions:
+  - [伪装三支柱] ① GPS/network mock provider 注入(MockLocationService)对**所有 App 全局生效**(走 LocationManager 的 App 都拿假坐标，不依赖 LSPosed 勾选)；② WiFi/基站指纹 hook(getScanResults/getCellLocation/getAllCellInfo)只对 LSPosed 勾选 App 生效，服务端按假指纹匹配假位置；③ IP 定位(服务端按出口 IP 反查城市)无法用 hook 伪装，只能靠 VPN/代理换出口，是大厂 SDK 的固有残留——多数场景(打卡/附近/地图)GPS+指纹融合已覆盖。
+  - [Android 12+ 反检测关键补充] `Location.isFromMockProvider()` 老 API 已 hook，但现代大厂 SDK 直接调 `Location.isMock()`(读系统在 setTestProviderLocation 时打的 mIsMock)，必须额外 hook `isMock()`→false，App 进程内与 system_server/GMS(hookMockLocationAntiDetect) 两处都加。
+  - [LSPosed 作用域存储] LSPosed(Zygisk 版) 模块作用域存在 SQLite `/data/adb/lspd/config/modules_config.db`：`modules(mid, module_pkg_name, apk_path, enabled)` + `scope(mid, app_pkg_name, user_id)`，`app_pkg_name='system'` 表示 system_server 作用域(master 版，老版用 'android')。`shouldSkipSystemServer`/`getModulesForSystemServer` 实时查 db 不走缓存；**App 进程作用域走 lspd daemon 内存缓存 cachedScope**，改 db 后不自动刷新。
+  - [全局作用域 root 方案] 无对外 binder 改 scope(ILSPManagerService 不注册全局 service)，只能 root 直改 db：备份→用 `su -c "CLASSPATH=<base.apk> app_process /system/bin com.HanFeng.xposed.RootDbTool <pkg> <db> <apkPath>"` 以 Android SQLiteDatabase 插 scope(所有 packages.list 包 + system + android)，模块未启用时先补插 modules 行(enabled=1)。改完必须 `setprop sys.powerctl reboot,soft`(framework 软重启，重启 lspd daemon 使其重读 db)，`ctl.restart zygote` 不杀 daemon 无效。daemon 由 magisk service.sh 一次性启动无 respawn，**绝不可 pkill lspd**(不会自启)。
+  - [BaseActivity/UI 注意] SettingsActivity 位置模拟对话框内新增 `btnGlobal` 按钮(全局生效+软重启)；编辑插入时 `dialog.setOnShowListener {` 在文件多处出现，edit 锚点必须带上上下文唯一化。
+

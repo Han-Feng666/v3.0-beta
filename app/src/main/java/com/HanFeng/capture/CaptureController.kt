@@ -313,8 +313,10 @@ object CaptureController {
     ): RequestOutcome {
         val s = _current.value
         if (!s.active) return RequestOutcome.Inactive
-        // BY_APP 模式: appName 与 packageName 任一命中即采样(design R2.2, 满足 TlsMitmSession 仅持 appName 的现实)。
-        if (s.mode == Mode.BY_APP && !s.targetApps.contains(appName) && !s.targetApps.contains(packageName)) return RequestOutcome.Inactive
+        // BY_APP 模式: targetApps 非空时 appName 与 packageName 任一命中即采样(design R2.2,
+        // 满足 TlsMitmSession 仅持 appName 的现实)。targetApps 为空视为全采集占位(初版 UI 未提供
+        // 目标应用选择, 此时按全量抓包处理, 与 CaptureFragment.currentTargetApps 注释语义一致)。
+        if (s.mode == Mode.BY_APP && s.targetApps.isNotEmpty() && !s.targetApps.contains(appName) && !s.targetApps.contains(packageName)) return RequestOutcome.Inactive
 
         val txnId = ring.nextTxnId()
         val previewCap = if (s.mode == Mode.ALL_APPS) s.bodyPreviewBytesAll else s.bodyPreviewBytesByApp
@@ -502,7 +504,7 @@ object CaptureController {
     ) {
         val s = _current.value
         if (!s.active) return
-        if (s.mode == Mode.BY_APP && !s.targetApps.contains(appName) && !s.targetApps.contains(packageName)) return
+        if (s.mode == Mode.BY_APP && s.targetApps.isNotEmpty() && !s.targetApps.contains(appName) && !s.targetApps.contains(packageName)) return
         val txnId = ring.nextTxnId()
         val entry = CaptureEntry(
             txnId = txnId,

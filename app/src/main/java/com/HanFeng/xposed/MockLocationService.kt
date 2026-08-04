@@ -51,7 +51,7 @@ class MockLocationService : Service() {
         // 个别 ROM 不允许 addTestProvider("network"), 那一路会静默失败, gps 仍然生效。
         val PROVIDERS = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
 
-        private const val INTERVAL_MS = 1000L    // 每秒注入一次
+        private const val INTERVAL_MS = 500L    // 每 500ms 注入一次, 提高 App 感知连续性(原 1000ms 在高频请求下像"卡顿")
     }
 
     private var running = false
@@ -63,6 +63,15 @@ class MockLocationService : Service() {
         when (intent?.action) {
             ACTION_START -> startMockingForeground()
             ACTION_STOP -> { stopMocking(); stopSelf() }
+            null -> {
+                // START_STICKY: 系统杀进程后用 null intent 重启本服务。
+                // 必须在此恢复注入, 否则服务空转、模拟悄悄停掉 —— 表现为"位置模拟不是持久的"。
+                val fake = FakeDataStore.readLocationPrivate(this)
+                if (fake?.enabled == true) {
+                    android.util.Log.i(TAG, "restart after kill: resuming mock injection")
+                    startMockingForeground()
+                }
+            }
         }
         return START_STICKY
     }
@@ -132,7 +141,18 @@ class MockLocationService : Service() {
                 }
                 android.util.Log.i(TAG, "addTestProvider succeeded: $activeProviders")
 
-                var injectFailStreak = 0
+                // network provider 未 mock 成功(部分 ROM 禁止)时, 走网络定位(基站/WiFi)的 App
+                // 仍会拿到真实位置, 与 mock gps 混合后表现为"时真时假"。明示而非静默。
+                if (activeProviders.contains(LocationManager.GPS_PROVIDER) &&
+                    !activeProviders.contains(LocationManager.NETWORK_PROVIDER)
+                ) {
+                    notifyWarn(
+                        "GPS 模拟已生效, 但网络定位(network)未模拟成功。\n" +
+                            "依赖基站/WiFi 网络定位的 App 仍会读到真实位置(可与 GPS 模拟值交替出现)。"
+                    )
+                }
+
+                var lastWarnMs = 0L
                 while (running) {
                     // 读私有 PREF: 本服务与 UI 同进程, 免 root 时 /data/local/tmp 不可读,
                     // 用 readLocationPublic() 会一直拿到 null → 永不注入 (见 FakeDataStore 注释).
@@ -146,18 +166,15 @@ class MockLocationService : Service() {
                         val injected = runCatching { lm.setTestProviderLocation(provider, loc) }.isSuccess
                         if (injected) okInRound++
                     }
-                    // 连续多轮全部注入失败 → 说明 mock 权限被系统收回(如 appop 被重置), 及时告知用户
+                    // 偶发失败(系统调度/短暂冻结)不停止: 只记日志并继续重试, 避免 5 秒波动就把
+                    // 服务整个 stopSelf 掉, 造成"模拟位置断断续续"。mock 权限被真正收回时
+                    // setTestProviderLocation 会抛 SecurityException, 由外层 catch 统一处理。
                     if (okInRound == 0) {
-                        injectFailStreak++
-                        android.util.Log.w(TAG, "setTestProviderLocation failed streak=$injectFailStreak")
-                        if (injectFailStreak >= 5) {
-                            running = false
-                            notifyError("模拟位置注入连续失败, 请确认开发者选项已选 HanFeng 且未改变")
-                            stopSelf()
-                            return@Thread
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastWarnMs > 10_000L) {
+                            lastWarnMs = now
+                            android.util.Log.w(TAG, "setTestProviderLocation 连续失败, 持续重试中")
                         }
-                    } else {
-                        injectFailStreak = 0
                     }
                     Thread.sleep(INTERVAL_MS)
                 }
@@ -167,6 +184,9 @@ class MockLocationService : Service() {
                     try { lm.clearTestProviderLocation(provider) } catch (e: Throwable) {}
                     try { lm.removeTestProvider(provider) } catch (e: Throwable) {}
                 }
+            } catch (e: InterruptedException) {
+                // 正常停止: stopMocking 主动 interrupt 线程所致, 静默忽略, 不发错误通知
+                running = false
             } catch (e: SecurityException) {
                 // 开发者选项未把本 APP 设为模拟位置应用 (或 ROM 收紧 mock appop)
                 running = false
@@ -366,6 +386,21 @@ class MockLocationService : Service() {
                 .setContentTitle("定位模拟失败")
                 .setContentText(msg)
                 .setSmallIcon(android.R.drawable.stat_notify_error)
+                .setAutoCancel(true).build()
+        )
+    }
+
+    private fun notifyWarn(msg: String) {
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm.createNotificationChannel(NotificationChannel("hf_warn", "HanFeng 提示", NotificationManager.IMPORTANCE_DEFAULT))
+        }
+        nm.notify(
+            9204,
+            NotificationCompat.Builder(this, "hf_warn")
+                .setContentTitle("定位模拟部分生效")
+                .setContentText(msg)
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setAutoCancel(true).build()
         )
     }

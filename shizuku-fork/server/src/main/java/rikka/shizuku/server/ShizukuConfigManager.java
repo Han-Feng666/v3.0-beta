@@ -39,8 +39,20 @@ public class ShizukuConfigManager extends ConfigManager {
 
     private static final long WRITE_DELAY = 10 * 1000;
 
-    private static final File FILE = new File("/data/user_de/0/com.android.shell/shizuku.json");
+    // 授权持久化路径: 官方 Shizuku server 以 shell 用户运行, 用 /data/user_de/0/com.android.shell/。
+    // 本 fork 内置 server 以 root 运行 (BuiltInShizukuStarter 经 su 拉起), shell 用户数据目录
+    // 不一定存在且受 SELinux shell_data_file 约束, AtomicFile 写盘会静默失败 → 授权重启后丢失,
+    // 表现为"授权不生效"。改为 root/shell 均可写的 /data/local/tmp (librish 落盘已用同目录验证可写)。
+    private static final File FILE = new File("/data/local/tmp/hanfeng_shizuku/shizuku.json");
     private static final AtomicFile ATOMIC_FILE = new AtomicFile(FILE);
+
+    static {
+        File parent = FILE.getParentFile();
+        if (parent != null && !parent.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            parent.mkdirs();
+        }
+    }
 
     public static ShizukuConfig load() {
         FileInputStream stream;

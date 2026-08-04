@@ -1720,12 +1720,20 @@ btnRootHide.setOnClickListener {
         btnRow.addView(btnStop)
         container.addView(btnRow)
 
+        val btnGlobal = Button(this).apply {
+            text = "全局生效 (root · 所有 App 都伪装)"
+            textSize = 13f
+            setPadding(0, 8.dp, 0, 0)
+        }
+        container.addView(btnGlobal)
+
         val tvHint = TextView(this).apply {
-            text = "免 root 走 MockLocationProvider:\n" +
+            text = "免 root 走 MockLocationProvider(对所有 App 生效):\n" +
                 "1) 启动前请到 设置 → 开发者选项 → 选择模拟位置信息应用 → 选 HanFeng\n" +
                 "2) 启动后保持本 APP 在前台或被系统允许后台 (服务为前台通知)\n" +
-                "3) 反检测: 卫星数 8-12 / HDOP 0.8-1.5 / 速度微扰 / isFromMockProvider=false\n" +
-                "4) 想让 WifiManager.getConnectionInfo() 拿到假 SSID/BSSID/MAC, 在 WiFi 模拟里设"
+                "3) 反检测: 卫星数 8-12 / HDOP 0.8-1.5 / 速度微扰 / isMock=false\n" +
+                "4) 想让 WifiManager.getConnectionInfo() 拿到假 SSID/BSSID/MAC, 在 WiFi 模拟里设\n" +
+                "5) 想让 抖音/微信/高德/百度 等全部 App 的 WiFi/基站指纹+反检测都伪装: 点上方「全局生效」"
             setTextColor(getColor(com.HanFeng.R.color.hf_text_secondary))
             textSize = 11f
             setPadding(0, 8.dp, 0, 0)
@@ -1842,6 +1850,52 @@ btnRootHide.setOnClickListener {
             showShortToast("已停止定位模拟")
             refreshMockStatus(tvCurrent, dialog)
         }
+
+        btnGlobal.setOnClickListener {
+            // root 一键把 LSPosed 作用域扩到所有 App + system_server:
+            // 字节/腾讯/高德/百度等所有 App 都会加载 HanFeng 模块, 无需逐个在 LSPosed Manager 勾选。
+            // 改库后需重启手机才能让 LSPosed daemon 重读作用域。为不让用户误以为自动重启是 App 故障,
+            // 这里只写库, 不自动重启, 由用户自行重启手机生效。
+            StableDialog.builder(this)
+                .setTitle("全局生效")
+                .setMessage(
+                    "点击后将以 root 修改 LSPosed 作用域, 让【所有已安装 App】都加载 HanFeng 模块, " +
+                        "包括抖音/微信/高德/百度等 (WiFi/基站指纹 + 网络类型 + 反检测全部伪装)。\n\n" +
+                        "写入后【请手动重启手机】使全部 App 生效 (重启是让系统重新读取作用域)。继续？"
+                )
+                .setPositiveButton("写入作用域") { _, _ ->
+                    lifecycleScope.launch {
+                        showShortToast("正在写入全局作用域...")
+                        val res = com.HanFeng.xposed.RootLsposedScope.applyGlobalScope(this@SettingsActivity)
+                        when (res) {
+                            is com.HanFeng.xposed.RootLsposedScope.Result.Success -> {
+                                StableDialog.builder(this@SettingsActivity)
+                                    .setTitle("写入成功")
+                                    .setMessage(
+                                        "已为 ${res.added} 个应用写入 LSPosed 作用域。\n\n" +
+                                            "请手动重启手机, 重启后抖音/微信/高德/百度等所有 App 的 " +
+                                            "WiFi/基站指纹、网络类型与反检测都会伪装。"
+                                    )
+                                    .setPositiveButton("知道了", null)
+                                    .create()
+                                    .show()
+                            }
+                            is com.HanFeng.xposed.RootLsposedScope.Result.Failure -> {
+                                StableDialog.builder(this@SettingsActivity)
+                                    .setTitle("全局生效失败")
+                                    .setMessage(res.reason)
+                                    .setPositiveButton("知道了", null)
+                                    .create()
+                                    .show()
+                            }
+                        }
+                    }
+                }
+                .setNegativeButton("取消", null)
+                .create()
+                .show()
+        }
+
         dialog.setOnShowListener {
             dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 try {
@@ -3409,7 +3463,7 @@ btnRootHide.setOnClickListener {
                     .setNeutralButton("全部 Activity", null)
                     .setNegativeButton("更多", null)
                     .create()
-                dialog.setOnShowListener {
+        dialog.setOnShowListener {
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                         val selected = selectableComponents.filterIndexed { index, _ -> checked[index] }
                         if (selected.isEmpty()) {
