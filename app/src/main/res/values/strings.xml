@@ -1,4 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">寒枫</string>
+    <string name="capture_breakpoint_rules_title">断点规则</string>
+    <string name="capture_breakpoint_rules_hint">输入正则或关键词，添加断点规则</string>
+    <string name="capture_breakpoint_add">添加</string>
+    <string name="capture_breakpoint_rules_empty">暂无断点规则，添加一条规则以进行拦截</string>
+    <string name="capture_action_pass_through">放行</string>
+    <string name="capture_action_replace">替换</string>
+    <string name="capture_action_drop">丢弃</string>
+    <string name="capture_settings_body_preview_section">正文预览</string>
+    <string name="capture_settings_body_preview_all_apps">预览所有应用</string>
+    <string name="capture_settings_body_preview_by_app">按应用预览</string>
+    <string name="capture_settings_replay_section">回放设置</string>
+    <string name="capture_settings_batch_interval">批量回放间隔</string>
+    <string name="capture_settings_confirm_risky_replay">确认风险回放</string>
+    <string name="capture_settings_ui_section">界面设置</string>
+    <string name="capture_settings_auto_scroll">自动滚动</string>
+    <string name="capture_settings_notify_active">活动通知</string>
+    <string name="capture_settings_redact_export">导出时脱敏</string>
 </resources>

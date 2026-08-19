@@ -12,4 +12,7 @@
     <color name="hf_allowed_green">#2E7D32</color>
     <color name="hf_background_start">#FFE6EEF9</color>
     <color name="hf_background_end">#FFD8EDE8</color>
+    <color name="hf_button_primary">#FF1565C0</color>
+    <color name="hf_brand_primary">#FF1565C0</color>
+    <color name="hf_brand_primary_dark">#FF0D47A1</color>
 </resources>
